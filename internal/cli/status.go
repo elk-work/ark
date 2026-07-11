@@ -62,7 +62,7 @@ func newStatusCmd(g *globals) *cobra.Command {
 				return err
 			}
 
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(rep, func() {
 				p.Line("repository  %s", rep.Root)
 				p.Line("id          %s", rep.RepositoryID)

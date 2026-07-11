@@ -25,7 +25,7 @@ func newSearchCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			if p.JSON {
 				if results == nil {
 					results = []store.SearchResult{}

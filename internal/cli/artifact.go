@@ -79,7 +79,7 @@ func newArtifactAddCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(art, func() {
 				p.Line("Stored artifact %s: %s (%d bytes, sha256 %s)", art.ID, art.Name,
 					art.SizeBytes, art.SHA256[:12])
@@ -112,7 +112,7 @@ func newArtifactListCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			if p.JSON {
 				if arts == nil {
 					arts = []*store.Artifact{}
@@ -160,7 +160,7 @@ func newArtifactGetCmd(g *globals) *cobra.Command {
 				return err
 			}
 			abs, _ := filepath.Abs(dest)
-			p := g.printer()
+			p := g.printer(cmd)
 			type got struct {
 				*store.Artifact
 				Path string `json:"path"`

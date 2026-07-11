@@ -25,7 +25,7 @@ func newInitCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(res, func() {
 				p.Line("Initialized Ark in %s/.ark", res.Root)
 				p.Line("  repository  %s (%s)", res.Name, res.RepositoryID)

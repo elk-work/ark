@@ -147,9 +147,11 @@ func (r *Repo) IsAncestor(ctx context.Context, a, b string) bool {
 	return res != nil && res.ExitCode == 0
 }
 
-// IsClean reports whether the work tree has no uncommitted changes.
+// IsClean reports whether the work tree has no uncommitted changes to
+// tracked files. Untracked files do not block a merge; Git itself refuses
+// if one would be overwritten.
 func (r *Repo) IsClean(ctx context.Context) (bool, error) {
-	out, err := r.out(ctx, "status", "--porcelain")
+	out, err := r.out(ctx, "status", "--porcelain", "--untracked-files=no")
 	if err != nil {
 		return false, err
 	}

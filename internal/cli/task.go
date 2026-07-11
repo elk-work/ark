@@ -45,7 +45,7 @@ func newTaskCreateCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(t, func() {
 				p.Line("Created task #%d: %s (%s)", t.Number, t.Title, t.ID)
 			})
@@ -73,7 +73,7 @@ func newTaskListCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			if p.JSON {
 				if tasks == nil {
 					tasks = []*store.Task{}
@@ -135,7 +135,7 @@ func newTaskViewCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			if d.Comments == nil {
 				d.Comments = []*store.Comment{}
 			}
@@ -211,7 +211,7 @@ func newTaskEditCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(t, func() {
 				p.Line("Updated task #%d: %s [%s]", t.Number, t.Title, t.Status)
 			})
@@ -238,7 +238,7 @@ func newTaskCloseCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(t, func() {
 				p.Line("Closed task #%d: %s", t.Number, t.Title)
 			})
@@ -269,7 +269,7 @@ func newTaskCommentCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(c, func() {
 				p.Line("Commented on task #%d (%s)", t.Number, c.ID)
 			})

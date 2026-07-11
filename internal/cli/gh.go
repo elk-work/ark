@@ -47,7 +47,7 @@ func newGHIssueCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(t, func() {
 				// gh prints the issue URL; Ark prints the task reference.
 				p.Line("#%d", t.Number)
@@ -87,7 +87,7 @@ func newGHIssueCmd(g *globals) *cobra.Command {
 				}
 				tasks = open
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			if p.JSON {
 				if tasks == nil {
 					tasks = []*store.Task{}
@@ -110,6 +110,7 @@ func newGHIssueCmd(g *globals) *cobra.Command {
 			// Same composite view as `ark task view`.
 			taskView := newTaskViewCmd(g)
 			taskView.SetContext(cmd.Context())
+			taskView.SetOut(cmd.OutOrStdout())
 			return taskView.RunE(taskView, args)
 		},
 	}
@@ -136,7 +137,7 @@ func newGHIssueCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(c, func() {
 				p.Line("Commented on #%d", t.Number)
 			})
@@ -158,7 +159,7 @@ func newGHIssueCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(t, func() {
 				p.Line("Closed #%d", t.Number)
 			})
@@ -180,6 +181,7 @@ func newGHPRCmd(g *globals) *cobra.Command {
 			// Delegate to `ark pr create` semantics with gh flag names.
 			inner := newPRCreateCmd(g)
 			inner.SetContext(cmd.Context())
+			inner.SetOut(cmd.OutOrStdout())
 			title, _ := cmd.Flags().GetString("title")
 			inner.Flags().Set("title", title)
 			if b, _ := cmd.Flags().GetString("body"); b != "" {
@@ -218,7 +220,7 @@ func newGHPRCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			if p.JSON {
 				if prs == nil {
 					prs = []*store.PullRequest{}
@@ -240,6 +242,7 @@ func newGHPRCmd(g *globals) *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			inner := newPRViewCmd(g)
 			inner.SetContext(cmd.Context())
+			inner.SetOut(cmd.OutOrStdout())
 			return inner.RunE(inner, args)
 		},
 	}
@@ -266,7 +269,7 @@ func newGHPRCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(c, func() {
 				p.Line("Commented on #%d", x.Number)
 			})
@@ -317,7 +320,7 @@ func newGHPRCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(r, func() {
 				p.Line("Reviewed #%d (%s)", x.Number, r.State)
 			})
@@ -347,7 +350,7 @@ func newGHPRCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(res, func() {
 				p.Line("Merged #%d (%s)", res.Number, short(res.MergeCommitSHA))
 			})
@@ -370,7 +373,7 @@ func newGHPRCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(x, func() {
 				p.Line("Closed #%d", x.Number)
 			})

@@ -77,7 +77,7 @@ func newRunStartCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(r, func() {
 				p.Line("Started run %s (%s on %s)", r.ID, r.AgentName, firstNonEmpty(r.BranchName, "detached HEAD"))
 			})
@@ -125,7 +125,7 @@ func newRunFinishCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(r, func() {
 				p.Line("Finished run %s: %s", r.ID, r.Status)
 			})
@@ -163,7 +163,7 @@ func newRunListCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			if p.JSON {
 				if runs == nil {
 					runs = []*store.Run{}
@@ -202,7 +202,7 @@ func newRunViewCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(r, func() {
 				p.Line("run      %s", r.ID)
 				p.Line("agent    %s %s", r.AgentName, r.AgentVersion)

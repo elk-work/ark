@@ -22,8 +22,8 @@ type globals struct {
 	debug   bool
 }
 
-func (g *globals) printer() *output.Printer {
-	return &output.Printer{W: os.Stdout, JSON: g.json}
+func (g *globals) printer(cmd *cobra.Command) *output.Printer {
+	return &output.Printer{W: cmd.OutOrStdout(), JSON: g.json}
 }
 
 func (g *globals) options() app.Options {
@@ -66,8 +66,8 @@ func firstNonEmpty(vals ...string) string {
 func New(version string) *cobra.Command {
 	g := &globals{}
 	root := &cobra.Command{
-		Use:           "ark",
-		Short:         "Ark keeps the history of the work around your code",
+		Use:   "ark",
+		Short: "Ark keeps the history of the work around your code",
 		Long: `Ark is a local-first, agent-native work record system that sits beside Git.
 
 Git stores source history. Ark stores the work around it: tasks, comments,

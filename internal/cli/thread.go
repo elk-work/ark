@@ -48,7 +48,7 @@ func newThreadCreateCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(th, func() {
 				p.Line("Created thread %s: %s", th.ID, th.Title)
 			})
@@ -85,7 +85,7 @@ func newThreadListCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			if p.JSON {
 				if threads == nil {
 					threads = []*store.Thread{}
@@ -142,7 +142,7 @@ func newThreadViewCmd(g *globals) *cobra.Command {
 				return err
 			}
 			d := threadDetail{Thread: th, Messages: msgs}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(d, func() {
 				p.Line("thread %s  [%s]", th.ID, th.Status)
 				p.Line("title  %s", th.Title)
@@ -180,7 +180,7 @@ func newThreadMessageCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(m, func() {
 				p.Line("Added %s message %s", m.Role, m.ID)
 			})
@@ -207,7 +207,7 @@ func newThreadCloseCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(th, func() {
 				p.Line("Closed thread %s: %s", th.ID, th.Title)
 			})

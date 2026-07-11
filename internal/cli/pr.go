@@ -85,7 +85,7 @@ func newPRCreateCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(pr, func() {
 				p.Line("Created pull request #%d: %s (%s)", pr.Number, pr.Title, pr.ID)
 				p.Line("  %s <- %s (%s)", pr.BaseBranch, pr.HeadBranch, short(pr.HeadCommitSHA))
@@ -117,7 +117,7 @@ func newPRListCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			if p.JSON {
 				if prs == nil {
 					prs = []*store.PullRequest{}
@@ -181,7 +181,7 @@ func newPRViewCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(d, func() {
 				p.Line("pull request #%d  %s", pr.Number, pr.Title)
 				p.Line("status    %s", pr.Status)
@@ -239,7 +239,7 @@ func newPRCommentCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(c, func() {
 				p.Line("Commented on pull request #%d (%s)", pr.Number, c.ID)
 			})
@@ -292,7 +292,7 @@ func newPRReviewCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(r, func() {
 				p.Line("Submitted %s review on pull request #%d (%s)", r.State, pr.Number, r.ID)
 			})
@@ -319,7 +319,7 @@ func newPRCloseCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(pr, func() {
 				p.Line("Closed pull request #%d: %s", pr.Number, pr.Title)
 			})
@@ -356,7 +356,7 @@ confirm the merge with the shared service (docs/v1-spec.md §12).`,
 			if err != nil {
 				return err
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(res, func() {
 				p.Line("Merged pull request #%d into %s (%s, %s)", res.Number,
 					res.BaseBranch, res.Strategy, short(res.MergeCommitSHA))

@@ -55,7 +55,7 @@ func newConflictListCmd(g *globals) *cobra.Command {
 				}
 				out = append(out, c)
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			if p.JSON {
 				return p.JSONValue(out)
 			}
@@ -94,7 +94,7 @@ func newConflictViewCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return records.NotFoundf("conflict %q not found", args[0])
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(c, func() {
 				p.Line("conflict %s on %s %s [%s]", c.ID, c.RecordType, c.RecordID, c.Status)
 				p.Line("base:   %s", c.BaseJSON)
@@ -139,7 +139,7 @@ func newConflictResolveCmd(g *globals) *cobra.Command {
 			if n, _ := res.RowsAffected(); n == 0 {
 				return records.NotFoundf("no unresolved conflict matching %q", args[0])
 			}
-			p := g.printer()
+			p := g.printer(cmd)
 			return p.Result(map[string]string{"status": status}, func() {
 				p.Line("Resolved conflict (%s)", status)
 			})
