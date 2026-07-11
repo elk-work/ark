@@ -1,0 +1,17 @@
+# Binaries
+/ark
+/bin/
+/dist/
+
+# Test and coverage output
+*.test
+*.out
+coverage.html
+
+# Ark local state (never commit a repo's .ark directory)
+.ark/
+
+# Editor and OS noise
+.DS_Store
+.idea/
+.vscode/
