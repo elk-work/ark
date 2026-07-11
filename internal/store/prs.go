@@ -242,6 +242,32 @@ type PRStateChange struct {
 	HeadCommitSHA  string `json:"head_commit_sha,omitempty"`
 }
 
+// UpdatePRHead refreshes the recorded head commit after the head branch
+// moves. Git owns branches (docs/v1-spec.md §10.5: the head branch is read
+// from Git before merge); the record follows.
+func (s *Store) UpdatePRHead(ctx context.Context, pr *PullRequest, headSHA string) error {
+	if pr.HeadCommitSHA == headSHA {
+		return nil
+	}
+	now := records.Now()
+	change := PRStateChange{HeadCommitSHA: headSHA}
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.Exec(`UPDATE pull_requests SET head_commit_sha = ?, updated_at = ?,
+			version = version + 1 WHERE id = ? AND status = 'open'`, headSHA, now, pr.ID)
+		if err != nil {
+			return records.DBErr("update pull request head", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return records.Conflictf("pull request #%d is no longer open", pr.Number)
+		}
+		return s.logMutation(tx, records.TypePullRequest, pr.ID, "update", 0, change)
+	})
+	if err == nil {
+		pr.HeadCommitSHA = headSHA
+	}
+	return err
+}
+
 // MarkPRMerged transitions a PR to merged with its merge commit.
 func (s *Store) MarkPRMerged(ctx context.Context, pr *PullRequest, mergeSHA, headSHA string) error {
 	now := records.Now()

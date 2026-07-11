@@ -293,28 +293,167 @@ func TestMergeGuards(t *testing.T) {
 	gitOut(t, dir, "checkout", "main")
 	ark(t, dir, "pr", "create", "-t", "Guarded", "--head", "guard", "--base", "main")
 
-	// Head moved after PR creation -> conflict (exit 4).
-	gitOut(t, dir, "checkout", "guard")
-	commitFile(t, dir, "g2.txt", "g2\n", "more work")
-	gitOut(t, dir, "checkout", "main")
-	_, err := arkErr(t, dir, "pr", "merge", "1")
-	if records.ExitCode(err) != 4 {
-		t.Errorf("moved head: exit %d, want 4 (%v)", records.ExitCode(err), err)
-	}
-
 	// Dirty work tree (modified tracked file) -> validation (exit 2).
 	// Untracked files deliberately do not block merges.
 	os.WriteFile(filepath.Join(dir, "README.md"), []byte("edited\n"), 0o644)
-	_, err = arkErr(t, dir, "pr", "merge", "1")
+	_, err := arkErr(t, dir, "pr", "merge", "1")
 	if records.ExitCode(err) != 2 {
 		t.Errorf("dirty tree: exit %d, want 2 (%v)", records.ExitCode(err), err)
 	}
 	gitOut(t, dir, "checkout", "--", "README.md")
 
+	// A head that moved after PR creation merges fine: Git owns branches
+	// and the record follows (spec §10.5).
+	gitOut(t, dir, "checkout", "guard")
+	commitFile(t, dir, "g2.txt", "g2\n", "more work")
+	newHead := gitOut(t, dir, "rev-parse", "HEAD")
+	gitOut(t, dir, "checkout", "main")
+	var merged struct {
+		Status        string `json:"status"`
+		HeadCommitSHA string `json:"head_commit_sha"`
+	}
+	arkJSON(t, dir, &merged, "pr", "merge", "1")
+	if merged.Status != "merged" || merged.HeadCommitSHA != newHead {
+		t.Errorf("moved-head merge: %+v (want head %s)", merged, newHead)
+	}
+
 	// Closed PR cannot merge.
-	ark(t, dir, "pr", "close", "1")
-	_, err = arkErr(t, dir, "pr", "merge", "1")
+	gitOut(t, dir, "checkout", "-b", "guard2")
+	commitFile(t, dir, "g3.txt", "g3\n", "guard2 work")
+	gitOut(t, dir, "checkout", "main")
+	ark(t, dir, "pr", "create", "-t", "Guarded 2", "--head", "guard2", "--base", "main")
+	ark(t, dir, "pr", "close", "2")
+	_, err = arkErr(t, dir, "pr", "merge", "2")
 	if err == nil {
 		t.Error("merge of closed PR should fail")
+	}
+}
+
+// conflictingPR sets up main and a feature branch that both edit the same
+// line, plus an open PR for the feature branch.
+func conflictingPR(t *testing.T, strategy string) (string, error) {
+	dir := gitRepo(t)
+	ark(t, dir, "init")
+	gitOut(t, dir, "checkout", "-b", "feature")
+	commitFile(t, dir, "shared.txt", "feature version\n", "feature edit")
+	gitOut(t, dir, "checkout", "main")
+	commitFile(t, dir, "shared.txt", "main version\n", "main edit")
+	ark(t, dir, "pr", "create", "-t", "Conflicting", "--head", "feature", "--base", "main")
+	_, err := arkErr(t, dir, "pr", "merge", "1", "--strategy", strategy)
+	return dir, err
+}
+
+func TestMergeConflictLeavesTreeClean(t *testing.T) {
+	for _, strategy := range []string{"merge", "squash"} {
+		t.Run(strategy, func(t *testing.T) {
+			dir, err := conflictingPR(t, strategy)
+			if records.ExitCode(err) != 4 {
+				t.Fatalf("conflicting merge: exit %d, want 4 (%v)", records.ExitCode(err), err)
+			}
+			// The failed merge must not leave conflict markers or strand
+			// the user on the base branch.
+			if status := gitOut(t, dir, "status", "--porcelain"); status != "" {
+				t.Errorf("work tree dirty after aborted %s merge:\n%s", strategy, status)
+			}
+			if branch := gitOut(t, dir, "rev-parse", "--abbrev-ref", "HEAD"); branch != "main" {
+				t.Errorf("stranded on %q", branch)
+			}
+			var prs []struct {
+				Status string `json:"status"`
+			}
+			arkJSON(t, dir, &prs, "pr", "list", "-s", "all")
+			if len(prs) != 1 || prs[0].Status != "open" {
+				t.Errorf("PR after failed merge: %+v", prs)
+			}
+		})
+	}
+}
+
+func TestMergeWithRemote(t *testing.T) {
+	// origin is a bare repo; a second clone advances origin/main so the
+	// merging clone's local main is stale.
+	origin := t.TempDir()
+	gitOut(t, origin, "init", "--bare", "-b", "main")
+
+	dir := gitRepo(t)
+	gitOut(t, dir, "remote", "add", "origin", origin)
+	gitOut(t, dir, "push", "-u", "origin", "main")
+	ark(t, dir, "init")
+
+	other := t.TempDir()
+	gitOut(t, filepath.Dir(other), "clone", origin, other)
+	gitOut(t, other, "config", "user.name", "Other")
+	gitOut(t, other, "config", "user.email", "o@example.com")
+	commitFile(t, other, "upstream.txt", "u\n", "upstream work")
+	gitOut(t, other, "push", "origin", "main")
+
+	// Local feature branch, PR, merge: local main is behind origin/main and
+	// must fast-forward before the merge so the push lands.
+	gitOut(t, dir, "checkout", "-b", "feature")
+	commitFile(t, dir, "f.txt", "f\n", "feature work")
+	gitOut(t, dir, "checkout", "main")
+	ark(t, dir, "pr", "create", "-t", "Remote merge", "--head", "feature", "--base", "main")
+	var res struct {
+		Status         string `json:"status"`
+		Pushed         bool   `json:"pushed"`
+		MergeCommitSHA string `json:"merge_commit_sha"`
+	}
+	arkJSON(t, dir, &res, "pr", "merge", "1")
+	if res.Status != "merged" || !res.Pushed {
+		t.Fatalf("remote merge: %+v", res)
+	}
+	// The recorded merge commit is on origin, and includes the upstream work.
+	if originMain := gitOut(t, origin, "rev-parse", "main"); originMain != res.MergeCommitSHA {
+		t.Errorf("origin/main = %s, recorded merge = %s", originMain, res.MergeCommitSHA)
+	}
+	gitOut(t, dir, "log", "--oneline", "main") // sanity: no error
+	if out := gitOut(t, dir, "log", "--oneline", "main"); !strings.Contains(out, "upstream work") {
+		t.Errorf("upstream commit missing from merged history:\n%s", out)
+	}
+
+	// Diverged local base -> conflict, nothing recorded.
+	gitOut(t, other, "pull", "--ff-only", "origin", "main") // catch up with the merge
+	commitFile(t, other, "upstream2.txt", "u2\n", "more upstream")
+	gitOut(t, other, "push", "origin", "main")
+	gitOut(t, dir, "commit", "--allow-empty", "-m", "local divergence")
+	gitOut(t, dir, "checkout", "-b", "feature2")
+	commitFile(t, dir, "f2.txt", "f2\n", "feature2 work")
+	gitOut(t, dir, "checkout", "main")
+	ark(t, dir, "pr", "create", "-t", "Diverged", "--head", "feature2", "--base", "main")
+	_, err := arkErr(t, dir, "pr", "merge", "2")
+	if records.ExitCode(err) != 4 {
+		t.Errorf("diverged base: exit %d, want 4 (%v)", records.ExitCode(err), err)
+	}
+	var prs []struct {
+		Number int64  `json:"number"`
+		Status string `json:"status"`
+	}
+	arkJSON(t, dir, &prs, "pr", "list", "-s", "open")
+	if len(prs) != 1 || prs[0].Number != 2 {
+		t.Errorf("PR 2 should stay open: %+v", prs)
+	}
+}
+
+func TestManualResolutionThenRecord(t *testing.T) {
+	dir, err := conflictingPR(t, "merge")
+	if err == nil {
+		t.Fatal("expected conflict")
+	}
+	// Follow the error's advice: merge manually, resolve, commit...
+	cmd := exec.Command("git", "merge", "feature")
+	cmd.Dir = dir
+	cmd.CombinedOutput() // conflicts, as expected
+	os.WriteFile(filepath.Join(dir, "shared.txt"), []byte("resolved\n"), 0o644)
+	gitOut(t, dir, "add", "shared.txt")
+	gitOut(t, dir, "commit", "-m", "Merge feature (resolved)")
+
+	// ...then re-run the merge to record it.
+	var res struct {
+		Status   string `json:"status"`
+		Strategy string `json:"strategy"`
+	}
+	arkJSON(t, dir, &res, "pr", "merge", "1")
+	if res.Status != "merged" || res.Strategy != "recorded" {
+		t.Errorf("manual resolution: %+v", res)
 	}
 }

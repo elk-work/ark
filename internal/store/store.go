@@ -121,34 +121,6 @@ func (s *Store) resolveID(q querier, table, ref string) (string, error) {
 	}
 }
 
-// resolveThreadMessageParent is like resolveID but for tables keyed by
-// thread_id rather than repository_id.
-func resolveInThread(q querier, threadID, ref string) (string, error) {
-	ref = strings.ToUpper(strings.TrimSpace(ref))
-	rows, err := q.Query(`SELECT id FROM thread_messages WHERE thread_id = ? AND id LIKE ? LIMIT 3`,
-		threadID, ref+"%")
-	if err != nil {
-		return "", records.DBErr("resolve message id", err)
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return "", records.DBErr("resolve message id", err)
-		}
-		ids = append(ids, id)
-	}
-	switch len(ids) {
-	case 0:
-		return "", records.NotFoundf("no message matching %q", ref)
-	case 1:
-		return ids[0], nil
-	default:
-		return "", records.Validationf("ambiguous message id prefix %q", ref)
-	}
-}
-
 // PendingMutations counts mutations not yet accepted by the cloud.
 func (s *Store) PendingMutations(ctx context.Context) (int64, error) {
 	var n int64

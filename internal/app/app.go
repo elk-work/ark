@@ -131,6 +131,11 @@ func Init(ctx context.Context, dir string) (*InitResult, error) {
 			return nil, &records.Error{Kind: records.KindGeneral, Message: "create .ark", Err: err}
 		}
 	}
+	// .ark ignores itself so `git add .` can never sweep Ark state into a
+	// commit, even on branches where the repository .gitignore is absent.
+	if err := os.WriteFile(filepath.Join(arkDir, ".gitignore"), []byte("*\n"), 0o644); err != nil {
+		return nil, &records.Error{Kind: records.KindGeneral, Message: "create .ark/.gitignore", Err: err}
+	}
 
 	g := &git.Repo{Dir: root}
 	name := filepath.Base(root)

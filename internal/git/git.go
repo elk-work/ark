@@ -191,9 +191,34 @@ func (r *Repo) SquashMerge(ctx context.Context, head, message string) error {
 	return err
 }
 
-// AbortMerge attempts to abort an in-progress merge; best effort.
+// AbortMerge restores the work tree after a failed merge. A conflicted
+// `merge --squash` leaves no MERGE_HEAD, so `merge --abort` refuses; `reset
+// --merge` is the documented abort for that state.
 func (r *Repo) AbortMerge(ctx context.Context) {
-	r.Run(ctx, "merge", "--abort")
+	if _, err := r.Run(ctx, "merge", "--abort"); err != nil {
+		r.Run(ctx, "reset", "--merge")
+	}
+}
+
+// ResetHard moves the current branch (and work tree) to rev.
+func (r *Repo) ResetHard(ctx context.Context, rev string) error {
+	_, err := r.Run(ctx, "reset", "--hard", rev)
+	return err
+}
+
+// FastForward advances the current branch to rev, refusing non-fast-forward.
+func (r *Repo) FastForward(ctx context.Context, rev string) error {
+	_, err := r.Run(ctx, "merge", "--ff-only", rev)
+	return err
+}
+
+// RefSHA resolves any ref (e.g. origin/main) to a commit SHA, "" if absent.
+func (r *Repo) RefSHA(ctx context.Context, ref string) string {
+	out, err := r.out(ctx, "rev-parse", "--verify", "--quiet", ref)
+	if err != nil {
+		return ""
+	}
+	return out
 }
 
 // Push pushes branch to remote with --force-with-lease semantics disabled

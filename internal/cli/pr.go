@@ -374,6 +374,10 @@ confirm the merge with the shared service (docs/v1-spec.md §12).`,
 // mergePR implements the V1-local slice of the merge flow in
 // docs/v1-spec.md §12: Git state verification, merge, optional push, and the
 // merged record. Cloud confirmation joins in Phase 4.
+//
+// Ordering matters for recovery: the local Git merge is not recorded (and the
+// base branch is reset) unless the push succeeds, so a rejected push leaves
+// both Git and the record exactly as they were.
 func mergePR(ctx context.Context, a *app.Context, ref, strategy string, noPush bool) (*mergeResult, error) {
 	if strategy != "merge" && strategy != "squash" {
 		return nil, records.Validationf("strategy must be merge or squash (got %q)", strategy)
@@ -407,17 +411,27 @@ func mergePR(ctx context.Context, a *app.Context, ref, strategy string, noPush b
 		}
 	}
 
+	// Git owns branches: read the head from Git and let the record follow
+	// (docs/v1-spec.md §10.5). Reviews record which commit they judged.
 	headSHA, err := a.Git.BranchSHA(ctx, pr.HeadBranch)
 	if err != nil {
 		return nil, err
 	}
-	if pr.HeadCommitSHA != "" && headSHA != pr.HeadCommitSHA {
-		return nil, records.Conflictf(
-			"head branch %s moved since the PR was created (%s -> %s); review the new commits, then update the PR record with `ark pr view %d` workflows",
-			pr.HeadBranch, short(pr.HeadCommitSHA), short(headSHA), pr.Number)
+	if err := a.Store.UpdatePRHead(ctx, pr, headSHA); err != nil {
+		return nil, err
 	}
+
+	// A head already reachable from base was merged outside Ark (or by a
+	// prior partially-recorded attempt); record that instead of failing.
 	if a.Git.IsAncestor(ctx, headSHA, "refs/heads/"+pr.BaseBranch) {
-		return nil, records.Validationf("head branch %s is already merged into %s", pr.HeadBranch, pr.BaseBranch)
+		baseSHA, err := a.Git.BranchSHA(ctx, pr.BaseBranch)
+		if err != nil {
+			return nil, err
+		}
+		if err := a.Store.MarkPRMerged(ctx, pr, baseSHA, headSHA); err != nil {
+			return nil, err
+		}
+		return &mergeResult{PullRequest: pr, Strategy: "recorded", Pushed: false}, nil
 	}
 
 	// Remember where we were so we can return.
@@ -436,6 +450,26 @@ func mergePR(ctx context.Context, a *app.Context, ref, strategy string, noPush b
 		}()
 	}
 
+	// Bring the local base up to date with origin so the merge commit lands
+	// on current history and the push can fast-forward.
+	if remoteBase := a.Git.RefSHA(ctx, "refs/remotes/origin/"+pr.BaseBranch); hasRemote && remoteBase != "" {
+		localBase, err := a.Git.BranchSHA(ctx, pr.BaseBranch)
+		if err != nil {
+			return nil, err
+		}
+		if localBase != remoteBase {
+			if err := a.Git.FastForward(ctx, remoteBase); err != nil {
+				return nil, records.Conflictf(
+					"local %s has diverged from origin/%s; reconcile them (e.g. git pull --rebase) before merging",
+					pr.BaseBranch, pr.BaseBranch)
+			}
+		}
+	}
+	preMergeSHA, err := a.Git.BranchSHA(ctx, pr.BaseBranch)
+	if err != nil {
+		return nil, err
+	}
+
 	message := fmt.Sprintf("Merge pull request #%d: %s", pr.Number, pr.Title)
 	var mergeErr error
 	if strategy == "squash" {
@@ -445,7 +479,9 @@ func mergePR(ctx context.Context, a *app.Context, ref, strategy string, noPush b
 	}
 	if mergeErr != nil {
 		a.Git.AbortMerge(ctx)
-		return nil, records.Conflictf("Git merge failed (%v); resolve conflicts manually or rebase the head branch", mergeErr)
+		return nil, records.Conflictf(
+			"Git merge failed (%v); resolve manually (git merge %s while on %s, fix conflicts, commit), then re-run `ark pr merge %d` to record it",
+			mergeErr, pr.HeadBranch, pr.BaseBranch, pr.Number)
 	}
 	mergeSHA, err := a.Git.Head(ctx)
 	if err != nil {
@@ -455,19 +491,22 @@ func mergePR(ctx context.Context, a *app.Context, ref, strategy string, noPush b
 	pushed := false
 	if hasRemote && !noPush {
 		if err := a.Git.Push(ctx, "origin", pr.BaseBranch); err != nil {
-			// The merge landed locally; record it and surface partial success.
-			if markErr := a.Store.MarkPRMerged(ctx, pr, mergeSHA, headSHA); markErr != nil {
-				return nil, markErr
+			// Nothing has been recorded yet; undo the local merge so the
+			// repository and the PR record still agree.
+			if resetErr := a.Git.ResetHard(ctx, preMergeSHA); resetErr != nil {
+				return nil, records.Partialf(
+					"push to origin failed (%v) and resetting %s to %s also failed (%v); reset it manually, then re-run the merge",
+					err, pr.BaseBranch, short(preMergeSHA), resetErr)
 			}
-			return nil, records.Partialf(
-				"merged locally as %s but push to origin failed (%v); push %s manually",
-				short(mergeSHA), err, pr.BaseBranch)
+			return nil, records.Offlinef("push to origin was rejected (%v); the local merge was undone — fetch, reconcile, and retry", err)
 		}
 		pushed = true
 	}
 
 	if err := a.Store.MarkPRMerged(ctx, pr, mergeSHA, headSHA); err != nil {
-		return nil, records.Partialf("Git merge %s succeeded but recording it failed: %v", short(mergeSHA), err)
+		// Git already has the merge (and possibly origin does); re-running
+		// `ark pr merge` takes the already-merged path above and records it.
+		return nil, records.Partialf("Git merge %s succeeded but recording it failed: %v; re-run `ark pr merge %d` to repair the record", short(mergeSHA), err, pr.Number)
 	}
 	return &mergeResult{PullRequest: pr, Strategy: strategy, Pushed: pushed}, nil
 }
