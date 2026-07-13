@@ -1,66 +1,59 @@
--- Ark sync service schema (PostgreSQL). Cloud SQL is authoritative for
--- shared metadata; records are stored as JSON documents with a per-repo
--- revision counter. See docs/v1-spec.md §9, §10, §19.
+-- Ark sync service schema: one SQLite database per repository.
+-- The file IS the tenant; there is no repository_id column because the
+-- database never holds more than one repository. See docs/rfc-0001.
 
-CREATE TABLE IF NOT EXISTS repositories (
-    id             text PRIMARY KEY,
-    name           text NOT NULL,
-    default_branch text NOT NULL DEFAULT 'main',
-    git_remote_url text NOT NULL DEFAULT '',
-    revision       bigint NOT NULL DEFAULT 0,
-    created_at     timestamptz NOT NULL DEFAULT now()
+-- Single-row repository metadata and the revision counter.
+CREATE TABLE IF NOT EXISTS meta (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),
+    repository_id  TEXT NOT NULL,
+    name           TEXT NOT NULL DEFAULT '',
+    default_branch TEXT NOT NULL DEFAULT 'main',
+    git_remote_url TEXT NOT NULL DEFAULT '',
+    revision       INTEGER NOT NULL DEFAULT 0,
+    created_at     TEXT NOT NULL
 );
 
 -- One row per record (tasks, comments, threads, messages, runs, PRs,
 -- reviews, artifacts, actors). data holds the client-side JSON encoding.
 CREATE TABLE IF NOT EXISTS records (
-    repository_id   text NOT NULL REFERENCES repositories(id),
-    record_type     text NOT NULL,
-    record_id       text NOT NULL,
-    data            jsonb NOT NULL,
-    server_revision bigint NOT NULL,
-    deleted_at      timestamptz,
-    created_at      timestamptz NOT NULL DEFAULT now(),
-    updated_at      timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (repository_id, record_type, record_id)
+    record_type     TEXT NOT NULL,
+    record_id       TEXT NOT NULL,
+    data            TEXT NOT NULL,
+    server_revision INTEGER NOT NULL,
+    deleted_at      TEXT,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL,
+    PRIMARY KEY (record_type, record_id)
 );
 
-CREATE INDEX IF NOT EXISTS idx_records_revision
-    ON records (repository_id, server_revision);
-CREATE INDEX IF NOT EXISTS idx_records_number
-    ON records (repository_id, record_type, ((data->>'number')::bigint))
-    WHERE data ? 'number';
+CREATE INDEX IF NOT EXISTS idx_records_revision ON records (server_revision);
 
--- Which repo revision last changed each field of a record. Powers the
+-- Which revision last changed each field of a record. Powers the
 -- field-level merge rules in docs/v1-spec.md §10.4.
 CREATE TABLE IF NOT EXISTS field_revisions (
-    repository_id text NOT NULL,
-    record_type   text NOT NULL,
-    record_id     text NOT NULL,
-    field         text NOT NULL,
-    revision      bigint NOT NULL,
-    PRIMARY KEY (repository_id, record_type, record_id, field)
+    record_type TEXT NOT NULL,
+    record_id   TEXT NOT NULL,
+    field       TEXT NOT NULL,
+    revision    INTEGER NOT NULL,
+    PRIMARY KEY (record_type, record_id, field)
 );
 
 -- Idempotency: a mutation ID is processed exactly once; replays return the
 -- stored outcome.
 CREATE TABLE IF NOT EXISTS applied_mutations (
-    mutation_id     text PRIMARY KEY,
-    repository_id   text NOT NULL,
-    status          text NOT NULL, -- applied|rejected|conflict
-    error           text NOT NULL DEFAULT '',
-    remote          jsonb,
-    server_revision bigint NOT NULL DEFAULT 0,
-    applied_at      timestamptz NOT NULL DEFAULT now()
+    mutation_id     TEXT PRIMARY KEY,
+    status          TEXT NOT NULL, -- applied|rejected|conflict
+    error           TEXT NOT NULL DEFAULT '',
+    remote          TEXT,
+    server_revision INTEGER NOT NULL DEFAULT 0,
+    applied_at      TEXT NOT NULL
 );
 
 -- Artifact blobs known to object storage, keyed by content hash.
 CREATE TABLE IF NOT EXISTS blobs (
-    repository_id text NOT NULL,
-    sha256        text NOT NULL,
-    size_bytes    bigint NOT NULL,
-    storage_key   text NOT NULL,
-    stored        boolean NOT NULL DEFAULT false,
-    created_at    timestamptz NOT NULL DEFAULT now(),
-    PRIMARY KEY (repository_id, sha256)
+    sha256      TEXT PRIMARY KEY,
+    size_bytes  INTEGER NOT NULL,
+    storage_key TEXT NOT NULL,
+    stored      INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
 );

@@ -9,11 +9,8 @@ the implementation contract.
 - Build: `go build ./...`
 - Test: `go test ./...` (integration tests create temp Git repos; no network)
 - One test: `go test ./internal/store -run TestTaskLifecycle`
-- Sync tests need Postgres: they default to `postgres://ark@127.0.0.1:5499/arktest`
-  (override with ARK_TEST_PG) and skip when unreachable. Start a throwaway
-  instance: `initdb -D <dir> -U ark --auth=trust`, then
-  `pg_ctl -D <dir> -o "-p 5499 -c listen_addresses=127.0.0.1 -c unix_socket_directories=''" start`
-  and `createdb -h 127.0.0.1 -p 5499 -U ark arktest`.
+- The whole suite (including sync) is self-contained: temp Git repos, temp
+  SQLite files, no external services.
 
 ## Architecture in one paragraph
 
@@ -39,20 +36,23 @@ with machine-readable flags — never reimplement Git. Schema lives in
   breaking changes.
 - Pure-Go SQLite driver (modernc.org/sqlite); do not introduce CGO.
 
-## Sync architecture (Phases 4–5)
+## Sync architecture (Phases 4–5, RFC-0001)
 
-`cmd/ark-server` (internal/server) is the authoritative service: records
-live as JSONB documents in Postgres keyed (repo, type, id) with a per-repo
+`cmd/ark-server` (internal/server) is the authoritative service: one SQLite
+database per repository (internal/server/repodb), persisted to GCS as
+`repos/<id>.db` with the object generation as a compare-and-swap, or to a
+local directory in dev/tests. Records are JSON documents with a per-repo
 revision counter; `field_revisions` powers spec §10.4 field-level merges
 (title/body overlap → conflict; other overlaps → cloud wins);
-`applied_mutations` makes pushes idempotent. Pushes serialize on a
-repository row lock. The client (internal/sync + internal/cloud) pushes the
-mutation queue, uploads artifact blobs via signed URLs, then pulls records
-after its cursor and upserts them (internal/store/sync.go) with deferred FK
-checks. Server-assigned display numbers can be rewritten on collision — the
-ULID is authoritative, so local numbers are indexed but not unique. Tokens
-resolve ARK_TOKEN → macOS keychain → ~/.ark/credentials.toml and never live
-in the repository.
+`applied_mutations` makes pushes idempotent, which is also what makes lost
+CAS races safe to replay — Update handlers rerun their whole closure on
+retry, so they must be idempotent and reset their accumulators. The client
+(internal/sync + internal/cloud) pushes the mutation queue, uploads artifact
+blobs via signed URLs, then pulls records after its cursor and upserts them
+(internal/store/sync.go) with deferred FK checks. Server-assigned display
+numbers can be rewritten on collision — the ULID is authoritative, so local
+numbers are indexed but not unique. Tokens resolve ARK_TOKEN → macOS
+keychain → ~/.ark/credentials.toml and never live in the repository.
 
 ## What is deliberately absent (V1)
 

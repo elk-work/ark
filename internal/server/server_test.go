@@ -2,63 +2,51 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/ijroth/ark/internal/records"
-	"github.com/ijroth/ark/internal/servertest"
+	"github.com/ijroth/ark/internal/server/repodb"
 	"github.com/ijroth/ark/pkg/api"
 )
 
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
-	return &Server{DB: servertest.NewDB(t), Token: "test-token",
-		Blobs: &LocalBlobStore{Dir: t.TempDir(), BaseURL: "http://unused"}}
+	return &Server{
+		Repos: repodb.NewManager(&repodb.LocalBackend{Dir: t.TempDir()}, t.TempDir()),
+		Token: "test-token",
+		Blobs: &LocalBlobStore{Dir: t.TempDir(), BaseURL: "http://unused"},
+	}
 }
 
 const repoID = "01TESTREPO0000000000000000"
 
 func registerRepo(t *testing.T, s *Server) {
 	t.Helper()
-	_, err := s.DB.Exec(`INSERT INTO repositories (id, name) VALUES ($1, 'test')`, repoID)
-	if err != nil {
-		t.Fatal(err)
+	rec := doRequest(t, s, "POST", "/v1/repositories",
+		fmt.Sprintf(`{"id":%q,"name":"test"}`, repoID))
+	if rec.Code != 200 {
+		t.Fatalf("register: %d %s", rec.Code, rec.Body.String())
 	}
 }
 
-// push applies mutations through the same path the HTTP handler uses.
+// push exercises the real push handler.
 func push(t *testing.T, s *Server, muts ...api.Mutation) api.PushResponse {
 	t.Helper()
-	ctx := context.Background()
-	resp := api.PushResponse{Applied: []api.MutationOutcome{}, Rejected: []api.MutationOutcome{},
-		Conflicts: []api.MutationOutcome{}}
-	tx, err := s.DB.BeginTx(ctx, nil)
+	body, err := json.Marshal(api.PushRequest{RepositoryID: repoID, ClientID: "c1", Mutations: muts})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
-	var locked bool
-	if err := tx.QueryRow(`SELECT true FROM repositories WHERE id = $1 FOR UPDATE`, repoID).Scan(&locked); err != nil {
-		t.Fatalf("lock repo: %v", err)
+	rec := doRequest(t, s, "POST", "/v1/sync/push", string(body))
+	if rec.Code != 200 {
+		t.Fatalf("push: %d %s", rec.Code, rec.Body.String())
 	}
-	session := sessionRevisions{}
-	for _, m := range muts {
-		out := processMutation(ctx, tx, repoID, m, session)
-		mo := api.MutationOutcome{MutationID: m.ID, Error: out.err, Remote: out.remote, ServerRevision: out.revision}
-		switch out.status {
-		case statusApplied:
-			resp.Applied = append(resp.Applied, mo)
-		case statusConflict:
-			resp.Conflicts = append(resp.Conflicts, mo)
-		default:
-			resp.Rejected = append(resp.Rejected, mo)
-		}
-	}
-	tx.QueryRow(`SELECT revision FROM repositories WHERE id = $1`, repoID).Scan(&resp.ServerRevision)
-	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
+	var resp api.PushResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("push response: %v", err)
 	}
 	return resp
 }
@@ -71,15 +59,19 @@ func mut(id, recordType, recordID, op string, baseRev int64, payload string) api
 
 func recordData(t *testing.T, s *Server, recordType, recordID string) map[string]any {
 	t.Helper()
-	var data []byte
-	err := s.DB.QueryRow(`SELECT data FROM records WHERE repository_id = $1
-		AND record_type = $2 AND record_id = $3`, repoID, recordType, recordID).Scan(&data)
+	var out map[string]any
+	err := s.Repos.View(context.Background(), repoID, func(db *sql.DB) error {
+		var data string
+		if err := db.QueryRow(`SELECT data FROM records WHERE record_type = ? AND record_id = ?`,
+			recordType, recordID).Scan(&data); err != nil {
+			return err
+		}
+		return json.Unmarshal([]byte(data), &out)
+	})
 	if err != nil {
-		t.Fatalf("load record: %v", err)
+		t.Fatalf("load record %s/%s: %v", recordType, recordID, err)
 	}
-	var m map[string]any
-	json.Unmarshal(data, &m)
-	return m
+	return out
 }
 
 func TestPushIdempotency(t *testing.T) {
@@ -218,7 +210,7 @@ func TestBatchSurvivesBadMutation(t *testing.T) {
 	r := push(t, s,
 		mut("m1", "task", "t1", "create", 0, `{"id":"t1","number":1,"title":"ok"}`),
 		mut("m2", "task", "t2", "update", 0, `{"title":"no such record"}`),
-		mut("m3", "task", "t3", "create", 0, `not even json`),
+		mut("m3", "task", "t3", "create", 0, `"a string, not an object"`),
 		mut("m4", "task", "t4", "create", 0, `{"id":"t4","number":2,"title":"also ok"}`),
 	)
 	if len(r.Applied) != 2 || len(r.Rejected) != 2 {
@@ -232,16 +224,13 @@ func TestBatchSurvivesBadMutation(t *testing.T) {
 func TestMergeEndpointStateMachine(t *testing.T) {
 	s := newTestServer(t)
 	registerRepo(t, s)
-	ctx := context.Background()
 
 	push(t, s, mut("m1", "pull_request", "pr1", "create", 0,
 		`{"id":"pr1","number":1,"title":"P","status":"open","head_commit_sha":"abc"}`))
 
-	// Simulate the handler's core transition via HTTP-level helper.
-	srv := s
 	req := api.MergeRequest{RepositoryID: repoID, HeadCommitSHA: "abc", MergeCommitSHA: "mmm"}
 	body, _ := json.Marshal(req)
-	rec := doRequest(t, srv, "POST", "/v1/pull-requests/pr1/merge", string(body))
+	rec := doRequest(t, s, "POST", "/v1/pull-requests/pr1/merge", string(body))
 	if rec.Code != 200 {
 		t.Fatalf("merge: %d %s", rec.Code, rec.Body.String())
 	}
@@ -250,9 +239,30 @@ func TestMergeEndpointStateMachine(t *testing.T) {
 	}
 
 	// Second merge attempt conflicts.
-	rec = doRequest(t, srv, "POST", "/v1/pull-requests/pr1/merge", string(body))
+	rec = doRequest(t, s, "POST", "/v1/pull-requests/pr1/merge", string(body))
 	if rec.Code != 409 {
 		t.Errorf("double merge: %d, want 409", rec.Code)
 	}
-	_ = ctx
+}
+
+// TestSnapshotIsPlainSQLite: the persisted repository database is an
+// ordinary SQLite file — the boring recovery path is opening it.
+func TestSnapshotIsPlainSQLite(t *testing.T) {
+	s := newTestServer(t)
+	registerRepo(t, s)
+	push(t, s, mut("m1", "task", "t1", "create", 0, `{"id":"t1","number":1,"title":"A"}`))
+
+	backend := s.Repos.Backend.(*repodb.LocalBackend)
+	db, err := sql.Open("sqlite", backend.PathFor(repoID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM records WHERE record_type = 'task'`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("tasks in snapshot = %d, want 1", n)
+	}
 }

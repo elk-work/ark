@@ -10,39 +10,18 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
-
-	"github.com/ijroth/ark/internal/server/schema"
+	"github.com/ijroth/ark/internal/records"
+	"github.com/ijroth/ark/internal/server/repodb"
 	"github.com/ijroth/ark/pkg/api"
 )
 
 // Server is the Ark sync service.
 type Server struct {
-	DB    *sql.DB
+	Repos *repodb.Manager
 	Token string // single service token (spec §20: V1 begins with one)
 	Blobs BlobStore
 	Log   *slog.Logger
-}
-
-// Open connects to Postgres and ensures the schema exists.
-func Open(ctx context.Context, dsn string) (*sql.DB, error) {
-	db, err := sql.Open("pgx", dsn)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(10)
-	db.SetConnMaxIdleTime(5 * time.Minute)
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("connect to postgres: %w", err)
-	}
-	if _, err := db.ExecContext(ctx, schema.SQL); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("apply schema: %w", err)
-	}
-	return db, nil
 }
 
 // Handler builds the HTTP API.
@@ -59,10 +38,6 @@ func (s *Server) Handler() http.Handler {
 	// hostnames and serves its own 404 before the request reaches the
 	// container (verified empirically 2026-07-13).
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		if err := s.DB.PingContext(r.Context()); err != nil {
-			http.Error(w, "db unreachable", http.StatusServiceUnavailable)
-			return
-		}
 		fmt.Fprintln(w, "ok")
 	})
 	mux.HandleFunc("POST /v1/repositories", s.auth(s.handleRegisterRepo))
@@ -111,6 +86,19 @@ func decode[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 	return v, true
 }
 
+// respond maps repodb errors onto the API error contract.
+func (s *Server) respond(w http.ResponseWriter, what string, err error) {
+	switch {
+	case err == nil:
+	case errors.Is(err, repodb.ErrNotFound):
+		writeErr(w, http.StatusNotFound, "not_found", "repository not registered")
+	case errors.Is(err, repodb.ErrConcurrentWrite):
+		writeErr(w, http.StatusConflict, "conflict", "repository is being updated concurrently; retry")
+	default:
+		s.internal(w, what, err)
+	}
+}
+
 func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 	req, ok := decode[api.RegisterRepositoryRequest](w, r)
 	if !ok {
@@ -123,13 +111,16 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 	if req.DefaultBranch == "" {
 		req.DefaultBranch = "main"
 	}
-	_, err := s.DB.ExecContext(r.Context(), `INSERT INTO repositories
-		(id, name, default_branch, git_remote_url) VALUES ($1, $2, $3, $4)
-		ON CONFLICT (id) DO UPDATE SET name = EXCLUDED.name,
-			default_branch = EXCLUDED.default_branch, git_remote_url = EXCLUDED.git_remote_url`,
-		req.ID, req.Name, req.DefaultBranch, req.GitRemoteURL)
+	err := s.Repos.Update(r.Context(), req.ID, true, func(tx *sql.Tx) error {
+		_, err := tx.Exec(`INSERT INTO meta (id, repository_id, name, default_branch, git_remote_url, created_at)
+			VALUES (1, ?, ?, ?, ?, ?)
+			ON CONFLICT (id) DO UPDATE SET name = excluded.name,
+				default_branch = excluded.default_branch, git_remote_url = excluded.git_remote_url`,
+			req.ID, req.Name, req.DefaultBranch, req.GitRemoteURL, records.Now())
+		return err
+	})
 	if err != nil {
-		s.internal(w, "register repository", err)
+		s.respond(w, "register repository", err)
 		return
 	}
 	writeJSON(w, map[string]string{"id": req.ID})
@@ -141,68 +132,46 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	resp := api.PushResponse{
-		Applied:   []api.MutationOutcome{},
-		Rejected:  []api.MutationOutcome{},
-		Conflicts: []api.MutationOutcome{},
-	}
+	var resp api.PushResponse
 
-	tx, err := s.DB.BeginTx(ctx, nil)
+	err := s.Repos.Update(ctx, req.RepositoryID, false, func(tx *sql.Tx) error {
+		// The whole fn reruns on a lost CAS race; reset accumulators so a
+		// retry doesn't double-report outcomes.
+		resp = api.PushResponse{
+			Applied:   []api.MutationOutcome{},
+			Rejected:  []api.MutationOutcome{},
+			Conflicts: []api.MutationOutcome{},
+		}
+		// Actors are upserted as records so every client can render names.
+		for _, a := range req.Actors {
+			if a.ID == "" {
+				continue
+			}
+			if err := upsertActor(ctx, tx, a); err != nil {
+				return err
+			}
+		}
+		// Mutations apply in creation order; savepoint handling inside
+		// processMutation keeps one bad mutation from poisoning the batch.
+		session := sessionRevisions{}
+		for _, m := range req.Mutations {
+			out := processMutation(ctx, tx, m, session)
+			mo := api.MutationOutcome{MutationID: m.ID, Error: out.err,
+				Remote: out.remote, ServerRevision: out.revision}
+			switch out.status {
+			case statusApplied:
+				resp.Applied = append(resp.Applied, mo)
+			case statusConflict:
+				resp.Conflicts = append(resp.Conflicts, mo)
+			default:
+				resp.Rejected = append(resp.Rejected, mo)
+			}
+		}
+		return tx.QueryRowContext(ctx, `SELECT revision FROM meta WHERE id = 1`).
+			Scan(&resp.ServerRevision)
+	})
 	if err != nil {
-		s.internal(w, "begin push", err)
-		return
-	}
-	defer tx.Rollback()
-
-	// Lock the repository row: one push per repo at a time keeps revision
-	// allocation and number reconciliation serial.
-	var repoExists bool
-	err = tx.QueryRowContext(ctx, `SELECT true FROM repositories WHERE id = $1 FOR UPDATE`,
-		req.RepositoryID).Scan(&repoExists)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeErr(w, http.StatusNotFound, "not_found", "repository not registered")
-		return
-	}
-	if err != nil {
-		s.internal(w, "lock repository", err)
-		return
-	}
-
-	// Actors are upserted as records so every client can render names.
-	for _, a := range req.Actors {
-		if a.ID == "" {
-			continue
-		}
-		if err := s.upsertActor(ctx, tx, req.RepositoryID, a); err != nil {
-			s.internal(w, "upsert actor", err)
-			return
-		}
-	}
-
-	// Mutations apply in creation order; savepoint handling inside
-	// processMutation keeps one bad mutation from poisoning the batch.
-	session := sessionRevisions{}
-	for _, m := range req.Mutations {
-		out := processMutation(ctx, tx, req.RepositoryID, m, session)
-		mo := api.MutationOutcome{MutationID: m.ID, Error: out.err,
-			Remote: out.remote, ServerRevision: out.revision}
-		switch out.status {
-		case statusApplied:
-			resp.Applied = append(resp.Applied, mo)
-		case statusConflict:
-			resp.Conflicts = append(resp.Conflicts, mo)
-		default:
-			resp.Rejected = append(resp.Rejected, mo)
-		}
-	}
-
-	if err := tx.QueryRowContext(ctx, `SELECT revision FROM repositories WHERE id = $1`,
-		req.RepositoryID).Scan(&resp.ServerRevision); err != nil {
-		s.internal(w, "read revision", err)
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		s.internal(w, "commit push", err)
+		s.respond(w, "push", err)
 		return
 	}
 	writeJSON(w, resp)
@@ -210,11 +179,10 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 // upsertActor stores an actor as a record, bumping the revision only for
 // new actors so pulls stay quiet on repeat pushes.
-func (s *Server) upsertActor(ctx context.Context, tx *sql.Tx, repoID string, a api.Actor) error {
+func upsertActor(ctx context.Context, tx *sql.Tx, a api.Actor) error {
 	var exists bool
 	err := tx.QueryRowContext(ctx, `SELECT true FROM records
-		WHERE repository_id = $1 AND record_type = 'actor' AND record_id = $2`,
-		repoID, a.ID).Scan(&exists)
+		WHERE record_type = 'actor' AND record_id = ?`, a.ID).Scan(&exists)
 	if err == nil {
 		return nil
 	}
@@ -225,13 +193,14 @@ func (s *Server) upsertActor(ctx context.Context, tx *sql.Tx, repoID string, a a
 	if err != nil {
 		return err
 	}
-	rev, err := nextRevision(ctx, tx, repoID)
+	rev, err := nextRevision(ctx, tx)
 	if err != nil {
 		return err
 	}
+	now := records.Now()
 	_, err = tx.ExecContext(ctx, `INSERT INTO records
-		(repository_id, record_type, record_id, data, server_revision)
-		VALUES ($1, 'actor', $2, $3, $4)`, repoID, a.ID, string(data), rev)
+		(record_type, record_id, data, server_revision, created_at, updated_at)
+		VALUES ('actor', ?, ?, ?, ?, ?)`, a.ID, string(data), rev, now, now)
 	return err
 }
 
@@ -243,43 +212,37 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	resp := api.PullResponse{Records: []api.Record{}, Tombstones: []api.Tombstone{}}
 
-	err := s.DB.QueryRowContext(ctx, `SELECT revision FROM repositories WHERE id = $1`,
-		req.RepositoryID).Scan(&resp.ServerRevision)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeErr(w, http.StatusNotFound, "not_found", "repository not registered")
-		return
-	}
-	if err != nil {
-		s.internal(w, "read revision", err)
-		return
-	}
-
-	rows, err := s.DB.QueryContext(ctx, `SELECT record_type, record_id, data, server_revision,
-		to_char(deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
-		FROM records WHERE repository_id = $1 AND server_revision > $2
-		ORDER BY server_revision`, req.RepositoryID, req.AfterRevision)
-	if err != nil {
-		s.internal(w, "query records", err)
-		return
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var rec api.Record
-		var deletedAt sql.NullString
-		if err := rows.Scan(&rec.RecordType, &rec.RecordID, &rec.Data, &rec.ServerRevision, &deletedAt); err != nil {
-			s.internal(w, "scan record", err)
-			return
+	err := s.Repos.View(ctx, req.RepositoryID, func(db *sql.DB) error {
+		if err := db.QueryRowContext(ctx, `SELECT revision FROM meta WHERE id = 1`).
+			Scan(&resp.ServerRevision); err != nil {
+			return err
 		}
-		if deletedAt.Valid {
-			resp.Tombstones = append(resp.Tombstones, api.Tombstone{
-				RecordType: rec.RecordType, RecordID: rec.RecordID,
-				DeletedAt: deletedAt.String, ServerRevision: rec.ServerRevision})
-		} else {
-			resp.Records = append(resp.Records, rec)
+		rows, err := db.QueryContext(ctx, `SELECT record_type, record_id, data, server_revision, deleted_at
+			FROM records WHERE server_revision > ? ORDER BY server_revision`, req.AfterRevision)
+		if err != nil {
+			return err
 		}
-	}
-	if err := rows.Err(); err != nil {
-		s.internal(w, "read records", err)
+		defer rows.Close()
+		for rows.Next() {
+			var rec api.Record
+			var data string
+			var deletedAt sql.NullString
+			if err := rows.Scan(&rec.RecordType, &rec.RecordID, &data, &rec.ServerRevision, &deletedAt); err != nil {
+				return err
+			}
+			rec.Data = json.RawMessage(data)
+			if deletedAt.Valid {
+				resp.Tombstones = append(resp.Tombstones, api.Tombstone{
+					RecordType: rec.RecordType, RecordID: rec.RecordID,
+					DeletedAt: deletedAt.String, ServerRevision: rec.ServerRevision})
+			} else {
+				resp.Records = append(resp.Records, rec)
+			}
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		s.respond(w, "pull", err)
 		return
 	}
 	writeJSON(w, resp)
@@ -289,22 +252,35 @@ func (s *Server) handleGetRecord(w http.ResponseWriter, r *http.Request) {
 	repoID, recordType, recordID := r.PathValue("repo"), r.PathValue("type"), r.PathValue("id")
 	var rec api.Record
 	rec.RecordType, rec.RecordID = recordType, recordID
-	err := s.DB.QueryRowContext(r.Context(), `SELECT data, server_revision FROM records
-		WHERE repository_id = $1 AND record_type = $2 AND record_id = $3 AND deleted_at IS NULL`,
-		repoID, recordType, recordID).Scan(&rec.Data, &rec.ServerRevision)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeErr(w, http.StatusNotFound, "not_found", "record not found")
+	found := false
+	err := s.Repos.View(r.Context(), repoID, func(db *sql.DB) error {
+		var data string
+		err := db.QueryRowContext(r.Context(), `SELECT data, server_revision FROM records
+			WHERE record_type = ? AND record_id = ? AND deleted_at IS NULL`,
+			recordType, recordID).Scan(&data, &rec.ServerRevision)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		rec.Data = json.RawMessage(data)
+		found = true
+		return nil
+	})
+	if err != nil {
+		s.respond(w, "load record", err)
 		return
 	}
-	if err != nil {
-		s.internal(w, "load record", err)
+	if !found {
+		writeErr(w, http.StatusNotFound, "not_found", "record not found")
 		return
 	}
 	writeJSON(w, rec)
 }
 
 // handleMerge is the authoritative PR state transition (spec §12 step 12):
-// open -> merged exactly once, serialized on the repository row.
+// open -> merged exactly once, serialized by the repository database.
 func (s *Server) handleMerge(w http.ResponseWriter, r *http.Request) {
 	prID := r.PathValue("id")
 	req, ok := decode[api.MergeRequest](w, r)
@@ -316,89 +292,84 @@ func (s *Server) handleMerge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	tx, err := s.DB.BeginTx(ctx, nil)
-	if err != nil {
-		s.internal(w, "begin merge", err)
-		return
-	}
-	defer tx.Rollback()
+	var resp api.MergeResponse
+	var conflictMsg string
 
-	var exists bool
-	if err := tx.QueryRowContext(ctx, `SELECT true FROM repositories WHERE id = $1 FOR UPDATE`,
-		req.RepositoryID).Scan(&exists); err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", "repository not registered")
-		return
-	}
-
-	var data json.RawMessage
-	err = tx.QueryRowContext(ctx, `SELECT data FROM records
-		WHERE repository_id = $1 AND record_type = 'pull_request' AND record_id = $2 AND deleted_at IS NULL`,
-		req.RepositoryID, prID).Scan(&data)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeErr(w, http.StatusNotFound, "not_found", "pull request not found")
-		return
-	}
-	if err != nil {
-		s.internal(w, "load pull request", err)
-		return
-	}
-	var pr map[string]json.RawMessage
-	if err := json.Unmarshal(data, &pr); err != nil {
-		s.internal(w, "decode pull request", err)
-		return
-	}
-	var status string
-	json.Unmarshal(pr["status"], &status)
-	if status != "open" {
-		writeErr(w, http.StatusConflict, "conflict", "pull request is "+status)
-		return
-	}
-	if req.ExpectedHeadSHA != "" {
-		var head string
-		json.Unmarshal(pr["head_commit_sha"], &head)
-		if head != "" && head != req.ExpectedHeadSHA {
-			writeErr(w, http.StatusConflict, "conflict",
-				"pull request head is "+head+", expected "+req.ExpectedHeadSHA)
-			return
+	err := s.Repos.Update(ctx, req.RepositoryID, false, func(tx *sql.Tx) error {
+		conflictMsg = ""
+		var data string
+		err := tx.QueryRowContext(ctx, `SELECT data FROM records
+			WHERE record_type = 'pull_request' AND record_id = ? AND deleted_at IS NULL`, prID).Scan(&data)
+		if errors.Is(err, sql.ErrNoRows) {
+			conflictMsg = "pull request not found"
+			return nil
 		}
-	}
+		if err != nil {
+			return err
+		}
+		var pr map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(data), &pr); err != nil {
+			return err
+		}
+		var status string
+		json.Unmarshal(pr["status"], &status)
+		if status != "open" {
+			conflictMsg = "pull request is " + status
+			return nil
+		}
+		if req.ExpectedHeadSHA != "" {
+			var head string
+			json.Unmarshal(pr["head_commit_sha"], &head)
+			if head != "" && head != req.ExpectedHeadSHA {
+				conflictMsg = "pull request head is " + head + ", expected " + req.ExpectedHeadSHA
+				return nil
+			}
+		}
 
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	set := func(key, val string) {
-		b, _ := json.Marshal(val)
-		pr[key] = b
-	}
-	set("status", "merged")
-	set("merge_commit_sha", req.MergeCommitSHA)
-	set("head_commit_sha", req.HeadCommitSHA)
-	set("merged_at", now)
-	set("updated_at", now)
-	merged, _ := json.Marshal(pr)
+		now := records.Now()
+		set := func(key, val string) {
+			b, _ := json.Marshal(val)
+			pr[key] = b
+		}
+		set("status", "merged")
+		set("merge_commit_sha", req.MergeCommitSHA)
+		set("head_commit_sha", req.HeadCommitSHA)
+		set("merged_at", now)
+		set("updated_at", now)
+		merged, _ := json.Marshal(pr)
 
-	rev, err := nextRevision(ctx, tx, req.RepositoryID)
-	if err != nil {
-		s.internal(w, "allocate revision", err)
-		return
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE records SET data = $3, server_revision = $4, updated_at = now()
-		WHERE repository_id = $1 AND record_type = 'pull_request' AND record_id = $2`,
-		req.RepositoryID, prID, string(merged), rev); err != nil {
-		s.internal(w, "update pull request", err)
-		return
-	}
-	if err := setFieldRevisions(ctx, tx, req.RepositoryID, "pull_request", prID,
-		[]string{"status", "merge_commit_sha", "head_commit_sha", "merged_at"}, rev); err != nil {
-		s.internal(w, "update field revisions", err)
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		s.internal(w, "commit merge", err)
-		return
-	}
-	writeJSON(w, api.MergeResponse{
-		Record:         api.Record{RecordType: "pull_request", RecordID: prID, Data: merged, ServerRevision: rev},
-		ServerRevision: rev,
+		rev, err := nextRevision(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE records SET data = ?, server_revision = ?, updated_at = ?
+			WHERE record_type = 'pull_request' AND record_id = ?`,
+			string(merged), rev, now, prID); err != nil {
+			return err
+		}
+		if err := setFieldRevisions(ctx, tx, "pull_request", prID,
+			[]string{"status", "merge_commit_sha", "head_commit_sha", "merged_at"}, rev); err != nil {
+			return err
+		}
+		resp = api.MergeResponse{
+			Record:         api.Record{RecordType: "pull_request", RecordID: prID, Data: merged, ServerRevision: rev},
+			ServerRevision: rev,
+		}
+		return nil
 	})
+	if err != nil {
+		s.respond(w, "merge", err)
+		return
+	}
+	if conflictMsg == "pull request not found" {
+		writeErr(w, http.StatusNotFound, "not_found", conflictMsg)
+		return
+	}
+	if conflictMsg != "" {
+		writeErr(w, http.StatusConflict, "conflict", conflictMsg)
+		return
+	}
+	writeJSON(w, resp)
 }
 
 func (s *Server) handleUploadURL(w http.ResponseWriter, r *http.Request) {
@@ -413,21 +384,28 @@ func (s *Server) handleUploadURL(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	key := "sha256/" + req.SHA256[:2] + "/" + req.SHA256
 
-	var stored bool
-	err := s.DB.QueryRowContext(ctx, `SELECT stored FROM blobs
-		WHERE repository_id = $1 AND sha256 = $2`, req.RepositoryID, req.SHA256).Scan(&stored)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		s.internal(w, "check blob", err)
+	var alreadyStored bool
+	err := s.Repos.Update(ctx, req.RepositoryID, false, func(tx *sql.Tx) error {
+		var stored bool
+		err := tx.QueryRowContext(ctx, `SELECT stored FROM blobs WHERE sha256 = ?`, req.SHA256).Scan(&stored)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		alreadyStored = stored
+		if stored {
+			return nil
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO blobs (sha256, size_bytes, storage_key, created_at)
+			VALUES (?, ?, ?, ?) ON CONFLICT (sha256) DO NOTHING`,
+			req.SHA256, req.SizeBytes, key, records.Now())
+		return err
+	})
+	if err != nil {
+		s.respond(w, "record blob", err)
 		return
 	}
-	if stored {
+	if alreadyStored {
 		writeJSON(w, api.UploadURLResponse{StorageKey: key, AlreadyStored: true})
-		return
-	}
-	if _, err := s.DB.ExecContext(ctx, `INSERT INTO blobs (repository_id, sha256, size_bytes, storage_key)
-		VALUES ($1, $2, $3, $4) ON CONFLICT (repository_id, sha256) DO NOTHING`,
-		req.RepositoryID, req.SHA256, req.SizeBytes, key); err != nil {
-		s.internal(w, "record blob", err)
 		return
 	}
 	url, err := s.Blobs.SignedPutURL(ctx, key, req.MediaType)
@@ -436,19 +414,6 @@ func (s *Server) handleUploadURL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, api.UploadURLResponse{URL: url, StorageKey: key})
-}
-
-func (s *Server) handleDownloadURL(w http.ResponseWriter, r *http.Request) {
-	req, ok := decode[api.DownloadURLRequest](w, r)
-	if !ok {
-		return
-	}
-	url, err := s.Blobs.SignedGetURL(r.Context(), req.StorageKey)
-	if err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", "blob not available: "+err.Error())
-		return
-	}
-	writeJSON(w, api.DownloadURLResponse{URL: url})
 }
 
 // handleConfirmUpload verifies the blob landed in object storage, marks it
@@ -474,41 +439,49 @@ func (s *Server) handleConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	tx, err := s.DB.BeginTx(ctx, nil)
+	err = s.Repos.Update(ctx, req.RepositoryID, false, func(tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE blobs SET stored = 1 WHERE sha256 = ?`, req.SHA256); err != nil {
+			return err
+		}
+		var needsStamp bool
+		err := tx.QueryRowContext(ctx, `SELECT true FROM records
+			WHERE record_type = 'artifact' AND data->>'sha256' = ?
+			AND COALESCE(data->>'storage_key', '') = '' LIMIT 1`, req.SHA256).Scan(&needsStamp)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		rev, err := nextRevision(ctx, tx)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `UPDATE records
+			SET data = json_set(data, '$.storage_key', ?), server_revision = ?, updated_at = ?
+			WHERE record_type = 'artifact' AND data->>'sha256' = ?
+			AND COALESCE(data->>'storage_key', '') = ''`,
+			key, rev, records.Now(), req.SHA256)
+		return err
+	})
 	if err != nil {
-		s.internal(w, "begin confirm", err)
-		return
-	}
-	defer tx.Rollback()
-	var locked bool
-	if err := tx.QueryRowContext(ctx, `SELECT true FROM repositories WHERE id = $1 FOR UPDATE`,
-		req.RepositoryID).Scan(&locked); err != nil {
-		writeErr(w, http.StatusNotFound, "not_found", "repository not registered")
-		return
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE blobs SET stored = true
-		WHERE repository_id = $1 AND sha256 = $2`, req.RepositoryID, req.SHA256); err != nil {
-		s.internal(w, "mark blob stored", err)
-		return
-	}
-	rev, err := nextRevision(ctx, tx, req.RepositoryID)
-	if err != nil {
-		s.internal(w, "allocate revision", err)
-		return
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE records
-		SET data = jsonb_set(data, '{storage_key}', to_jsonb($3::text)), server_revision = $4, updated_at = now()
-		WHERE repository_id = $1 AND record_type = 'artifact' AND data->>'sha256' = $2
-		AND COALESCE(data->>'storage_key', '') = ''`,
-		req.RepositoryID, req.SHA256, key, rev); err != nil {
-		s.internal(w, "stamp storage key", err)
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		s.internal(w, "commit confirm", err)
+		s.respond(w, "confirm upload", err)
 		return
 	}
 	writeJSON(w, api.UploadURLResponse{StorageKey: key, AlreadyStored: true})
+}
+
+func (s *Server) handleDownloadURL(w http.ResponseWriter, r *http.Request) {
+	req, ok := decode[api.DownloadURLRequest](w, r)
+	if !ok {
+		return
+	}
+	url, err := s.Blobs.SignedGetURL(r.Context(), req.StorageKey)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not_found", "blob not available: "+err.Error())
+		return
+	}
+	writeJSON(w, api.DownloadURLResponse{URL: url})
 }
 
 func (s *Server) internal(w http.ResponseWriter, what string, err error) {

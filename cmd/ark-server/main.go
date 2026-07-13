@@ -1,13 +1,15 @@
-// Command ark-server is the Ark sync service: Cloud Run + Cloud SQL + GCS
-// in production, or any Postgres plus local blob storage in development.
+// Command ark-server is the Ark sync service. Repository metadata lives in
+// one SQLite database per repository, persisted to GCS in production or a
+// local directory in development; artifact blobs go to object storage.
 //
 // Configuration (environment):
 //
-//	DATABASE_URL   Postgres DSN (required)
 //	ARK_API_TOKEN  bearer token clients must present (required)
-//	GCS_BUCKET     bucket for artifact blobs (omit to store blobs on disk)
-//	BLOB_DIR       local blob directory (default ./blobs; used without GCS_BUCKET)
+//	GCS_BUCKET     bucket for repo databases and artifact blobs (production)
+//	DATA_DIR       local directory for repo databases + blobs (used without
+//	               GCS_BUCKET; default ./data)
 //	BASE_URL       externally reachable base URL (required without GCS_BUCKET)
+//	CACHE_DIR      scratch space for working copies (default os temp dir)
 //	PORT           listen port (default 8080)
 package main
 
@@ -17,11 +19,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"cloud.google.com/go/storage"
 
 	"github.com/ijroth/ark/internal/server"
+	"github.com/ijroth/ark/internal/server/repodb"
 )
 
 func main() {
@@ -35,41 +39,46 @@ func run() error {
 	ctx := context.Background()
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
 
-	dsn := os.Getenv("DATABASE_URL")
-	if dsn == "" {
-		return fmt.Errorf("DATABASE_URL is required")
-	}
 	token := os.Getenv("ARK_API_TOKEN")
 	if token == "" {
 		return fmt.Errorf("ARK_API_TOKEN is required")
 	}
-
-	db, err := server.Open(ctx, dsn)
-	if err != nil {
+	cacheDir := os.Getenv("CACHE_DIR")
+	if cacheDir == "" {
+		cacheDir = filepath.Join(os.TempDir(), "ark-repos")
+	}
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return err
 	}
-	defer db.Close()
 
+	var backend repodb.Backend
 	var blobs server.BlobStore
 	if bucket := os.Getenv("GCS_BUCKET"); bucket != "" {
 		client, err := storage.NewClient(ctx)
 		if err != nil {
 			return fmt.Errorf("gcs client: %w", err)
 		}
+		backend = &repodb.GCSBackend{Client: client, Bucket: bucket}
 		blobs = &server.GCSBlobStore{Client: client, Bucket: bucket}
 	} else {
 		base := os.Getenv("BASE_URL")
 		if base == "" {
 			return fmt.Errorf("BASE_URL is required when GCS_BUCKET is unset")
 		}
-		dir := os.Getenv("BLOB_DIR")
+		dir := os.Getenv("DATA_DIR")
 		if dir == "" {
-			dir = "blobs"
+			dir = "data"
 		}
-		blobs = &server.LocalBlobStore{Dir: dir, BaseURL: base}
+		backend = &repodb.LocalBackend{Dir: filepath.Join(dir, "repos")}
+		blobs = &server.LocalBlobStore{Dir: filepath.Join(dir, "blobs"), BaseURL: base}
 	}
 
-	s := &server.Server{DB: db, Token: token, Blobs: blobs, Log: log}
+	s := &server.Server{
+		Repos: repodb.NewManager(backend, cacheDir),
+		Token: token,
+		Blobs: blobs,
+		Log:   log,
+	}
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"

@@ -12,17 +12,16 @@ import (
 	"github.com/ijroth/ark/internal/servertest"
 )
 
-// startSyncServer boots the real server over a disposable Postgres database
-// and local blob storage, returning its URL.
+// startSyncServer boots the real server over temp-dir SQLite repository
+// databases and local blob storage, returning its URL.
 func startSyncServer(t *testing.T) string {
 	t.Helper()
-	db := servertest.NewDB(t)
-	blobs := &server.LocalBlobStore{Dir: t.TempDir()}
-	s := &server.Server{DB: db, Token: "e2e-token", Blobs: blobs}
+	s := servertest.NewServer(t)
+	blobs := s.Blobs.(*server.LocalBlobStore)
 	ts := httptest.NewServer(s.Handler())
 	blobs.BaseURL = ts.URL
 	t.Cleanup(ts.Close)
-	t.Setenv("ARK_TOKEN", "e2e-token")
+	t.Setenv("ARK_TOKEN", servertest.Token)
 	return ts.URL
 }
 

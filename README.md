@@ -19,8 +19,9 @@ Ark is part of the Elk project family.
 V1: **complete**. The local tool works entirely offline; when a sync service
 is configured, mutations push up, records pull down, artifacts flow through
 object storage, and PR merges are cloud-confirmed. The sync service
-(`cmd/ark-server`) runs on any Postgres — Cloud Run + Cloud SQL + GCS in
-production, or a laptop Postgres with disk blobs for development.
+(`cmd/ark-server`) keeps one SQLite database per repository — persisted to
+GCS in production (Cloud Run, scale-to-zero, no always-on database), or to
+a plain directory for development. See docs/rfc-0001-per-repo-sqlite-storage.md.
 
 See [docs/v1-spec.md](docs/v1-spec.md) for the full specification and
 [docs/principles.md](docs/principles.md) for the design principles.
