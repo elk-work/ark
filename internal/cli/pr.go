@@ -2,13 +2,17 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
 
 	"github.com/ijroth/ark/internal/app"
+	"github.com/ijroth/ark/internal/cloud"
 	"github.com/ijroth/ark/internal/records"
 	"github.com/ijroth/ark/internal/store"
+	arksync "github.com/ijroth/ark/internal/sync"
+	"github.com/ijroth/ark/pkg/api"
 )
 
 func newPRCmd(g *globals) *cobra.Command {
@@ -389,6 +393,34 @@ func mergePR(ctx context.Context, a *app.Context, ref, strategy string, noPush b
 	if pr.Status != "open" {
 		return nil, records.Validationf("pull request #%d is %s", pr.Number, pr.Status)
 	}
+
+	// With a remote configured, a merge must be confirmed online (spec §12):
+	// push local mutations, reload the PR from the server, and verify it is
+	// still open before touching Git.
+	var cloudClient *cloud.Client
+	if a.Config.Remote != "" {
+		cloudClient, err = arksync.Client(a)
+		if err != nil {
+			return nil, err
+		}
+		var pushRes arksync.Result
+		if err := arksync.Push(ctx, a, cloudClient, &pushRes); err != nil {
+			return nil, err
+		}
+		rec, err := cloudClient.GetRecord(ctx, a.Config.RepositoryID, "pull_request", pr.ID)
+		if err != nil && records.ExitCode(err) != 3 {
+			return nil, err // unreachable remote blocks the merge (exit 6)
+		}
+		if rec != nil {
+			var remote store.PullRequest
+			if err := json.Unmarshal(rec.Data, &remote); err == nil && remote.Status != "open" {
+				var syncRes arksync.Result
+				arksync.Pull(ctx, a, cloudClient, &syncRes)
+				return nil, records.Conflictf("pull request #%d is already %s on the server", pr.Number, remote.Status)
+			}
+		}
+	}
+
 	clean, err := a.Git.IsClean(ctx)
 	if err != nil {
 		return nil, err
@@ -428,7 +460,7 @@ func mergePR(ctx context.Context, a *app.Context, ref, strategy string, noPush b
 		if err != nil {
 			return nil, err
 		}
-		if err := a.Store.MarkPRMerged(ctx, pr, baseSHA, headSHA); err != nil {
+		if err := recordMerge(ctx, a, cloudClient, pr, baseSHA, headSHA); err != nil {
 			return nil, err
 		}
 		return &mergeResult{PullRequest: pr, Strategy: "recorded", Pushed: false}, nil
@@ -503,10 +535,42 @@ func mergePR(ctx context.Context, a *app.Context, ref, strategy string, noPush b
 		pushed = true
 	}
 
-	if err := a.Store.MarkPRMerged(ctx, pr, mergeSHA, headSHA); err != nil {
+	if err := recordMerge(ctx, a, cloudClient, pr, mergeSHA, headSHA); err != nil {
 		// Git already has the merge (and possibly origin does); re-running
 		// `ark pr merge` takes the already-merged path above and records it.
 		return nil, records.Partialf("Git merge %s succeeded but recording it failed: %v; re-run `ark pr merge %d` to repair the record", short(mergeSHA), err, pr.Number)
 	}
 	return &mergeResult{PullRequest: pr, Strategy: strategy, Pushed: pushed}, nil
+}
+
+// recordMerge marks the PR merged: on the server first when a remote is
+// configured (spec §12 step 12), then locally. If the Git work succeeded but
+// the server call fails, the local record plus its queued mutation is the
+// repair record — the next sync reconciles.
+func recordMerge(ctx context.Context, a *app.Context, cloudClient *cloud.Client, pr *store.PullRequest, mergeSHA, headSHA string) error {
+	if cloudClient != nil {
+		resp, err := cloudClient.Merge(ctx, pr.ID, api.MergeRequest{
+			RepositoryID:   a.Config.RepositoryID,
+			HeadCommitSHA:  headSHA,
+			MergeCommitSHA: mergeSHA,
+			MergedBy:       a.Store.Actor.ID,
+		})
+		if err == nil {
+			if applyErr := a.Store.ApplyServerRecord(ctx, resp.Record); applyErr == nil {
+				pr.Status = "merged"
+				pr.MergeCommitSHA = mergeSHA
+				return nil
+			}
+			// Server confirmed; local write failed. Fall through to the
+			// local mark so the mutation log carries the repair.
+		} else if records.ExitCode(err) == 3 {
+			// Server has never seen this PR (created offline and push was
+			// skipped); the local mark queues it for the next sync.
+		} else if records.ExitCode(err) != 6 {
+			return err // e.g. merged by someone else: surface the conflict
+		}
+		// Offline (exit 6) also falls through: Git merge already happened,
+		// so record locally and repair via the mutation log on next sync.
+	}
+	return a.Store.MarkPRMerged(ctx, pr, mergeSHA, headSHA)
 }

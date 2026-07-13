@@ -121,15 +121,18 @@ func newConflictResolveCmd(g *globals) *cobra.Command {
 			switch keep {
 			case "local":
 				status = "resolved_local"
+				// Re-submit the local change against the record's current
+				// server revision; the next sync carries it up.
+				if err := a.Store.RequeueConflictLocal(cmd.Context(), args[0]); err != nil {
+					return err
+				}
 			case "remote":
-				status = "resolved_remote"
+				status = "resolved_remote" // server state already pulled; nothing to send
 			case "manual":
 				status = "resolved_manual"
 			default:
 				return records.Validationf("--keep must be local, remote, or manual")
 			}
-			// Applying the chosen side to records arrives with cloud sync
-			// (Phase 4); until then resolution is bookkeeping.
 			res, err := a.DB.ExecContext(cmd.Context(), `UPDATE conflicts
 				SET status = ?, resolved_at = ? WHERE id LIKE ? AND status = 'unresolved'`,
 				status, records.Now(), args[0]+"%")

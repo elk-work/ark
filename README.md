@@ -16,14 +16,29 @@ Ark is part of the Elk project family.
 
 ## Status
 
-V1 local tool: **working**. Everything below runs today, entirely offline,
-with all state in `.ark/` (SQLite + content-addressed objects). Every write
-also records the *intent* behind it in a mutation log, so cloud sync
-(Cloud SQL + GCS, spec Phases 4–5) can replay local history when it lands.
-`ark sync` currently reports the queued mutation count and exits 6 (offline).
+V1: **complete**. The local tool works entirely offline; when a sync service
+is configured, mutations push up, records pull down, artifacts flow through
+object storage, and PR merges are cloud-confirmed. The sync service
+(`cmd/ark-server`) runs on any Postgres — Cloud Run + Cloud SQL + GCS in
+production, or a laptop Postgres with disk blobs for development.
 
 See [docs/v1-spec.md](docs/v1-spec.md) for the full specification and
 [docs/principles.md](docs/principles.md) for the design principles.
+
+### Sync in brief
+
+```sh
+ark remote set https://ark.example.com   # per repository
+ark login                                # token -> keychain (or ~/.ark/credentials.toml)
+ark sync                                 # push mutations, upload blobs, pull records
+```
+
+A second machine joins with `ark init --repository <id>`, then remote/login/
+sync. Conflict rules follow spec §10: comments and reviews never conflict,
+task/PR fields merge independently, concurrent title/body edits surface in
+`ark conflict list` where `--keep local|remote` resolves them. Display
+numbers minted concurrently by offline clients are renumbered by the server
+(the ULID is authoritative).
 
 ## Install
 

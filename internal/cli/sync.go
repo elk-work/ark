@@ -3,7 +3,7 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/ijroth/ark/internal/records"
+	arksync "github.com/ijroth/ark/internal/sync"
 )
 
 func newSyncCmd(g *globals) *cobra.Command {
@@ -17,17 +17,34 @@ func newSyncCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer a.Close()
-			pending, err := a.Store.PendingMutations(cmd.Context())
+			res, err := arksync.Run(cmd.Context(), a)
 			if err != nil {
 				return err
 			}
-			if a.Config.Remote == "" {
-				return records.Offlinef(
-					"no Ark remote configured (%d mutations queued locally); set `remote` in .ark/config.toml once the sync service exists",
-					pending)
-			}
-			// Phase 4 (docs/v1-spec.md §9) implements the push/pull protocol.
-			return records.Offlinef("cloud sync is not implemented yet (%d mutations queued locally)", pending)
+			p := g.printer(cmd)
+			return p.Result(res, func() {
+				p.Line("Synced with %s (server revision %d)", a.Config.Remote, res.ServerRevision)
+				if res.Pushed > 0 {
+					p.Line("  pushed    %d mutations (%d applied, %d rejected, %d conflicts)",
+						res.Pushed, res.Applied, res.Rejected, res.Conflicts)
+				}
+				if res.ArtifactsUploaded > 0 {
+					p.Line("  uploaded  %d artifact blobs", res.ArtifactsUploaded)
+				}
+				if res.PulledRecords > 0 || res.PulledTombstones > 0 {
+					p.Line("  pulled    %d records, %d tombstones", res.PulledRecords, res.PulledTombstones)
+				}
+				if res.Pushed == 0 && res.PulledRecords == 0 && res.PulledTombstones == 0 {
+					p.Line("  nothing to do")
+				}
+				for _, issue := range res.Issues {
+					p.Line("  %s: %s %s — %s", issue.Status, issue.RecordType,
+						shortID(issue.RecordID), issue.Error)
+				}
+				if res.Conflicts > 0 {
+					p.Line("Run `ark conflict list` to inspect conflicts.")
+				}
+			})
 		},
 	}
 }

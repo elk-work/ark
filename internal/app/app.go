@@ -116,8 +116,11 @@ type InitResult struct {
 	ActorName      string `json:"actor_name"`
 }
 
-// Init creates .ark inside the Git repository containing dir.
-func Init(ctx context.Context, dir string) (*InitResult, error) {
+// Init creates .ark inside the Git repository containing dir. A non-empty
+// repoID joins an existing Ark repository (a second client of the same
+// project) instead of minting a new identity; the first sync then pulls the
+// shared history.
+func Init(ctx context.Context, dir, repoID string) (*InitResult, error) {
 	root, err := git.TopLevel(ctx, dir)
 	if err != nil {
 		return nil, err
@@ -159,7 +162,11 @@ func Init(ctx context.Context, dir string) (*InitResult, error) {
 		return nil, err
 	}
 
-	repoID := records.NewID()
+	if repoID == "" {
+		repoID = records.NewID()
+	} else if !records.ValidID(repoID) {
+		return nil, records.Validationf("invalid repository id %q", repoID)
+	}
 	if _, err := d.ExecContext(ctx, `INSERT INTO repositories
 		(id, name, path, git_remote_url, default_branch, created_at)
 		VALUES (?, ?, ?, ?, ?, ?)`,

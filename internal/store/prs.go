@@ -118,7 +118,8 @@ func (s *Store) ResolvePR(ctx context.Context, ref string) (*PullRequest, error)
 	ref = strings.TrimSpace(ref)
 	if n, err := strconv.ParseInt(ref, 10, 64); err == nil {
 		pr, err := scanPR(s.DB.QueryRowContext(ctx, `SELECT `+prCols+` FROM pull_requests
-			WHERE repository_id = ? AND number = ? AND deleted_at IS NULL`, s.RepoID, n))
+			WHERE repository_id = ? AND number = ? AND deleted_at IS NULL
+			ORDER BY created_at LIMIT 1`, s.RepoID, n))
 		if err == sql.ErrNoRows {
 			return nil, records.NotFoundf("pull request #%d not found", n)
 		}

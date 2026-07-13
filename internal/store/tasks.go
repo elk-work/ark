@@ -87,8 +87,10 @@ func (s *Store) CreateTask(ctx context.Context, title, body string) (*Task, erro
 func (s *Store) ResolveTask(ctx context.Context, ref string) (*Task, error) {
 	ref = strings.TrimSpace(ref)
 	if n, err := strconv.ParseInt(ref, 10, 64); err == nil {
+		// Numbers can transiently duplicate mid-sync; the oldest record wins.
 		row := s.DB.QueryRowContext(ctx, `SELECT `+taskCols+` FROM tasks
-			WHERE repository_id = ? AND number = ? AND deleted_at IS NULL`, s.RepoID, n)
+			WHERE repository_id = ? AND number = ? AND deleted_at IS NULL
+			ORDER BY created_at LIMIT 1`, s.RepoID, n)
 		t, err := scanTask(row)
 		if err == sql.ErrNoRows {
 			return nil, records.NotFoundf("task #%d not found", n)

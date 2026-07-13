@@ -9,7 +9,7 @@ import (
 )
 
 func newInitCmd(g *globals) *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "init",
 		Short: "Initialize Ark inside the current Git repository",
 		Args:  cobra.NoArgs,
@@ -21,7 +21,8 @@ func newInitCmd(g *globals) *cobra.Command {
 					return err
 				}
 			}
-			res, err := app.Init(cmd.Context(), dir)
+			repoID, _ := cmd.Flags().GetString("repository")
+			res, err := app.Init(cmd.Context(), dir, repoID)
 			if err != nil {
 				return err
 			}
@@ -37,4 +38,7 @@ func newInitCmd(g *globals) *cobra.Command {
 			})
 		},
 	}
+	cmd.Flags().String("repository", "",
+		"join an existing Ark repository by ID (second client; then set remote, login, sync)")
+	return cmd
 }

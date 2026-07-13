@@ -197,6 +197,16 @@ func (s *Store) CopyArtifact(a *Artifact, arkDir, destPath string) error {
 	return nil
 }
 
+// SetArtifactLocalPath records where a fetched artifact object landed.
+// Infrastructure bookkeeping, not a record change: no mutation is logged.
+func (s *Store) SetArtifactLocalPath(ctx context.Context, id, localPath string) error {
+	if _, err := s.DB.ExecContext(ctx, `UPDATE artifacts SET local_path = ? WHERE id = ?`,
+		localPath, id); err != nil {
+		return records.DBErr("update artifact path", err)
+	}
+	return nil
+}
+
 // ParseParentRef parses "task:12", "run:01ABC", "pr:3", "review:01XYZ" into
 // a (parentType, ref) pair using Ark's canonical parent type names.
 func ParseParentRef(ref string) (string, string, error) {

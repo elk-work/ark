@@ -9,6 +9,7 @@ import (
 	"github.com/ijroth/ark/internal/app"
 	"github.com/ijroth/ark/internal/records"
 	"github.com/ijroth/ark/internal/store"
+	arksync "github.com/ijroth/ark/internal/sync"
 )
 
 func newArtifactCmd(g *globals) *cobra.Command {
@@ -155,6 +156,13 @@ func newArtifactGetCmd(g *globals) *cobra.Command {
 			dest, _ := cmd.Flags().GetString("output")
 			if dest == "" {
 				dest = art.Name
+			}
+			// A record synced from another client has no local object yet;
+			// fetch it from the remote's object storage.
+			if art.LocalPath == "" {
+				if _, err := arksync.FetchArtifact(cmd.Context(), a, art); err != nil {
+					return err
+				}
 			}
 			if err := a.Store.CopyArtifact(art, a.ArkDir, dest); err != nil {
 				return err
