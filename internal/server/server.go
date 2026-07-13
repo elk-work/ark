@@ -48,7 +48,17 @@ func Open(ctx context.Context, dsn string) (*sql.DB, error) {
 // Handler builds the HTTP API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			writeErr(w, http.StatusNotFound, "not_found", "unknown route")
+			return
+		}
+		writeJSON(w, map[string]string{"service": "ark-sync", "api": "v1"})
+	})
+	// Not /healthz: Google Frontend intercepts that path on run.app
+	// hostnames and serves its own 404 before the request reaches the
+	// container (verified empirically 2026-07-13).
+	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.DB.PingContext(r.Context()); err != nil {
 			http.Error(w, "db unreachable", http.StatusServiceUnavailable)
 			return
@@ -64,7 +74,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/artifacts/confirm", s.auth(s.handleConfirmUpload))
 	mux.HandleFunc("POST /v1/artifacts/download-url", s.auth(s.handleDownloadURL))
 	if local, ok := s.Blobs.(*LocalBlobStore); ok {
-		mux.Handle("/blobs/", local.Handler())
+		mux.Handle("GET /blobs/", local.Handler())
+		mux.Handle("PUT /blobs/", local.Handler())
 	}
 	return mux
 }
@@ -170,8 +181,9 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 
 	// Mutations apply in creation order; savepoint handling inside
 	// processMutation keeps one bad mutation from poisoning the batch.
+	session := sessionRevisions{}
 	for _, m := range req.Mutations {
-		out := processMutation(ctx, tx, req.RepositoryID, m)
+		out := processMutation(ctx, tx, req.RepositoryID, m, session)
 		mo := api.MutationOutcome{MutationID: m.ID, Error: out.err,
 			Remote: out.remote, ServerRevision: out.revision}
 		switch out.status {

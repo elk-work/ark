@@ -45,12 +45,20 @@ type outcome struct {
 	revision int64
 }
 
+// sessionRevisions tracks revisions produced earlier in the same push, so a
+// client's own sequence of offline changes applies causally: a create
+// followed by an edit of the same record must not read as a concurrent
+// server-side change that cloud-wins away the edit.
+type sessionRevisions map[string]int64
+
+func (s sessionRevisions) key(m api.Mutation) string { return m.RecordType + "/" + m.RecordID }
+
 // processMutation handles one mutation inside the push transaction: replays
 // return their stored outcome; fresh mutations apply inside a savepoint so a
 // failed statement cannot poison the rest of the batch, and the outcome is
 // recorded after the savepoint resolves. The repository row is locked by the
 // caller, serializing revision allocation.
-func processMutation(ctx context.Context, tx *sql.Tx, repoID string, m api.Mutation) outcome {
+func processMutation(ctx context.Context, tx *sql.Tx, repoID string, m api.Mutation, session sessionRevisions) outcome {
 	// Idempotency: replays return the stored outcome.
 	var prior outcome
 	var priorStatus string
@@ -66,6 +74,12 @@ func processMutation(ctx context.Context, tx *sql.Tx, repoID string, m api.Mutat
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return outcome{status: statusRejected, err: "idempotency check failed: " + err.Error()}
+	}
+
+	// This client's earlier mutations in this push are causal history, not
+	// concurrent edits: lift the base revision to what this push produced.
+	if sessionRev, ok := session[session.key(m)]; ok && sessionRev > m.BaseServerRevision {
+		m.BaseServerRevision = sessionRev
 	}
 
 	if _, err := tx.ExecContext(ctx, `SAVEPOINT mut`); err != nil {
@@ -89,6 +103,9 @@ func processMutation(ctx context.Context, tx *sql.Tx, repoID string, m api.Mutat
 		VALUES ($1, $2, $3, $4, $5, $6)`,
 		m.ID, repoID, string(out.status), out.err, nullableJSON(out.remote), out.revision); err != nil {
 		return outcome{status: statusRejected, err: "record outcome: " + err.Error()}
+	}
+	if out.status == statusApplied && out.revision > 0 {
+		session[session.key(m)] = out.revision
 	}
 	return out
 }

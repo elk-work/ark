@@ -43,8 +43,9 @@ func push(t *testing.T, s *Server, muts ...api.Mutation) api.PushResponse {
 	if err := tx.QueryRow(`SELECT true FROM repositories WHERE id = $1 FOR UPDATE`, repoID).Scan(&locked); err != nil {
 		t.Fatalf("lock repo: %v", err)
 	}
+	session := sessionRevisions{}
 	for _, m := range muts {
-		out := processMutation(ctx, tx, repoID, m)
+		out := processMutation(ctx, tx, repoID, m, session)
 		mo := api.MutationOutcome{MutationID: m.ID, Error: out.err, Remote: out.remote, ServerRevision: out.revision}
 		switch out.status {
 		case statusApplied:
@@ -143,6 +144,33 @@ func TestFieldMerge(t *testing.T) {
 	}
 	if data := recordData(t, s, "task", "t1"); data["status"] != "blocked" {
 		t.Errorf("cloud should win status: %v", data["status"])
+	}
+}
+
+// TestOfflineCreateThenEdit: a client that creates a record and edits it
+// before its first sync pushes both in one batch. The edit's base revision
+// is 0, but it causally follows the create — it must apply, not be eaten by
+// the cloud-wins rule.
+func TestOfflineCreateThenEdit(t *testing.T) {
+	s := newTestServer(t)
+	registerRepo(t, s)
+
+	r := push(t, s,
+		mut("m1", "task", "t1", "create", 0, `{"id":"t1","number":1,"title":"T","status":"open"}`),
+		mut("m2", "task", "t1", "update", 0, `{"status":"in_progress"}`),
+		mut("m3", "task", "t1", "update", 0, `{"status":"done","title":"T (done)"}`),
+	)
+	if len(r.Applied) != 3 || len(r.Conflicts) != 0 {
+		t.Fatalf("batch: applied=%d conflicts=%d rejected=%d", len(r.Applied), len(r.Conflicts), len(r.Rejected))
+	}
+	data := recordData(t, s, "task", "t1")
+	if data["status"] != "done" || data["title"] != "T (done)" {
+		t.Errorf("sequential offline edits lost: %+v", data)
+	}
+	// The three mutations must have distinct, increasing revisions.
+	if !(r.Applied[0].ServerRevision < r.Applied[1].ServerRevision &&
+		r.Applied[1].ServerRevision < r.Applied[2].ServerRevision) {
+		t.Errorf("revisions not increasing: %+v", r.Applied)
 	}
 }
 

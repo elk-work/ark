@@ -13,7 +13,7 @@ Provisioned 2026-07-12 in project `steadfast-sound-502323-q0`, region
 | Cloud SQL (Postgres 17, enterprise, db-f1-micro, 10GB SSD) | `ark-sql` |
 | Database / user | `ark` / `ark` |
 | GCS bucket (uniform access, no public access) | `elkproject-ark-artifacts` |
-| Cloud Run service | `ark` |
+| Cloud Run service | `ark` — https://ark-709757975936.us-west1.run.app |
 | Runtime service account | `elk-issac-operator@steadfast-sound-502323-q0.iam.gserviceaccount.com` |
 | Secrets | `ark-api-token`, `ark-db-password`, `ark-database-url` |
 
@@ -21,6 +21,22 @@ The service account holds `roles/cloudsql.client` (project),
 `roles/storage.objectAdmin` (bucket), `roles/secretmanager.secretAccessor`
 (the secrets), and `roles/iam.serviceAccountTokenCreator` on itself (V4
 signed URLs sign via the IAM credentials API on Cloud Run).
+
+## Gotchas learned the hard way
+
+- **`/healthz` is unreachable on run.app URLs.** Google Frontend intercepts
+  that path and serves its own 404 before the request reaches the container
+  (no request logs appear). The health endpoint is `/health`.
+- **Domain Restricted Sharing.** The elkproject.com org blocks `allUsers`
+  IAM members by default; this project carries an org-policy override
+  (`iam.allowedPolicyMemberDomains: allowAll`) so the service can be public.
+  The service enforces its own bearer token.
+- **Cloud Build default SA.** New projects need
+  `roles/cloudbuild.builds.builder` granted to
+  `<project-number>-compute@developer.gserviceaccount.com` before
+  `gcloud run deploy --source` works.
+- **Secrets end with what you put in them.** A trailing newline in a token
+  secret breaks bearer comparison; create secrets with `printf`, not `echo`.
 
 ## Deploying a new revision
 
