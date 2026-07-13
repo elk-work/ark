@@ -65,7 +65,13 @@ func TestTaskLifecycle(t *testing.T) {
 	if err != nil || byNum.ID != task.ID {
 		t.Fatalf("resolve by number: %v", err)
 	}
-	byPrefix, err := s.ResolveTask(ctx, task.ID[:12])
+	// Shortest prefix that distinguishes task from task2 (monotonic ULIDs
+	// minted in the same millisecond diverge only near the end).
+	n := 0
+	for n < len(task.ID) && n < len(task2.ID) && task.ID[n] == task2.ID[n] {
+		n++
+	}
+	byPrefix, err := s.ResolveTask(ctx, task.ID[:n+1])
 	if err != nil || byPrefix.ID != task.ID {
 		t.Fatalf("resolve by prefix: %v", err)
 	}

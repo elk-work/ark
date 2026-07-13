@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oklog/ulid/v2"
@@ -37,10 +38,18 @@ const (
 	TypeArtifact    RecordType = "artifact"
 )
 
-// NewID returns a new ULID. ULIDs are locally generated, lexically sortable
-// by creation time, and need no coordination.
+var (
+	entropyMu sync.Mutex
+	entropy   = ulid.Monotonic(rand.Reader, 0)
+)
+
+// NewID returns a new ULID. ULIDs are locally generated, need no
+// coordination, and — with monotonic entropy — sort strictly by creation
+// order within a process even inside one millisecond.
 func NewID() string {
-	return ulid.MustNew(ulid.Timestamp(time.Now().UTC()), rand.Reader).String()
+	entropyMu.Lock()
+	defer entropyMu.Unlock()
+	return ulid.MustNew(ulid.Timestamp(time.Now().UTC()), entropy).String()
 }
 
 // Now returns the current UTC time formatted for storage.
