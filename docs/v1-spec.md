@@ -493,6 +493,42 @@ Cloud artifacts should be stored in Google Cloud Storage.
 
 ---
 
+## 6.10 Promotion
+
+A promotion records that a version — a Git merge commit and/or an artifact
+checksum — became active in an environment. It is the deployment anchor for
+observability tooling.
+
+Fields:
+
+```text
+id
+repository_id
+environment
+service
+merge_commit_sha
+artifact_sha256
+pull_request_id
+activated_at
+ended_at
+metadata_json
+created_at
+created_by
+created_by_type
+sync_state
+server_revision
+```
+
+At least one of `merge_commit_sha` and `artifact_sha256` must be set.
+
+Creating a promotion ends the prior active promotion for the same
+(environment, service): its `ended_at` becomes the new promotion's
+`activated_at`, in the same transaction.
+
+A promotion may also be ended explicitly without a successor.
+
+---
+
 ## 7. SQLite Schema
 
 Use SQLite with:
@@ -524,6 +560,7 @@ agent_runs
 pull_requests
 reviews
 artifacts
+promotions
 mutations
 sync_state
 conflicts
@@ -717,7 +754,13 @@ Artifacts are immutable by checksum.
 
 Changing a file creates a new artifact.
 
-## 10.7 Conflict Storage
+## 10.7 Promotions
+
+Only `ended_at` and `metadata_json` mutate after creation.
+
+Concurrent updates never need a person: cloud wins.
+
+## 10.8 Conflict Storage
 
 The local client stores unresolved conflicts in:
 

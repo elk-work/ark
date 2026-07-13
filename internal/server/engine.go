@@ -17,6 +17,11 @@ import (
 
 // Rules per record type. Append-only types never conflict; mergeable types
 // merge field-by-field with title/body requiring human resolution.
+//
+// promotion appears in none of these maps deliberately: it is not
+// append-only (ended_at closes it later), not numbered, and needs no
+// conflictFields — only ended_at and metadata_json ever mutate, and
+// cloud-wins is the correct resolution for a concurrent update.
 var (
 	appendOnlyTypes = map[string]bool{
 		"comment":        true,
