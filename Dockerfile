@@ -1,5 +1,5 @@
-# Build from the repository root:
-#   docker build -f cmd/ark-server/Dockerfile -t ark-server .
+# Builds the sync service (cmd/ark-server). Used by Cloud Run source deploys.
+
 FROM golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
