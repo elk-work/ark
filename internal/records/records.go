@@ -36,6 +36,8 @@ const (
 	TypePullRequest RecordType = "pull_request"
 	TypeReview      RecordType = "review"
 	TypeArtifact    RecordType = "artifact"
+	TypePromotion   RecordType = "promotion"
+	// TypeGap      RecordType = "gap" // reserved for a future record type
 )
 
 var (

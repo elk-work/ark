@@ -245,6 +245,49 @@ func TestMergeEndpointStateMachine(t *testing.T) {
 	}
 }
 
+// TestPromotionMutableAndReplayable: promotions are not append-only — the
+// ended_at update must apply — and replaying either mutation returns the
+// stored outcome without minting a new revision.
+func TestPromotionMutableAndReplayable(t *testing.T) {
+	s := newTestServer(t)
+	registerRepo(t, s)
+
+	create := mut("m1", "promotion", "p1", "create", 0,
+		`{"id":"p1","environment":"production","merge_commit_sha":"abc","activated_at":"2026-01-01T00:00:00Z"}`)
+	r1 := push(t, s, create)
+	if len(r1.Applied) != 1 {
+		t.Fatalf("create: %+v", r1)
+	}
+	baseRev := r1.Applied[0].ServerRevision
+
+	end := mut("m2", "promotion", "p1", "update", baseRev, `{"ended_at":"2026-01-02T00:00:00Z"}`)
+	r2 := push(t, s, end)
+	if len(r2.Applied) != 1 {
+		t.Fatalf("ended_at update should apply: %+v", r2)
+	}
+	if got := recordData(t, s, "promotion", "p1")["ended_at"]; got != "2026-01-02T00:00:00Z" {
+		t.Errorf("ended_at = %v", got)
+	}
+
+	// Replay: same outcome, no new revision.
+	r3 := push(t, s, end)
+	if len(r3.Applied) != 1 || r3.Applied[0].ServerRevision != r2.Applied[0].ServerRevision {
+		t.Fatalf("replay: %+v", r3)
+	}
+	if r3.ServerRevision != r2.ServerRevision {
+		t.Errorf("replay bumped revision %d -> %d", r2.ServerRevision, r3.ServerRevision)
+	}
+
+	// A concurrent stale update never needs a person: cloud wins silently.
+	r4 := push(t, s, mut("m3", "promotion", "p1", "update", baseRev, `{"ended_at":"2026-01-03T00:00:00Z"}`))
+	if len(r4.Applied) != 1 || len(r4.Conflicts) != 0 {
+		t.Fatalf("stale promotion update should apply with cloud winning: %+v", r4)
+	}
+	if got := recordData(t, s, "promotion", "p1")["ended_at"]; got != "2026-01-02T00:00:00Z" {
+		t.Errorf("cloud should win ended_at: %v", got)
+	}
+}
+
 // TestSnapshotIsPlainSQLite: the persisted repository database is an
 // ordinary SQLite file — the boring recovery path is opening it.
 func TestSnapshotIsPlainSQLite(t *testing.T) {

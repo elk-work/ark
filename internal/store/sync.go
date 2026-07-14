@@ -157,6 +157,8 @@ func tableForType(recordType string) (string, bool) {
 		return "reviews", true
 	case records.TypeArtifact:
 		return "artifacts", true
+	case records.TypePromotion:
+		return "promotions", true
 	}
 	return "", false
 }
@@ -387,6 +389,26 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 			a.SHA256, a.StorageKey, a.CreatedAt, a.CreatedBy, a.CreatedByType, rec.ServerRevision)
 		if err != nil {
 			return records.DBErr("upsert artifact", err)
+		}
+		return nil
+	case records.TypePromotion:
+		var p Promotion
+		if err := unmarshal(&p); err != nil {
+			return err
+		}
+		_, err := tx.Exec(`INSERT INTO promotions
+			(id, repository_id, environment, service, merge_commit_sha, artifact_sha256,
+			 pull_request_id, activated_at, ended_at, metadata_json, created_at, created_by,
+			 created_by_type, sync_state, server_revision)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'synced', ?)
+			ON CONFLICT (id) DO UPDATE SET ended_at = excluded.ended_at,
+			 metadata_json = excluded.metadata_json, sync_state = 'synced',
+			 server_revision = excluded.server_revision`,
+			p.ID, p.RepositoryID, p.Environment, p.Service, p.MergeCommitSHA,
+			p.ArtifactSHA256, nullable(p.PullRequestID), p.ActivatedAt, nullable(p.EndedAt),
+			p.MetadataJSON, p.CreatedAt, p.CreatedBy, p.CreatedByType, rec.ServerRevision)
+		if err != nil {
+			return records.DBErr("upsert promotion", err)
 		}
 		return nil
 	case "actor":
