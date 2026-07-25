@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ijroth/ark/internal/records"
+	"github.com/elkproject/ark/internal/records"
 )
 
 // Repo runs Git commands against one working directory.

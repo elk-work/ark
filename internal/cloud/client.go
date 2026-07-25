@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ijroth/ark/internal/records"
-	"github.com/ijroth/ark/pkg/api"
+	"github.com/elkproject/ark/internal/records"
+	"github.com/elkproject/ark/pkg/api"
 )
 
 // Client talks to one Ark remote.

@@ -24,8 +24,8 @@ import (
 
 	"cloud.google.com/go/storage"
 
-	"github.com/ijroth/ark/internal/server"
-	"github.com/ijroth/ark/internal/server/repodb"
+	"github.com/elkproject/ark/internal/server"
+	"github.com/elkproject/ark/internal/server/repodb"
 )
 
 func main() {

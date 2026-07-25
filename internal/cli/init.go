@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ijroth/ark/internal/app"
+	"github.com/elkproject/ark/internal/app"
 )
 
 func newInitCmd(g *globals) *cobra.Command {

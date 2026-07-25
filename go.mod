@@ -1,4 +1,4 @@
-module github.com/ijroth/ark
+module github.com/elkproject/ark
 
 go 1.26.5
 

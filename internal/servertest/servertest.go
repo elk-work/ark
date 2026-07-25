@@ -6,8 +6,8 @@ package servertest
 import (
 	"testing"
 
-	"github.com/ijroth/ark/internal/server"
-	"github.com/ijroth/ark/internal/server/repodb"
+	"github.com/elkproject/ark/internal/server"
+	"github.com/elkproject/ark/internal/server/repodb"
 )
 
 // Token is the bearer token test servers accept.

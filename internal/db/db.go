@@ -11,8 +11,8 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/ijroth/ark/internal/records"
-	"github.com/ijroth/ark/migrations"
+	"github.com/elkproject/ark/internal/records"
+	"github.com/elkproject/ark/migrations"
 )
 
 // Open opens (creating if needed) the Ark database at path and applies

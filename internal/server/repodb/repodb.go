@@ -23,7 +23,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/ijroth/ark/internal/server/schema"
+	"github.com/elkproject/ark/internal/server/schema"
 )
 
 // ErrConcurrentWrite reports a lost compare-and-swap against the backend.

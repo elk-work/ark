@@ -43,9 +43,18 @@ numbers minted concurrently by offline clients are renumbered by the server
 
 ## Install
 
+Prerequisites: Go >= 1.26, `git` on your PATH. No C toolchain required.
+
+The repository is currently private, so clone and build from source:
+
 ```sh
-go install github.com/ijroth/ark/cmd/ark@latest   # or: go build ./cmd/ark
+git clone git@github.com:elkproject/ark.git
+cd ark
+go build ./cmd/ark
 ```
+
+Once the repository is public, `go install github.com/elkproject/ark/cmd/ark@latest`
+will work as well.
 
 ## Quick start
 
@@ -120,3 +129,13 @@ entity enough distinct behavior to earn it.
 | `internal/cli` | cobra command tree, `ark gh` shim |
 | `internal/output` | human tables / stable JSON |
 | `migrations/` | numbered forward-only SQL migrations |
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Contributions are accepted under an
+individual contributor license agreement ([CLA.md](CLA.md)) handled
+automatically on your first pull request.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).

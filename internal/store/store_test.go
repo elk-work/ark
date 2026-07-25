@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/ijroth/ark/internal/db"
-	"github.com/ijroth/ark/internal/records"
+	"github.com/elkproject/ark/internal/db"
+	"github.com/elkproject/ark/internal/records"
 )
 
 // newTestStore opens a fresh database with one repository and one human actor.
