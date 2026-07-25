@@ -8,11 +8,11 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/ijroth/ark/internal/config"
-	"github.com/ijroth/ark/internal/db"
-	"github.com/ijroth/ark/internal/git"
-	"github.com/ijroth/ark/internal/records"
-	"github.com/ijroth/ark/internal/store"
+	"github.com/elkproject/ark/internal/config"
+	"github.com/elkproject/ark/internal/db"
+	"github.com/elkproject/ark/internal/git"
+	"github.com/elkproject/ark/internal/records"
+	"github.com/elkproject/ark/internal/store"
 )
 
 // Context is everything a command needs to operate on one repository.

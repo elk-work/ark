@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ijroth/ark/internal/records"
+	"github.com/elkproject/ark/internal/records"
 )
 
 // PullRequest describes a proposed Git change. Git owns the branches and

@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"github.com/ijroth/ark/internal/cli"
+	"github.com/elkproject/ark/internal/cli"
 )
 
 // version is set at build time via -ldflags "-X main.version=...".

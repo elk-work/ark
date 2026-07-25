@@ -7,9 +7,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ijroth/ark/internal/cloud"
-	"github.com/ijroth/ark/internal/config"
-	"github.com/ijroth/ark/internal/records"
+	"github.com/elkproject/ark/internal/cloud"
+	"github.com/elkproject/ark/internal/config"
+	"github.com/elkproject/ark/internal/records"
 )
 
 func newRemoteCmd(g *globals) *cobra.Command {

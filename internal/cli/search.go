@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/ijroth/ark/internal/records"
-	"github.com/ijroth/ark/internal/store"
+	"github.com/elkproject/ark/internal/records"
+	"github.com/elkproject/ark/internal/store"
 )
 
 func newSearchCmd(g *globals) *cobra.Command {

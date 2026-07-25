@@ -3,7 +3,7 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
-	arksync "github.com/ijroth/ark/internal/sync"
+	arksync "github.com/elkproject/ark/internal/sync"
 )
 
 func newSyncCmd(g *globals) *cobra.Command {

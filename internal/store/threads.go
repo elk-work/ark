@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"strings"
 
-	"github.com/ijroth/ark/internal/records"
+	"github.com/elkproject/ark/internal/records"
 )
 
 // Thread is the durable conversation around work. See docs/v1-spec.md §6.4.

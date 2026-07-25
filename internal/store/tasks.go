@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/ijroth/ark/internal/records"
+	"github.com/elkproject/ark/internal/records"
 )
 
 // Task represents requested work. See docs/v1-spec.md §6.2.
