@@ -32,6 +32,11 @@ Requirements: Go ≥ 1.26, `git` on PATH. No C toolchain needed.
 
 Run a single test: `go test ./internal/store -run TestName -v`
 
+Working on sync? The tests need no server, but to exercise a client
+against a real one, run `cmd/ark-server` locally — one binary, one
+directory, no cloud account:
+[docs/self-hosting.md](docs/self-hosting.md) § Mode 1.
+
 ## Making a change
 
 Typical shape of a new command:
@@ -61,4 +66,6 @@ automatically); mirror any server-side schema need in
 ## Questions
 
 Open an issue, or a task in the repo's own ark (`ark task list`) if you have
-sync access — we dogfood.
+sync access — we dogfood. You do not need access to the maintainers'
+service for any of the above; point a client at your own
+([docs/self-hosting.md](docs/self-hosting.md)) or stay entirely offline.

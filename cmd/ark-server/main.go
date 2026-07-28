@@ -24,9 +24,15 @@ import (
 
 	"cloud.google.com/go/storage"
 
+	"github.com/elkproject/ark/internal/buildinfo"
 	"github.com/elkproject/ark/internal/server"
 	"github.com/elkproject/ark/internal/server/repodb"
 )
+
+// version is set at build time via -ldflags "-X main.version=...". Left
+// unset, buildinfo.Resolve falls back to the module version or the VCS
+// stamp Go embeds on its own.
+var version = buildinfo.Dev
 
 func main() {
 	if err := run(); err != nil {
@@ -37,7 +43,8 @@ func main() {
 
 func run() error {
 	ctx := context.Background()
-	log := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+	ver := buildinfo.Resolve(version)
+	log := slog.New(slog.NewJSONHandler(os.Stderr, nil)).With("version", ver)
 
 	token := os.Getenv("ARK_API_TOKEN")
 	if token == "" {
@@ -74,10 +81,11 @@ func run() error {
 	}
 
 	s := &server.Server{
-		Repos: repodb.NewManager(backend, cacheDir),
-		Token: token,
-		Blobs: blobs,
-		Log:   log,
+		Repos:   repodb.NewManager(backend, cacheDir),
+		Token:   token,
+		Blobs:   blobs,
+		Log:     log,
+		Version: ver,
 	}
 	port := os.Getenv("PORT")
 	if port == "" {

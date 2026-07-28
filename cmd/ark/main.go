@@ -5,12 +5,15 @@ package main
 import (
 	"os"
 
+	"github.com/elkproject/ark/internal/buildinfo"
 	"github.com/elkproject/ark/internal/cli"
 )
 
-// version is set at build time via -ldflags "-X main.version=...".
-var version = "dev"
+// version is set at build time via -ldflags "-X main.version=...". Left
+// unset, buildinfo.Resolve falls back to the module version or the VCS
+// stamp Go embeds on its own.
+var version = buildinfo.Dev
 
 func main() {
-	os.Exit(cli.Execute(version))
+	os.Exit(cli.Execute(buildinfo.Resolve(version)))
 }
