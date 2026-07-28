@@ -1,6 +1,8 @@
 # RFC-0003 — Elk-Issued Ark Credentials
 
-Status: proposed 2026-07-28 (replaces the single service token of v1-spec §20)
+Status: accepted 2026-07-28 (replaces the single service token of v1-spec §20).
+All three queued decisions resolved by the owner the same day — see "Resolved by
+the owner". Not yet implemented.
 Related: docs/v1-spec.md §20, docs/adoption.md § Credentials, docs/self-hosting.md
 § Authentication, docs/rfc-0002-elk-work-record-adapter.md (Decision 3 — the
 self-hosting constraint), Elk-scout `supabase/migrations/0001_init.sql`
@@ -232,9 +234,20 @@ grants(repository_id, principal_id, level, granted_by, granted_at)
 V1 has no web UI (deliberately, `CLAUDE.md:57-61`) and grants have to be issuable
 from the CLI by someone.
 
+**Grants may be seeded by the identity provider, but only at pairing time**
+(resolved decision 2). At approval the IdP asserts, alongside the verified
+email, the list of ark repository IDs this principal may read — a list Elk
+computes on its own side from `source_bindings` joined to workspace membership.
+`ark-server` writes those as ordinary `read` grant rows and then enforces them
+like any other. Ark never learns what a workspace is, and nothing on the request
+path calls Elk. Seeding runs on **every** login, not just the first, so a
+repository bound after someone paired becomes visible to them; it only ever adds
+`read`, never removes a grant and never grants `write`, so revocation stays an
+explicit act rather than a side effect of a membership change.
+
 **The bootstrap rule is first-writer-registers.** The principal whose call to
 `POST /v1/repositories` first creates a repository receives `admin` on it.
-Everyone else has no access until granted. `ark repo grant <email> --write` from
+Everyone else has no access until granted or seeded. `ark repo grant <email> --write` from
 an admin creates a grant row keyed on **email**, resolved to a principal id at
 that person's first login. This is what makes the outside-contributor story work:
 the grant is issued before the contributor has ever authenticated, and no token
@@ -439,12 +452,18 @@ the device flow. Founders re-login. A one-off backfill writes `admin` grants for
 each founder principal on every currently-registered repository — the set is
 small and known. The legacy token still works throughout.
 
-**Stage 3 — narrow, on evidence.** The server logs a principal id on every
-request, so `last_used_on` and the logs answer "is anything still using the
-legacy token?" directly. When the answer is no for a full week, set
+**Stage 3 — narrow, on an announced date** (resolved decision 3). The cutover
+date is set and published when Stage 2 completes; new principals are on the new
+system from that point regardless. Two weeks before the date, set
 `ARK_LEGACY_TOKEN=readonly`: legacy bearers may pull, not push. This catches a
 forgotten CI job as a `permission` error on a write rather than as silent
 success, and is reversible by one environment variable.
+
+The observability still matters — the server logs a principal id on every
+request, so `last_used_on` and the logs answer "who has not moved yet?" — but it
+now tells you **who to chase before the date**, rather than deciding when the
+date is. Waiting for a week of provable silence was the safer rule and also an
+indefinite one: a monthly job means it never arrives.
 
 **Stage 4 — retire.** `ARK_API_TOKEN` becomes optional; unset, the legacy branch
 is simply not registered. `ARK_SIGNING_KEY` and `ARK_BOOTSTRAP_TOKEN` take over
@@ -581,9 +600,64 @@ the Elk deployment rather than assumed:
    device to ark" event is plausible and cheap, but Elk has no existing table for
    it and this RFC does not propose one.
 
-## Queued decisions for the owner
+## Resolved by the owner, 2026-07-28
 
-Everything above is decided on evidence. Three things are genuine judgment calls.
+All three queued decisions are settled. The reasoning that produced them is
+kept below, because the alternatives explain why these are the answers.
+
+**1. The approval surface is a web page.** As specified: a self-contained page
+served by an edge function. It ships without a native release and does not
+depend on a browser session Elk may not have. Ark's `ark login` therefore never
+blocks on a mobile release cycle.
+
+**2. The default grant is `read`, seeded from workspace membership — not
+blanket read, and not deny.** A principal gets `read` on the repositories bound
+to workspaces they already belong to; everything else stays deny, and `write`
+always requires an explicit grant.
+
+This needs care, because taken naively it reverses Decision 4. It does not, and
+the distinction is the whole point: **workspace membership seeds grants at
+pairing time; it is never consulted on the request path.**
+
+Concretely, ark does not learn what a workspace is. At `POST /v1/device/approve`
+the identity provider already asserts the principal's verified email; it also
+asserts the list of **ark repository IDs** that principal may read, which Elk
+computes on its own side from `source_bindings` joined to workspace membership.
+`ark-server` stores those as ordinary per-repository grants and enforces them
+exactly like any other. Elk seeds; ark owns.
+
+That keeps every property Decision 4 was protecting — no Elk call on the request
+path, no workspace primitive inside ark, and a self-hoster who simply seeds
+nothing — while giving the behaviour the owner asked for: a teammate who can
+already see a project in Elk can read its Ark records without a support ticket.
+
+Two consequences to implement rather than discover:
+
+- **Grants are re-seeded on every login**, not only the first, or a repository
+  bound after someone paired would be invisible to them forever.
+- **Seeding only ever adds `read`.** It never removes a grant and never grants
+  `write`, so losing Elk workspace membership does not silently revoke Ark
+  access mid-session — revocation stays an explicit, auditable act.
+
+`ARK_DEFAULT_GRANT` therefore takes a third value and defaults to it:
+`none | read | seeded` (default `seeded`). A self-hosted deployment with no
+identity provider gets `none` for free, since nothing seeds anything.
+
+**3. The legacy token retires on a date, as a cutover.** Stage 3's
+"week of zero observed usage" gate is replaced by an announced date. New
+principals use the new system from day one; the legacy token keeps working
+until the date and then stops. The readonly stage stays as the soft landing,
+and the observability from Stage 2 becomes the thing that tells you who still
+has to move *before* the date rather than the thing that decides when the date
+is.
+
+---
+
+## The reasoning behind them
+
+Everything above was decided on evidence. These three were genuine judgment
+calls, recorded here so the choices above can be re-argued if their premises
+change.
 
 > **1. Where does the approval page live — a new Elk web surface, or the native
 > Elk apps?**
