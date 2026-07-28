@@ -32,6 +32,7 @@ type Result struct {
 	Rejected          int     `json:"rejected"`
 	Conflicts         int     `json:"conflicts"`
 	ArtifactsUploaded int     `json:"artifacts_uploaded"`
+	ArtifactsDeduped  int     `json:"artifacts_deduped,omitempty"`
 	PulledRecords     int     `json:"pulled_records"`
 	PulledTombstones  int     `json:"pulled_tombstones"`
 	ServerRevision    int64   `json:"server_revision"`
@@ -221,7 +222,15 @@ func uploadArtifacts(ctx context.Context, a *app.Context, client *cloud.Client, 
 		if err := client.ConfirmUpload(ctx, req); err != nil {
 			return fmt.Errorf("confirm %s: %w", art.Name, err)
 		}
-		res.ArtifactsUploaded++
+		// Count only blobs whose bytes actually moved. Content addressing means
+		// a second client holding the same artifact confirms without uploading,
+		// and reporting that as "uploaded" made every replica look like it had
+		// pushed data it never sent.
+		if !urlResp.AlreadyStored {
+			res.ArtifactsUploaded++
+		} else {
+			res.ArtifactsDeduped++
+		}
 	}
 	return nil
 }

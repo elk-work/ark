@@ -33,6 +33,9 @@ func newSyncCmd(g *globals) *cobra.Command {
 				if res.ArtifactsUploaded > 0 {
 					p.Line("  uploaded  %d artifact blobs", res.ArtifactsUploaded)
 				}
+				if res.ArtifactsDeduped > 0 {
+					p.Line("  matched   %d artifact blobs already stored", res.ArtifactsDeduped)
+				}
 				if res.PulledRecords > 0 || res.PulledTombstones > 0 {
 					p.Line("  pulled    %d records, %d tombstones", res.PulledRecords, res.PulledTombstones)
 				}

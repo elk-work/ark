@@ -230,3 +230,29 @@ func TestUnconfiguredLocalStoreWillNotMintURLs(t *testing.T) {
 		t.Error("an unsigned store should refuse to produce a PUT URL")
 	}
 }
+
+// Deleting a record that is already gone is idempotent — a repair run may
+// replay it — but it must not mint a revision. Every client would then pull an
+// empty change set, and repeated repairs would inflate the counter for nothing.
+func TestDeletingAMissingRecordDoesNotMintARevision(t *testing.T) {
+	s := newTestServer(t)
+	registerRepo(t, s)
+
+	before := push(t, s, api.Mutation{
+		ID: "01MUT0000000000000000000A", RecordType: "task", RecordID: "01TASK000000000000000000A",
+		Operation: "create", CreatedAt: "2026-07-01T00:00:00Z",
+		Payload: []byte(`{"id":"01TASK000000000000000000A","title":"t","status":"open"}`),
+	}).ServerRevision
+
+	// Delete something that never existed.
+	resp := push(t, s, api.Mutation{
+		ID: "01MUT0000000000000000000B", RecordType: "task", RecordID: "01NEVEREXISTED0000000000",
+		Operation: "delete", CreatedAt: "2026-07-02T00:00:00Z", Payload: []byte(`{}`),
+	})
+	if len(resp.Applied) != 1 {
+		t.Fatalf("an idempotent delete should be applied, got %+v", resp)
+	}
+	if resp.ServerRevision != before {
+		t.Errorf("revision moved %d -> %d for a no-op delete", before, resp.ServerRevision)
+	}
+}

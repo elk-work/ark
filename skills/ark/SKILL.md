@@ -129,12 +129,18 @@ Skip this and the attribution chain breaks.
 Ark records reach the Elk workspace stream through the work-record adapter:
 
 ```sh
-ark elk events                    # inspect what would be sent
-ark elk events --ndjson           # the wire format
+ark elk events            # inspect what would be sent
+ark elk push --dry-run    # same, as a delivery plan
+ark elk push              # deliver
 ```
 
-Re-sending is safe: Elk deduplicates on the event key, so a repeated run is a
-no-op and a repository can be backfilled from nothing.
+`ark elk push` needs an endpoint and token — `ARK_ELK_ENDPOINT` and
+`ARK_ELK_TOKEN`, or `--url` / `--token`. Neither is stored in the repository.
+
+Re-sending is safe and expected: Elk deduplicates on the event key, so a
+repeated push is a no-op, there is no cursor to keep, and an interrupted run
+needs no repair. A repository can be backfilled from nothing. Push after
+finishing a run, alongside `ark sync`.
 
 ## For parsing
 

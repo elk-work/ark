@@ -77,6 +77,10 @@ func Offlinef(format string, args ...any) error {
 	return &Error{Kind: KindOffline, Message: fmt.Sprintf(format, args...)}
 }
 
+func Permissionf(format string, args ...any) error {
+	return &Error{Kind: KindPermission, Message: fmt.Sprintf(format, args...)}
+}
+
 func Partialf(format string, args ...any) error {
 	return &Error{Kind: KindPartial, Message: fmt.Sprintf(format, args...)}
 }
