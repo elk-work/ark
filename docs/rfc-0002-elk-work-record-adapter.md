@@ -175,6 +175,21 @@ equivalent for. That they are new is the argument for the adapter.
 ↺ reuses an existing GitHub kind — no downstream change.
 ★ new kind — needs one new arm in `mapEvent()`.
 
+**Reusing a kind means reusing its refs.** Found while building: the existing
+`issue.*` arms read `refs.issue_number` to render `(#12)`, and Ark emits
+`refs.task_number`. Left alone, every Ark task signal would have read
+`(#undefined)`.
+
+The fix belongs at the ingest boundary, not in either end. Ark keeps emitting
+`task_number` — it has tasks, not issues, and its wire format should say so —
+and `ark.ts` aliases it onto `issue_number` as it normalizes, exactly as it
+already aliases the display name. `mapping.ts` stays Ark-free, and the ULID
+keys are untouched because they never used the display number in the first
+place.
+
+The general rule this establishes: **borrowing a kind means satisfying that
+kind's whole refs contract**, and the translation is the adapter's job.
+
 ### Deriving events from a state feed
 
 `/v1/sync/pull` returns *records at their current state*, not events. That is
