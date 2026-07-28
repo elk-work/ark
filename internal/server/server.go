@@ -2,11 +2,14 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -54,6 +57,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/artifacts/confirm", s.auth(s.handleConfirmUpload))
 	mux.HandleFunc("POST /v1/artifacts/download-url", s.auth(s.handleDownloadURL))
 	if local, ok := s.Blobs.(*LocalBlobStore); ok {
+		// These routes carry their own signature rather than the bearer
+		// token, because clients treat them as pre-signed URLs and send no
+		// Authorization header. The service token is the signing key, so
+		// there is nothing extra to configure and no way to leave them open.
+		local.Secret = s.Token
 		mux.Handle("GET /blobs/", local.Handler())
 		mux.Handle("PUT /blobs/", local.Handler())
 	}
@@ -443,6 +451,25 @@ func (s *Server) handleConfirmUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusConflict, "conflict", "blob not found in object storage")
 		return
 	}
+	// Existence is not enough. Whoever holds the upload URL chooses the bytes,
+	// and this handler is what stamps storage_key onto every artifact record
+	// carrying this hash — so without verifying, "artifacts are immutable by
+	// checksum" (spec §6.9) would be a property nothing enforces, and a blob
+	// could be poisoned at a hash before its real content arrived.
+	if err := s.verifyBlobDigest(r.Context(), key, req.SHA256); err != nil {
+		var mismatch digestMismatch
+		if errors.As(err, &mismatch) {
+			// Content that does not hash to its key is unreachable by any
+			// correct client and would otherwise satisfy a later confirm.
+			if delErr := s.Blobs.Delete(r.Context(), key); delErr != nil && s.Log != nil {
+				s.Log.Error("delete mismatched blob", "key", key, "error", delErr)
+			}
+			writeErr(w, http.StatusConflict, "conflict", mismatch.Error())
+			return
+		}
+		s.internal(w, "verify blob", err)
+		return
+	}
 	ctx := r.Context()
 	err = s.Repos.Update(ctx, req.RepositoryID, false, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `UPDATE blobs SET stored = 1 WHERE sha256 = ?`, req.SHA256); err != nil {
@@ -494,4 +521,40 @@ func (s *Server) internal(w http.ResponseWriter, what string, err error) {
 		s.Log.Error(what, "error", err)
 	}
 	writeErr(w, http.StatusInternalServerError, "internal", what+" failed")
+}
+
+// maxVerifyBytes bounds how much content the service will hash for one
+// confirm. It is a denial-of-service guard, not a size limit on artifacts:
+// anything larger is refused rather than silently trusted, because trusting
+// unverified content is exactly the failure this check exists to prevent.
+const maxVerifyBytes = 1 << 30 // 1 GiB
+
+// digestMismatch reports stored content that does not hash to its key.
+type digestMismatch struct{ want, got string }
+
+func (d digestMismatch) Error() string {
+	return "stored content does not match its checksum (expected " + d.want + ", got " + d.got + ")"
+}
+
+// verifyBlobDigest streams the stored object and checks it hashes to the
+// value the client claimed.
+func (s *Server) verifyBlobDigest(ctx context.Context, key, want string) error {
+	rc, err := s.Blobs.Open(ctx, key)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	h := sha256.New()
+	n, err := io.Copy(h, io.LimitReader(rc, maxVerifyBytes+1))
+	if err != nil {
+		return err
+	}
+	if n > maxVerifyBytes {
+		return fmt.Errorf("blob exceeds the %d byte verification limit", int64(maxVerifyBytes))
+	}
+	if got := hex.EncodeToString(h.Sum(nil)); !strings.EqualFold(got, want) {
+		return digestMismatch{want: want, got: got}
+	}
+	return nil
 }

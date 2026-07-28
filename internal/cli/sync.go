@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"sort"
+
 	"github.com/spf13/cobra"
 
 	arksync "github.com/elkproject/ark/internal/sync"
@@ -37,6 +39,12 @@ func newSyncCmd(g *globals) *cobra.Command {
 				if res.Pushed == 0 && res.PulledRecords == 0 && res.PulledTombstones == 0 {
 					p.Line("  nothing to do")
 				}
+				// Say so rather than dropping them quietly: this is history
+				// the repository holds and this build cannot show.
+				for _, recordType := range sortedKeys(res.SkippedRecords) {
+					p.Line("  skipped   %d %s record(s) — this build does not know that type; upgrade ark to see them",
+						res.SkippedRecords[recordType], recordType)
+				}
 				for _, issue := range res.Issues {
 					p.Line("  %s: %s %s — %s", issue.Status, issue.RecordType,
 						shortID(issue.RecordID), issue.Error)
@@ -47,4 +55,14 @@ func newSyncCmd(g *globals) *cobra.Command {
 			})
 		},
 	}
+}
+
+// sortedKeys gives map output a stable order so repeated syncs read the same.
+func sortedKeys(m map[string]int) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
