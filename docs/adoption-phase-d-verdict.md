@@ -50,7 +50,8 @@ Pulse's two agent runs carry input, result, branch and commit in one linked
 record. Signal has **zero GitHub issues and zero PRs** — that history had
 nowhere else to live. This is the value proposition, and it is real.
 
-**Where it lives is the problem.**
+**Where it lives is the problem — and the shape of the problem is a regression,
+not an absence.**
 
 | | signal | pulse |
 |---|---|---|
@@ -59,10 +60,38 @@ nowhere else to live. This is the value proposition, and it is real.
 | Remote configured | **none** | **none** |
 | Artifacts with `storage_key` | n/a (0 artifacts) | **0 of 2** |
 
-**No repository has ever synced. Not once.** Every record is in a gitignored
-SQLite file on one laptop, with no backup and no second reader. The recovery
-path documented in deploy.md has never been exercised outside the 2026-07-13
-migration.
+Neither of the two repositories under trial has ever synced. But the sync
+service holds four repository databases, and three of them are real history
+from an earlier wave:
+
+| Repository on the service | Records | Last write |
+|---|---|---|
+| `ark` (`ijroth/ark`, pre-transfer) | 5 tasks, 6 comments, 1 actor — rev 18 | 2026-07-13 |
+| `Elk-scout` | 5 tasks, 3 actors, 2 agent runs, 1 thread + 1 message — rev 13 | 2026-07-15 |
+| `clawfight` | 1 gap, 1 promotion, 2 actors — rev 4 | 2026-07-14 |
+
+**So sync is not unproven — it worked, on three repositories, 2026-07-13 to
+07-15, and the data is intact and readable today.** What happened is that the
+practice *stopped*: every repository onboarded since (signal 07-25, pulse
+07-27) was `ark init`-ed without a remote and has stayed disconnected. `ark
+init` does not set one, so a new repository starts offline and silently
+remains offline.
+
+That reframes the durability finding. The mechanism works; the default is
+wrong. It also makes condition 1 below much cheaper than it looked — this is a
+default to change, not a subsystem to prove.
+
+Three qualifications keep this from being good news:
+
+- **Elk-scout's two agent runs are both still `status = "running"`.** They were
+  started and never finished, so even the runs that exist do not carry a
+  result. Combined with adoption.md's own "~2 runs against 34 merged PRs", the
+  run-recording story is worse than the raw count suggests.
+- **The artifact bucket holds no blobs at all.** Across every repository, no
+  artifact has ever reached object storage, so that half of the sync path is
+  genuinely unexercised.
+- **A recovery drill still has no evidence** since the 2026-07-13 migration,
+  which predates the trial.
 
 **Latent hazard, not yet a loss:** pulse's `.ark` exists in three places (the
 submodule plus two session worktrees) all sharing repository ID
@@ -110,9 +139,17 @@ Applying the trial's own instrument (`ark-coverage.sh`), signal scores **DARK** 
 
 | adoption.md criterion | Status |
 |---|---|
-| No data loss across syncs and conflicts | **Unproven.** Zero syncs; conflicts table empty because nothing met a server. |
-| A second machine joined cleanly | **Never attempted.** |
+| No data loss across syncs and conflicts | **Partly met, outside the trial window.** Three repositories synced cleanly 07-13→07-15 and their data is intact. Neither trial repository has synced, so nothing was tested *during* the trial. |
+| A second machine joined cleanly | **Never attempted.** Elk-scout's three actors (one human, two distinct agents delegating to it) show multi-actor use, but that is one machine. |
 | One recovery drill passed | **No evidence** since the 2026-07-13 migration, which predates this trial. |
+
+**Open defect found while checking the service.** The `clawfight` repository
+holds a record of type `gap` — an entire record type that is *commented out* in
+the client (`internal/records/records.go:40`, "reserved for a future record
+type"). The server stores records as opaque JSON and will hand it to any client
+that pulls that repository. This wants a deliberate answer before an outside
+contributor meets it: either the client tolerates unknown record types by
+design and that is tested, or this is latent breakage.
 
 ## kraman — invited, not yet onboarded
 
@@ -141,10 +178,12 @@ measured a tool whose output nobody could see.
 
 ## The three conditions
 
-1. **Make sync non-optional.** `ark init` should set the remote and sync
-   should happen without being asked. Until a repository syncs, durability,
-   the second-machine check, and the recovery drill are all *unmeasurable* —
-   this single fix unblocks the entire trust criterion.
+1. **Make sync non-optional.** `ark init` should take (or inherit) a remote and
+   sync without being asked. This is the highest-value fix and the cheapest:
+   the machinery already works — three repositories proved it in July — and
+   what broke is simply that the default is "offline" and nobody opted in
+   afterwards. Until the trial repositories sync, durability, the
+   second-machine check and the recovery drill stay unmeasurable *for them*.
 2. **Ship the run hook with `ark init`, not as a per-repo manual step.** It is
    the one intervention with evidence behind it. The repos that got it recorded
    runs; the repos that didn't recorded zero.
