@@ -99,6 +99,7 @@ live in .ark/ next to .git/ and sync to a shared service when configured.`,
 		newSearchCmd(g),
 		newGHCmd(g),
 		newElkCmd(g),
+		newSkillCmd(g),
 	)
 	return root
 }

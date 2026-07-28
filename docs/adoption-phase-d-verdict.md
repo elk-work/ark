@@ -184,9 +184,20 @@ measured a tool whose output nobody could see.
    what broke is simply that the default is "offline" and nobody opted in
    afterwards. Until the trial repositories sync, durability, the
    second-machine check and the recovery drill stay unmeasurable *for them*.
-2. **Ship the run hook with `ark init`, not as a per-repo manual step.** It is
-   the one intervention with evidence behind it. The repos that got it recorded
-   runs; the repos that didn't recorded zero.
+2. **Ship the guidance as a skill, installed by `ark init`.** The scout-era fix
+   was a shell hook (`ark-run-hook.sh`), and it worked — but a hook is a
+   workaround for a human forgetting. These repositories are built almost
+   entirely by agents, which is the population Ark targets, and an agent's
+   failure to record is a *context* problem: nothing in the session ever told
+   it to. The native fix is a skill, which the harness loads automatically.
+
+   Done in this session: `skills/ark/SKILL.md` ships in the binary and
+   `ark init` writes it to `.claude/skills/ark/SKILL.md` as a tracked file, so
+   every agent in every clone gets it without anyone remembering. It names the
+   moments that actually get missed — check `ark status` first, fix a missing
+   remote *immediately*, wrap substantive sessions in `run start`/`run finish`,
+   and sync before finishing. `ark init` also now prints the missing-remote
+   warning every time.
 3. **Resolve the worktree replica hazard** before it causes the data loss that
    criterion 1 is supposed to prove doesn't happen.
 

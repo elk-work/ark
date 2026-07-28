@@ -90,6 +90,18 @@ ark status
 
 ## For agents
 
+Ark is built for repositories that are themselves built by agents, so the
+guidance ships with the tool rather than living in a runbook nobody reads.
+`ark init` installs it at `.claude/skills/ark/SKILL.md` — a tracked file, so
+every clone and every agent gets it — and `ark skill install --force` updates
+it after an upgrade. `ark skill show` prints it.
+
+It names the moments that actually get missed: check `ark status` before
+anything else, fix a missing remote *immediately* (a repository with no remote
+records to one machine, with no backup, and looks perfectly healthy while doing
+it), wrap substantive sessions in `ark run start` / `ark run finish`, and sync
+before you finish.
+
 - **`--json` everywhere.** Every command emits stable JSON for parsing.
 - **Identity.** Pass `--agent <name>` (or set `ARK_AGENT_NAME`) and records
   are attributed to that agent, delegated by the repository's default human.
