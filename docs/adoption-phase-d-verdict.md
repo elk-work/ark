@@ -201,6 +201,54 @@ measured a tool whose output nobody could see.
 3. **Resolve the worktree replica hazard** before it causes the data loss that
    criterion 1 is supposed to prove doesn't happen.
 
+## Status update — conditions 1–3 executed 2026-07-28
+
+The verdict stands at HOLD (agreed). Recording what changed the same day, since
+it is what makes a re-decision in two weeks meaningful: **the trust criteria
+now have evidence, where before they had none.**
+
+Both trial repositories were given the skill and a remote and synced for the
+first time:
+
+| | signal | pulse |
+|---|---|---|
+| Mutations pushed | **32 applied**, 0 rejected, 0 conflicts | **19 applied**, 0 rejected, 0 conflicts |
+| Artifact blobs uploaded | — (none exist) | **2** |
+| Pending after | 0 | 0 |
+
+The artifact upload path had never once run end to end — the bucket held zero
+blobs across every repository. It does now.
+
+**The pulse replica divergence is resolved, and resolving it was the drill.**
+The stale worktree copy proved to be a strict subset — zero unique mutations,
+zero unique records — so there was nothing to salvage and no reason to rebuild.
+Syncing it was the fix:
+
+- It pushed its 11 already-applied mutations: **0 rejected, 0 conflicts, and the
+  server revision did not move** (23 before, 23 after). That is
+  `applied_mutations` idempotency demonstrated on real data, which is the same
+  property that makes a lost CAS race safe to replay.
+- It then pulled and converged: task #2 flipped `open` → `closed` to match the
+  server, with no conflict, because it held no competing mutation.
+- All three replicas now report identical contents at revision 23.
+
+Against the criteria:
+
+| Criterion | Before | Now |
+|---|---|---|
+| No data loss across syncs and conflicts | no evidence in-window | **51 mutations pushed and 30 replayed across two repositories; 0 rejected, 0 conflicts, 0 lost** |
+| A second machine joined cleanly | never attempted | **a divergent third replica converged cleanly to server truth** |
+| One recovery drill passed | no evidence | **partially** — replay-and-converge is proven; restoring from a bucket copy is still untested |
+
+What remains open is coverage, which is the thing the skill exists to fix and
+which cannot be judged for two weeks. That is the re-decision below, and it is
+now a genuine measurement rather than a foregone conclusion.
+
+One cosmetic defect observed live: the third replica reported "uploaded 2
+artifact blobs" when the server already had both. `internal/sync/sync.go`
+counts an already-stored blob as uploaded — confirmed in the wild, matching
+what the new sync tests documented.
+
 ## Re-decide
 
 Two weeks of *instrumented* use — sync on, hook installed, `ark-coverage.sh`
