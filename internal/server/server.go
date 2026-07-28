@@ -125,10 +125,23 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 		req.DefaultBranch = "main"
 	}
 	err := s.Repos.Update(r.Context(), req.ID, true, func(tx *sql.Tx) error {
+		// Registration runs on every sync, and the name a client sends is just
+		// the basename of wherever it happens to be checked out. Overwriting on
+		// conflict therefore let any client silently rename the repository for
+		// everyone — observed: joining an existing repository from a directory
+		// called "weirdly-named-dir" renamed it to that, and cleared the Git
+		// remote because the scratch checkout had none.
+		//
+		// So registration only ever *backfills*: a value already on the server
+		// wins, and a client can fill a field the server is missing. Renaming
+		// is not something a sync should do; if it is ever wanted it needs an
+		// explicit command, not a side effect of where someone cloned.
 		_, err := tx.Exec(`INSERT INTO meta (id, repository_id, name, default_branch, git_remote_url, created_at)
 			VALUES (1, ?, ?, ?, ?, ?)
-			ON CONFLICT (id) DO UPDATE SET name = excluded.name,
-				default_branch = excluded.default_branch, git_remote_url = excluded.git_remote_url`,
+			ON CONFLICT (id) DO UPDATE SET
+				name           = CASE WHEN meta.name           = '' THEN excluded.name           ELSE meta.name           END,
+				default_branch = CASE WHEN meta.default_branch = '' THEN excluded.default_branch ELSE meta.default_branch END,
+				git_remote_url = CASE WHEN meta.git_remote_url = '' THEN excluded.git_remote_url ELSE meta.git_remote_url END`,
 			req.ID, req.Name, req.DefaultBranch, req.GitRemoteURL, records.Now())
 		return err
 	})

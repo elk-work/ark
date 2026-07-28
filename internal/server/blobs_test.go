@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -254,5 +255,71 @@ func TestDeletingAMissingRecordDoesNotMintARevision(t *testing.T) {
 	}
 	if resp.ServerRevision != before {
 		t.Errorf("revision moved %d -> %d for a no-op delete", before, resp.ServerRevision)
+	}
+}
+
+// Registration runs on every sync and the name a client sends is only the
+// basename of wherever it is checked out. If that overwrote the stored value,
+// any client could silently rename the repository for everyone — and clear
+// its Git remote, if that checkout happened not to have one. Observed against
+// a live repository before this was fixed.
+func TestRegisterBackfillsButNeverRenames(t *testing.T) {
+	s := newTestServer(t)
+
+	reg := func(name, branch, remote string) {
+		t.Helper()
+		body := fmt.Sprintf(`{"id":%q,"name":%q,"default_branch":%q,"git_remote_url":%q}`,
+			repoID, name, branch, remote)
+		if rec := doRequest(t, s, "POST", "/v1/repositories", body); rec.Code != 200 {
+			t.Fatalf("register: %d %s", rec.Code, rec.Body.String())
+		}
+	}
+	meta := func() (name, branch, remote string) {
+		t.Helper()
+		if err := s.Repos.View(context.Background(), repoID, func(db *sql.DB) error {
+			return db.QueryRow(`SELECT name, default_branch, git_remote_url FROM meta WHERE id = 1`).
+				Scan(&name, &branch, &remote)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+
+	reg("scout", "main", "https://github.com/elkproject/scout.git")
+	if n, b, r := meta(); n != "scout" || b != "main" || r == "" {
+		t.Fatalf("first registration should set everything: %q %q %q", n, b, r)
+	}
+
+	// A second client, checked out somewhere else, with no Git remote.
+	reg("weirdly-named-dir", "master", "")
+	n, b, r := meta()
+	if n != "scout" {
+		t.Errorf("name was overwritten to %q — a joining client renamed the repository", n)
+	}
+	if b != "main" {
+		t.Errorf("default_branch was overwritten to %q", b)
+	}
+	if r != "https://github.com/elkproject/scout.git" {
+		t.Errorf("git_remote_url was cleared to %q", r)
+	}
+
+	// But a field the server is missing can still be filled in.
+	s2 := newTestServer(t)
+	body := fmt.Sprintf(`{"id":%q,"name":"x","default_branch":"main","git_remote_url":""}`, repoID)
+	if rec := doRequest(t, s2, "POST", "/v1/repositories", body); rec.Code != 200 {
+		t.Fatal(rec.Body.String())
+	}
+	body = fmt.Sprintf(`{"id":%q,"name":"x","default_branch":"main","git_remote_url":"https://example.com/x.git"}`, repoID)
+	if rec := doRequest(t, s2, "POST", "/v1/repositories", body); rec.Code != 200 {
+		t.Fatal(rec.Body.String())
+	}
+	var got string
+	if err := s2.Repos.View(context.Background(), repoID, func(db *sql.DB) error {
+		return db.QueryRow(`SELECT git_remote_url FROM meta WHERE id = 1`).Scan(&got)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://example.com/x.git" {
+		t.Errorf("an empty field should be backfillable, got %q", got)
 	}
 }
