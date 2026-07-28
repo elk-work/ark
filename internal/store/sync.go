@@ -163,18 +163,36 @@ func tableForType(recordType string) (string, bool) {
 	return "", false
 }
 
+// PullSkips counts pulled records this client could not represent, by record
+// type. A non-empty map means the server holds record types this build does
+// not know — normal during a version skew, and worth showing the operator
+// rather than dropping in silence.
+type PullSkips map[string]int
+
 // ApplyPull applies a pull response — records, tombstones, and the new
 // cursor — in one transaction (docs/v1-spec.md §9.2).
-func (s *Store) ApplyPull(ctx context.Context, resp *api.PullResponse) error {
-	return db.InTx(ctx, s.DB, func(tx *sql.Tx) error {
+//
+// Records of an unknown type are skipped, not rejected: a client must
+// tolerate a server that knows more record types than it does, or a single
+// unrecognized record would wedge every future pull. The skips are returned
+// so the caller can report them.
+func (s *Store) ApplyPull(ctx context.Context, resp *api.PullResponse) (PullSkips, error) {
+	skips := PullSkips{}
+	err := db.InTx(ctx, s.DB, func(tx *sql.Tx) error {
+		// The closure reruns on retry; reset so counts cannot double.
+		clear(skips)
 		// Revision order is not dependency order (an updated PR can outrank
 		// its reviews), so FK checks wait for the end of the transaction.
 		if _, err := tx.Exec(`PRAGMA defer_foreign_keys = ON`); err != nil {
 			return records.DBErr("defer foreign keys", err)
 		}
 		for _, rec := range resp.Records {
-			if err := upsertServerRecord(tx, rec); err != nil {
+			handled, err := upsertServerRecord(tx, rec)
+			if err != nil {
 				return err
+			}
+			if !handled {
+				skips[rec.RecordType]++
 			}
 		}
 		for _, tomb := range resp.Tombstones {
@@ -194,20 +212,31 @@ func (s *Store) ApplyPull(ctx context.Context, resp *api.PullResponse) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	if len(skips) == 0 {
+		return nil, nil
+	}
+	return skips, nil
 }
 
 // ApplyServerRecord upserts one authoritative record (e.g. the response of
 // a cloud-confirmed merge) without touching the pull cursor.
 func (s *Store) ApplyServerRecord(ctx context.Context, rec api.Record) error {
 	return db.InTx(ctx, s.DB, func(tx *sql.Tx) error {
-		return upsertServerRecord(tx, rec)
+		_, err := upsertServerRecord(tx, rec)
+		return err
 	})
 }
 
 // upsertServerRecord writes one authoritative server record into the local
 // tables. The server's Data is the JSON encoding of the client structs, so
 // each type round-trips through its struct for validation.
-func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
+// upsertServerRecord applies one pulled record. It reports whether the record
+// type is one this client knows; an unknown type is not an error (see
+// ApplyPull), but the caller needs to know it happened.
+func upsertServerRecord(tx *sql.Tx, rec api.Record) (handled bool, err error) {
 	unmarshal := func(v any) error {
 		if err := json.Unmarshal(rec.Data, v); err != nil {
 			return records.DBErr(fmt.Sprintf("decode %s %s", rec.RecordType, rec.RecordID), err)
@@ -218,7 +247,7 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 	case records.TypeTask:
 		var t Task
 		if err := unmarshal(&t); err != nil {
-			return err
+			return false, err
 		}
 		_, err := tx.Exec(`INSERT INTO tasks
 			(id, repository_id, number, title, body, status, created_at, created_by,
@@ -230,17 +259,17 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 			t.ID, t.RepositoryID, t.Number, t.Title, t.Body, t.Status, t.CreatedAt,
 			t.CreatedBy, t.CreatedByType, t.UpdatedAt, t.Version, rec.ServerRevision)
 		if err != nil {
-			return records.DBErr("upsert task", err)
+			return false, records.DBErr("upsert task", err)
 		}
 		if _, err := tx.Exec(`DELETE FROM fts WHERE record_type = 'task' AND record_id = ?`, t.ID); err == nil {
 			tx.Exec(`INSERT INTO fts (record_type, record_id, title, body) VALUES ('task', ?, ?, ?)`,
 				t.ID, t.Title, t.Body)
 		}
-		return nil
+		return true, nil
 	case records.TypeComment:
 		var c Comment
 		if err := unmarshal(&c); err != nil {
-			return err
+			return false, err
 		}
 		var super any
 		if c.SupersedesID != "" {
@@ -254,16 +283,16 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 			c.ID, c.RepositoryID, c.ParentType, c.ParentID, c.Body, c.CreatedAt,
 			c.CreatedBy, c.CreatedByType, super, rec.ServerRevision)
 		if err != nil {
-			return records.DBErr("upsert comment", err)
+			return false, records.DBErr("upsert comment", err)
 		}
 		tx.Exec(`DELETE FROM fts WHERE record_type = 'comment' AND record_id = ?`, c.ID)
 		tx.Exec(`INSERT INTO fts (record_type, record_id, title, body) VALUES ('comment', ?, '', ?)`,
 			c.ID, c.Body)
-		return nil
+		return true, nil
 	case records.TypeThread:
 		var t Thread
 		if err := unmarshal(&t); err != nil {
-			return err
+			return false, err
 		}
 		_, err := tx.Exec(`INSERT INTO agent_threads
 			(id, repository_id, task_id, title, status, created_at, created_by,
@@ -274,13 +303,13 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 			t.ID, t.RepositoryID, nullable(t.TaskID), t.Title, t.Status, t.CreatedAt,
 			t.CreatedBy, t.CreatedByType, nullable(t.ClosedAt), rec.ServerRevision)
 		if err != nil {
-			return records.DBErr("upsert thread", err)
+			return false, records.DBErr("upsert thread", err)
 		}
-		return nil
+		return true, nil
 	case records.TypeMessage:
 		var m Message
 		if err := unmarshal(&m); err != nil {
-			return err
+			return false, err
 		}
 		var super any
 		if m.SupersedesID != "" {
@@ -294,16 +323,16 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 			m.ID, m.ThreadID, m.Role, m.Body, m.MetadataJSON, m.CreatedAt,
 			m.CreatedBy, m.CreatedByType, super, rec.ServerRevision)
 		if err != nil {
-			return records.DBErr("upsert message", err)
+			return false, records.DBErr("upsert message", err)
 		}
 		tx.Exec(`DELETE FROM fts WHERE record_type = 'thread_message' AND record_id = ?`, m.ID)
 		tx.Exec(`INSERT INTO fts (record_type, record_id, title, body) VALUES ('thread_message', ?, '', ?)`,
 			m.ID, m.Body)
-		return nil
+		return true, nil
 	case records.TypeRun:
 		var r Run
 		if err := unmarshal(&r); err != nil {
-			return err
+			return false, err
 		}
 		var exit any
 		if r.ExitCode != nil {
@@ -324,13 +353,13 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 			nullable(r.FinishedAt), exit, r.BranchName, r.BaseCommitSHA, r.ResultCommitSHA,
 			r.MetadataJSON, r.CreatedAt, r.CreatedBy, r.CreatedByType, rec.ServerRevision)
 		if err != nil {
-			return records.DBErr("upsert run", err)
+			return false, records.DBErr("upsert run", err)
 		}
-		return nil
+		return true, nil
 	case records.TypePullRequest:
 		var pr PullRequest
 		if err := unmarshal(&pr); err != nil {
-			return err
+			return false, err
 		}
 		_, err := tx.Exec(`INSERT INTO pull_requests
 			(id, repository_id, number, task_id, title, body, status, base_branch, head_branch,
@@ -348,16 +377,16 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 			pr.CreatedAt, pr.CreatedBy, pr.CreatedByType, nullable(pr.MergedAt),
 			nullable(pr.ClosedAt), pr.UpdatedAt, pr.Version, rec.ServerRevision)
 		if err != nil {
-			return records.DBErr("upsert pull request", err)
+			return false, records.DBErr("upsert pull request", err)
 		}
 		tx.Exec(`DELETE FROM fts WHERE record_type = 'pull_request' AND record_id = ?`, pr.ID)
 		tx.Exec(`INSERT INTO fts (record_type, record_id, title, body) VALUES ('pull_request', ?, ?, ?)`,
 			pr.ID, pr.Title, pr.Body)
-		return nil
+		return true, nil
 	case records.TypeReview:
 		var r Review
 		if err := unmarshal(&r); err != nil {
-			return err
+			return false, err
 		}
 		_, err := tx.Exec(`INSERT INTO reviews
 			(id, repository_id, pull_request_id, state, body, commit_sha, created_at,
@@ -367,16 +396,16 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 			r.ID, r.RepositoryID, r.PullRequestID, r.State, r.Body, r.CommitSHA,
 			r.CreatedAt, r.CreatedBy, r.CreatedByType, rec.ServerRevision)
 		if err != nil {
-			return records.DBErr("upsert review", err)
+			return false, records.DBErr("upsert review", err)
 		}
 		tx.Exec(`DELETE FROM fts WHERE record_type = 'review' AND record_id = ?`, r.ID)
 		tx.Exec(`INSERT INTO fts (record_type, record_id, title, body) VALUES ('review', ?, '', ?)`,
 			r.ID, r.Body)
-		return nil
+		return true, nil
 	case records.TypeArtifact:
 		var a Artifact
 		if err := unmarshal(&a); err != nil {
-			return err
+			return false, err
 		}
 		// local_path stays local: another client's path is meaningless here.
 		_, err := tx.Exec(`INSERT INTO artifacts
@@ -388,13 +417,13 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 			a.ID, a.RepositoryID, a.ParentType, a.ParentID, a.Name, a.MediaType, a.SizeBytes,
 			a.SHA256, a.StorageKey, a.CreatedAt, a.CreatedBy, a.CreatedByType, rec.ServerRevision)
 		if err != nil {
-			return records.DBErr("upsert artifact", err)
+			return false, records.DBErr("upsert artifact", err)
 		}
-		return nil
+		return true, nil
 	case records.TypePromotion:
 		var p Promotion
 		if err := unmarshal(&p); err != nil {
-			return err
+			return false, err
 		}
 		_, err := tx.Exec(`INSERT INTO promotions
 			(id, repository_id, environment, service, merge_commit_sha, artifact_sha256,
@@ -408,13 +437,13 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 			p.ArtifactSHA256, nullable(p.PullRequestID), p.ActivatedAt, nullable(p.EndedAt),
 			p.MetadataJSON, p.CreatedAt, p.CreatedBy, p.CreatedByType, rec.ServerRevision)
 		if err != nil {
-			return records.DBErr("upsert promotion", err)
+			return false, records.DBErr("upsert promotion", err)
 		}
-		return nil
+		return true, nil
 	case "actor":
 		var a api.Actor
 		if err := unmarshal(&a); err != nil {
-			return err
+			return false, err
 		}
 		createdAt := a.CreatedAt
 		if createdAt == "" {
@@ -426,9 +455,13 @@ func upsertServerRecord(tx *sql.Tx, rec api.Record) error {
 			ON CONFLICT (id) DO UPDATE SET name = excluded.name, email = excluded.email`,
 			a.ID, a.Type, a.Name, a.Email, a.AgentName, a.AgentVersion, a.DelegatedBy, createdAt)
 		if err != nil {
-			return records.DBErr("upsert actor", err)
+			return false, records.DBErr("upsert actor", err)
 		}
-		return nil
+		return true, nil
 	}
-	return nil // unknown types are ignored for forward compatibility
+	// An unknown record type is not an error. Server and client versions
+	// skew by design, so a client must tolerate records it cannot represent
+	// rather than refusing the whole pull. The caller surfaces the skip so it
+	// is visible rather than silent.
+	return false, nil
 }

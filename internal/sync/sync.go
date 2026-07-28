@@ -36,6 +36,12 @@ type Result struct {
 	PulledTombstones  int     `json:"pulled_tombstones"`
 	ServerRevision    int64   `json:"server_revision"`
 	Issues            []Issue `json:"issues,omitempty"`
+
+	// SkippedRecords counts pulled records this build cannot represent,
+	// broken out by record type. Server and client versions skew by design,
+	// so this is information, not an error — but it is data the operator
+	// cannot see locally, so it is reported rather than dropped silently.
+	SkippedRecords map[string]int `json:"skipped_records,omitempty"`
 }
 
 // Client builds the cloud client for a repository, or an offline error when
@@ -161,8 +167,15 @@ func Pull(ctx context.Context, a *app.Context, client *cloud.Client, res *Result
 	if err != nil {
 		return err
 	}
-	if err := a.Store.ApplyPull(ctx, resp); err != nil {
+	skips, err := a.Store.ApplyPull(ctx, resp)
+	if err != nil {
 		return err
+	}
+	for recordType, n := range skips {
+		if res.SkippedRecords == nil {
+			res.SkippedRecords = map[string]int{}
+		}
+		res.SkippedRecords[recordType] += n
 	}
 	res.PulledRecords += len(resp.Records)
 	res.PulledTombstones += len(resp.Tombstones)

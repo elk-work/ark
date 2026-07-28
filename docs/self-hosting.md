@@ -101,28 +101,35 @@ After a first sync the directory looks like:
 
 In object-storage mode the service hands clients time-limited signed URLs
 that point at the bucket, and blob bytes never pass through the service.
-In local mode there is no signer, so the service serves the blobs itself
-on two extra routes:
+In local mode the service signs and serves the blobs itself, on two extra
+routes:
 
 ```text
-PUT /blobs/<key>     upload artifact content
-GET /blobs/<key>     download artifact content
+PUT /blobs/<key>?exp=…&sig=…     upload artifact content
+GET /blobs/<key>?exp=…&sig=…     download artifact content
 ```
 
-`POST /v1/artifacts/upload-url` returns `<BASE_URL>/blobs/<key>` instead
-of a signed URL, and the client `PUT`s to it. This is why `BASE_URL` is
-required in this mode and why it must be the URL clients actually reach
-— if it is wrong, record sync still works and artifact upload silently
-targets an unreachable host.
+`POST /v1/artifacts/upload-url` returns a signed `<BASE_URL>/blobs/<key>`
+and the client `PUT`s to it. This is why `BASE_URL` is required in this
+mode and why it must be the URL clients actually reach — if it is wrong,
+record sync still works and artifact upload silently targets an
+unreachable host.
 
-Two things to understand before exposing this mode:
+Three things to understand before exposing this mode:
 
-- **The `/blobs/` routes are not behind the bearer token.** Every `/v1`
-  route is; the blob routes are not, because they stand in for signed
-  URLs, which are unauthenticated by construction. Unlike a signed URL,
-  they do not expire. Anyone who can guess or observe a content hash can
-  read that artifact. Key names are SHA-256 digests, so this is not
-  trivially enumerable, but it is not access control either.
+- **The `/blobs/` routes carry a signature, not the bearer token.** They
+  cannot use the bearer middleware: a client treats them as pre-signed
+  URLs and sends no `Authorization` header. So each URL is signed with
+  HMAC-SHA256 over the method, the key, and an expiry, keyed by
+  `ARK_API_TOKEN`. Signatures last one hour and are method-bound, so a
+  download URL cannot be replayed as an upload. There is nothing extra to
+  configure; a service with no token cannot mint blob URLs at all.
+- **Uploads are verified against their hash.** `POST /v1/artifacts/confirm`
+  streams the stored object, recomputes SHA-256, and refuses — deleting the
+  object — if it does not match the key it was stored under. This is what
+  makes "artifacts are immutable by checksum" true rather than merely
+  claimed, and it applies in both modes. Objects larger than 1 GiB are
+  refused rather than trusted unverified.
 - **Blob keys are path-checked, not sandboxed.** Keys containing `..` or
   an absolute path are rejected, and that is the whole defense.
 
@@ -211,8 +218,11 @@ token can read and write every repository the service knows about.
 missing is a startup failure. Every `/v1` route strips a leading
 `Bearer ` from the `Authorization` header and compares the remainder
 against the token in constant time. A mismatch is `401` with a
-`permission` error code. Unauthenticated routes: `GET /` (returns a
-service banner), `GET /health`, and — in local mode only — `/blobs/`.
+`permission` error code. The only routes without a bearer check are
+`GET /` (a service banner) and `GET /health`. In local mode `/blobs/`
+also skips the bearer check, but is not unauthenticated: it requires an
+HMAC signature derived from the same token, bound to the method and
+carrying a one-hour expiry.
 
 **Client side.** The token resolves in this order:
 
