@@ -301,6 +301,30 @@ func applyUpdate(ctx context.Context, tx *sql.Tx, m api.Mutation) outcome {
 		}
 	}
 
+	// The client sends only the fields it changed (field-level payloads keep
+	// merges precise), so an update never carries updated_at. Left alone the
+	// stored document keeps the timestamp it was created with — and because
+	// the document is what clients pull and store, the next pull overwrites
+	// the client's own correct value with the frozen one. Observed in
+	// production: a task closed on 07-26 read as last updated on 07-25 in
+	// every client.
+	//
+	// The mutation's creation time is the authoritative answer to "when was
+	// this change made" — it may have been made offline days before the push,
+	// so records.Now() would be wrong. Stamped after the merge checks above so
+	// an update whose every field lost to the cloud does not bump the clock,
+	// and only for record types that actually carry the field.
+	if _, sent := incoming["updated_at"]; !sent && m.CreatedAt != "" {
+		var doc map[string]json.RawMessage
+		if json.Unmarshal(current, &doc) == nil {
+			if _, carries := doc["updated_at"]; carries {
+				if stamp, err := json.Marshal(m.CreatedAt); err == nil {
+					incoming["updated_at"] = stamp
+				}
+			}
+		}
+	}
+
 	merged, err := mergeJSON(current, incoming)
 	if err != nil {
 		return outcome{status: statusRejected, err: err.Error()}
@@ -321,6 +345,25 @@ func applyUpdate(ctx context.Context, tx *sql.Tx, m api.Mutation) outcome {
 }
 
 func applyDelete(ctx context.Context, tx *sql.Tx, m api.Mutation) outcome {
+	// Deleting something already gone (or never present) is idempotent, but it
+	// must not mint a revision: every client would then pull an empty change
+	// set, and a repeated repair run would inflate the revision counter for
+	// nothing.
+	var exists bool
+	err := tx.QueryRowContext(ctx, `SELECT true FROM records
+		WHERE record_type = ? AND record_id = ? AND deleted_at IS NULL`,
+		m.RecordType, m.RecordID).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		var current int64
+		if err := tx.QueryRowContext(ctx, `SELECT revision FROM meta WHERE id = 1`).Scan(&current); err != nil {
+			return outcome{status: statusRejected, err: err.Error()}
+		}
+		return outcome{status: statusApplied, revision: current}
+	}
+	if err != nil {
+		return outcome{status: statusRejected, err: err.Error()}
+	}
+
 	rev, err := nextRevision(ctx, tx)
 	if err != nil {
 		return outcome{status: statusRejected, err: err.Error()}

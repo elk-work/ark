@@ -588,8 +588,14 @@ func TestArtifactUploadSkipsStoredBlobsAndConfirms(t *testing.T) {
 		t.Fatalf("add duplicate-content artifact: %v", err)
 	}
 	res3 := mustRun(t, a)
-	if res3.ArtifactsUploaded != 1 {
-		t.Fatalf("dedup sync: uploaded = %d, want 1: %+v", res3.ArtifactsUploaded, res3)
+	// No bytes moved, so nothing is reported as uploaded — it is counted as
+	// deduped instead. Conflating the two made every replica of a repository
+	// look like it had pushed content it never sent.
+	if res3.ArtifactsUploaded != 0 {
+		t.Errorf("dedup sync: uploaded = %d, want 0 (no bytes moved): %+v", res3.ArtifactsUploaded, res3)
+	}
+	if res3.ArtifactsDeduped != 1 {
+		t.Errorf("dedup sync: deduped = %d, want 1: %+v", res3.ArtifactsDeduped, res3)
 	}
 	got2, err := a.Store.ResolveArtifact(ctx, art2.ID)
 	if err != nil || got2.StorageKey == "" {
@@ -616,5 +622,68 @@ func TestSyncWithoutRemoteIsOffline(t *testing.T) {
 	}
 	if _, err := Run(context.Background(), a); records.ExitCode(err) != 6 {
 		t.Errorf("Run without remote: %v, want offline (exit 6)", err)
+	}
+}
+
+// An update mutation carries only the fields it changed, so it never carries
+// updated_at. The server must stamp it anyway, from the mutation's own
+// creation time — otherwise the stored document keeps the timestamp it was
+// created with, and because that document is what clients pull and store, the
+// next pull overwrites each client's correct value with the frozen one.
+//
+// Found in production: a task closed on 2026-07-26 read as last updated on
+// 07-25 in every client, and anything deriving an event time from updated_at
+// (the Elk work-record adapter does) dated the closure wrong.
+func TestUpdateStampsUpdatedAtFromTheMutationNotTheCreate(t *testing.T) {
+	_, url := startServer(t)
+	a := newClient(t, url, "")
+	ctx := context.Background()
+
+	task, err := a.Store.CreateTask(ctx, "Close me", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, a)
+
+	created := task.CreatedAt
+	status := "done"
+	updated, err := a.Store.UpdateTask(ctx, task.ID, store.TaskEdit{Status: &status})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.UpdatedAt == created {
+		t.Fatal("precondition: the local edit should have moved updated_at")
+	}
+	localUpdatedAt := updated.UpdatedAt
+
+	// Push the edit and pull the server's version back over it.
+	mustRun(t, a)
+
+	got, err := a.Store.ResolveTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "done" {
+		t.Fatalf("status = %q, want done", got.Status)
+	}
+	if got.UpdatedAt == created {
+		t.Errorf("updated_at was reset to created_at (%s) — the sync round trip lost the edit's timestamp", created)
+	}
+	if got.UpdatedAt < localUpdatedAt {
+		t.Errorf("updated_at went backwards: %s < %s", got.UpdatedAt, localUpdatedAt)
+	}
+
+	// A second client sees the same thing, since it reads the same document.
+	b := newClient(t, url, a.Config.RepositoryID)
+	mustRun(t, b)
+	fromB, err := b.Store.ResolveTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromB.UpdatedAt != got.UpdatedAt {
+		t.Errorf("clients disagree on updated_at: %s vs %s", fromB.UpdatedAt, got.UpdatedAt)
+	}
+	if fromB.UpdatedAt == created {
+		t.Errorf("a joining client sees updated_at frozen at creation")
 	}
 }
