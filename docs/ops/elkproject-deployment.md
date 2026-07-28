@@ -46,6 +46,19 @@ gcloud run deploy ark \
   --min-instances 0 --max-instances 1 --memory 256Mi
 ```
 
+**A source deploy does not stamp the version.** `gcloud run deploy --source`
+passes no Docker build arg, and it excludes `.git` from the upload, so both
+paths `internal/buildinfo` could use are unavailable and `GET /` reports
+`"version":"dev"`. The Cloud Run revision name (`ark-00005-dxr`) still
+identifies the running build, which is usually what you actually want. To
+stamp it properly, build and push the image yourself instead:
+
+```sh
+docker build --platform linux/amd64 --build-arg VERSION="$(git describe --tags --always --dirty)" -t us-west1-docker.pkg.dev/steadfast-sound-502323-q0/cloud-run-source-deploy/ark:$(git describe --tags --always) .
+docker push us-west1-docker.pkg.dev/steadfast-sound-502323-q0/cloud-run-source-deploy/ark:$(git describe --tags --always)
+gcloud run deploy ark --image us-west1-docker.pkg.dev/steadfast-sound-502323-q0/cloud-run-source-deploy/ark:$(git describe --tags --always) --region us-west1 --project steadfast-sound-502323-q0
+```
+
 `--allow-unauthenticated` is correct: the service enforces its own bearer
 token on every `/v1` route; only `/` and `/health` are meaningfully
 public.
