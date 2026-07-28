@@ -21,7 +21,8 @@ is configured, mutations push up, records pull down, artifacts flow through
 object storage, and PR merges are cloud-confirmed. The sync service
 (`cmd/ark-server`) keeps one SQLite database per repository — persisted to
 GCS in production (Cloud Run, scale-to-zero, no always-on database), or to
-a plain directory for development. See docs/rfc-0001-per-repo-sqlite-storage.md.
+a plain directory for development. See docs/rfc-0001-per-repo-sqlite-storage.md,
+and [docs/self-hosting.md](docs/self-hosting.md) to run your own instance.
 
 See [docs/v1-spec.md](docs/v1-spec.md) for the full specification and
 [docs/principles.md](docs/principles.md) for the design principles.
@@ -40,6 +41,11 @@ task/PR fields merge independently, concurrent title/body edits surface in
 `ark conflict list` where `--keep local|remote` resolves them. Display
 numbers minted concurrently by offline clients are renumbered by the server
 (the ULID is authoritative).
+
+Running the service yourself: [docs/self-hosting.md](docs/self-hosting.md)
+covers both storage modes, the single-token auth model, health checks, and
+the backup/replay recovery path. [docs/deploy.md](docs/deploy.md) is the
+short index of deployment options.
 
 ## Install
 
@@ -84,6 +90,18 @@ ark status
 
 ## For agents
 
+Ark is built for repositories that are themselves built by agents, so the
+guidance ships with the tool rather than living in a runbook nobody reads.
+`ark init` installs it at `.claude/skills/ark/SKILL.md` — a tracked file, so
+every clone and every agent gets it — and `ark skill install --force` updates
+it after an upgrade. `ark skill show` prints it.
+
+It names the moments that actually get missed: check `ark status` before
+anything else, fix a missing remote *immediately* (a repository with no remote
+records to one machine, with no backup, and looks perfectly healthy while doing
+it), wrap substantive sessions in `ark run start` / `ark run finish`, and sync
+before you finish.
+
 - **`--json` everywhere.** Every command emits stable JSON for parsing.
 - **Identity.** Pass `--agent <name>` (or set `ARK_AGENT_NAME`) and records
   are attributed to that agent, delegated by the repository's default human.
@@ -114,6 +132,12 @@ go build ./...
 go test ./...
 ```
 
+`make build` writes `bin/ark` with the version stamped from
+`git describe --tags --always --dirty`; `make build-server` does the same for
+`bin/ark-server`. A plain `go build` needs no stamp — `ark --version` then
+falls back to the module version (so `go install ...@v0.1.0` self-describes)
+or to `dev` plus the short commit Go embeds automatically.
+
 Layout follows [docs/v1-spec.md](docs/v1-spec.md) §15, with one deliberate
 deviation: entity operations live in one `internal/store` package instead of
 a dozen single-file packages. They can split out when cloud sync gives each
@@ -128,6 +152,7 @@ entity enough distinct behavior to earn it.
 | `internal/app` | repository discovery, `ark init`, actor resolution |
 | `internal/cli` | cobra command tree, `ark gh` shim |
 | `internal/output` | human tables / stable JSON |
+| `internal/buildinfo` | version reported by both binaries (ldflags → build info → `dev`) |
 | `migrations/` | numbered forward-only SQL migrations |
 
 ## Contributing

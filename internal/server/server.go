@@ -18,10 +18,11 @@ import (
 
 // Server is the Ark sync service.
 type Server struct {
-	Repos *repodb.Manager
-	Token string // single service token (spec §20: V1 begins with one)
-	Blobs BlobStore
-	Log   *slog.Logger
+	Repos   *repodb.Manager
+	Token   string // single service token (spec §20: V1 begins with one)
+	Blobs   BlobStore
+	Log     *slog.Logger
+	Version string // build stamp, reported unauthenticated on GET /
 }
 
 // Handler builds the HTTP API.
@@ -32,7 +33,11 @@ func (s *Server) Handler() http.Handler {
 			writeErr(w, http.StatusNotFound, "not_found", "unknown route")
 			return
 		}
-		writeJSON(w, map[string]string{"service": "ark-sync", "api": "v1"})
+		root := map[string]string{"service": "ark-sync", "api": "v1"}
+		if s.Version != "" {
+			root["version"] = s.Version
+		}
+		writeJSON(w, root)
 	})
 	// Not /healthz: Google Frontend intercepts that path on run.app
 	// hostnames and serves its own 404 before the request reaches the
