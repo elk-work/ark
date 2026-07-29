@@ -54,6 +54,28 @@ numbers can be rewritten on collision — the ULID is authoritative, so local
 numbers are indexed but not unique. Tokens resolve ARK_TOKEN → macOS
 keychain → ~/.ark/credentials.toml and never live in the repository.
 
+## This repository is not itself managed by Ark
+
+**Ark bootstraps on GitHub and has no `.ark/` directory of its own.** This is
+deliberate — a work record system cannot be the sole tracker of its own
+development before it is trustworthy enough to depend on, so ark's issues and
+pull requests live on `elkproject/ark` in GitHub.
+
+Consequences for agents working here:
+
+- `ark status`, `ark task`, and every other record command **fail in this
+  repository** with "no `.ark` directory found". That is expected. Do not run
+  `ark init` to fix it.
+- File Ark feature requests and bugs as **GitHub issues on `elkproject/ark`**
+  (`gh issue create -R elkproject/ark`), not as Ark tasks.
+- To exercise Ark against a real repository, use one that actually carries
+  `.ark/`: within the elk superproject those are **pulse, scout, and signal**
+  (`ark -C pulse status`). `pulse` is the smallest.
+
+Note the asymmetry this creates: `scout` and `ark` stay GitHub-primary, while
+the other elk submodules are moving to Ark-primary with GitHub as a backup
+mirror. See `elkproject/ark#7`.
+
 ## What is deliberately absent (V1)
 
 Workspaces, projects, milestones, a web UI, hosted Git, a custom merge
