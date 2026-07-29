@@ -56,25 +56,15 @@ keychain → ~/.ark/credentials.toml and never live in the repository.
 
 ## This repository is not itself managed by Ark
 
-**Ark bootstraps on GitHub and has no `.ark/` directory of its own.** This is
-deliberate — a work record system cannot be the sole tracker of its own
-development before it is trustworthy enough to depend on, so ark's issues and
-pull requests live on `elkproject/ark` in GitHub.
-
-Consequences for agents working here:
+Ark bootstraps on GitHub and has no `.ark/` of its own — deliberately. See
+**"How Ark's own work is tracked"** in the README for why. What it means here:
 
 - `ark status`, `ark task`, and every other record command **fail in this
-  repository** with "no `.ark` directory found". That is expected. Do not run
-  `ark init` to fix it.
+  repository** with "no `.ark` directory found". Expected; do not `ark init`.
 - File Ark feature requests and bugs as **GitHub issues on `elkproject/ark`**
   (`gh issue create -R elkproject/ark`), not as Ark tasks.
-- To exercise Ark against a real repository, use one that actually carries
-  `.ark/`: within the elk superproject those are **pulse, scout, and signal**
-  (`ark -C pulse status`). `pulse` is the smallest.
-
-Note the asymmetry this creates: `scout` and `ark` stay GitHub-primary, while
-the other elk submodules are moving to Ark-primary with GitHub as a backup
-mirror. See `elkproject/ark#7`.
+- To exercise Ark for real, use a repo that carries `.ark/` — **pulse, scout,
+  or signal** (`ark -C pulse status`). `pulse` is the smallest.
 
 ## What is deliberately absent (V1)
 

@@ -47,6 +47,26 @@ covers both storage modes, the single-token auth model, health checks, and
 the backup/replay recovery path. [docs/deploy.md](docs/deploy.md) is the
 short index of deployment options.
 
+## How Ark's own work is tracked
+
+**Ark bootstraps on GitHub. This repository has no `.ark/` directory of its
+own**, and that is deliberate: a work record system cannot be the sole tracker
+of its own development before it is trustworthy enough to depend on. Ark's
+issues and pull requests therefore live on GitHub, at `elkproject/ark`.
+
+So, in this repository:
+
+- `ark status`, `ark task`, and the other record commands **fail here** with
+  `no .ark directory found`. That is expected, not a bug — and not something to
+  fix by running `ark init`.
+- File issues and open pull requests on GitHub in the ordinary way.
+- To exercise Ark against a real repository, use one that actually carries
+  `.ark/`. Within the Elk project family those are **pulse**, **scout**, and
+  **signal** — e.g. `ark -C pulse status`.
+
+The same reasoning is why `scout` stays GitHub-primary while the other Elk
+submodules move to Ark-primary with GitHub as a backup mirror.
+
 ## Install
 
 Prerequisites: Go >= 1.26, `git` on your PATH. No C toolchain required.
