@@ -21,7 +21,7 @@ variables, both modes end to end, auth and its trailing-newline trap,
 health checks, client setup, backup/replay recovery, and why the
 reference deployment runs a single instance.
 
-**→ [ops/elkproject-deployment.md](ops/elkproject-deployment.md)** is the
-maintainers' own environment — GCP project, bucket, Cloud Run service,
-service account, secret name, and the `gcloud run deploy` command. Useful
-only with access to that project; nothing in Ark depends on it.
+The maintainers' own environment (GCP project, bucket, Cloud Run service,
+service account, secret name, deploy command) is documented privately in
+the `elkproject/elk` meta-repo (`ark/docs/elkproject-deployment.md`).
+Useful only with access to that project; nothing in Ark depends on it.
