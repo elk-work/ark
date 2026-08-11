@@ -1,5 +1,11 @@
 # RFC-0002 — The Elk Work-Record Adapter
 
+> Note (2026-08-11): `adoption.md`, `adoption-phase-d-verdict.md`, and
+> `ops/elkproject-deployment.md` cited below were project-internal and moved to
+> the maintainers' private meta-repo (`elkproject/elk`, `ark/docs/`) before this
+> repository was opened. Citations to them are preserved as-is.
+
+
 Status: proposed 2026-07-28
 Related: docs/rfc-0001-per-repo-sqlite-storage.md (non-goals), docs/adoption.md,
 Elk-scout `docs/superpowers/specs/2026-07-10-work-record-connector-github-design.md`

@@ -15,3 +15,6 @@ coverage.html
 .DS_Store
 .idea/
 .vscode/
+
+# Supabase CLI local state (never commit)
+supabase/.temp/

@@ -1,5 +1,11 @@
 # RFC-0003 — Elk-Issued Ark Credentials
 
+> Note (2026-08-11): `adoption.md`, `adoption-phase-d-verdict.md`, and
+> `ops/elkproject-deployment.md` cited below were project-internal and moved to
+> the maintainers' private meta-repo (`elkproject/elk`, `ark/docs/`) before this
+> repository was opened. Citations to them are preserved as-is.
+
+
 Status: accepted 2026-07-28 (replaces the single service token of v1-spec §20).
 All three queued decisions resolved by the owner the same day — see "Resolved by
 the owner". Not yet implemented.
