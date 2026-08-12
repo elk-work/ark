@@ -20,8 +20,10 @@ import (
 
 const keychainService = "ark"
 
-// remoteHost normalizes a remote URL to its host for credential lookup.
-func remoteHost(remote string) string {
+// RemoteHost normalizes a remote URL to the host a credential is filed under.
+// Exported because the scope of a credential is user-facing: `ark login` tells
+// you which host it covers, which is how you know one login was enough.
+func RemoteHost(remote string) string {
 	u, err := url.Parse(remote)
 	if err != nil || u.Host == "" {
 		return remote
@@ -34,7 +36,7 @@ func ResolveToken(remote string) (string, error) {
 	if tok := os.Getenv("ARK_TOKEN"); tok != "" {
 		return tok, nil
 	}
-	host := remoteHost(remote)
+	host := RemoteHost(remote)
 	if runtime.GOOS == "darwin" {
 		out, err := exec.Command("security", "find-generic-password",
 			"-s", keychainService, "-a", host, "-w").Output()
@@ -54,7 +56,7 @@ func ResolveToken(remote string) (string, error) {
 // StoreToken saves the token in the OS keychain (macOS) or the credentials
 // file (other platforms). Returns a description of where it went.
 func StoreToken(remote, token string) (string, error) {
-	host := remoteHost(remote)
+	host := RemoteHost(remote)
 	if runtime.GOOS == "darwin" {
 		// -U updates an existing item in place.
 		err := exec.Command("security", "add-generic-password",
