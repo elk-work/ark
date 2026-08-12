@@ -54,7 +54,7 @@ func installSkill(root string, force bool) (wrote bool, path string, err error) 
 	return true, path, nil
 }
 
-// stageSkill adds the skill to the index if it is not tracked yet.
+// commitSkill tracks the skill: stage it, then commit that one path.
 //
 // Writing the file is not enough, and the difference is not cosmetic. The
 // skill's whole design is that it reaches agents automatically because it is a
@@ -64,23 +64,34 @@ func installSkill(root string, force bool) (wrote bool, path string, err error) 
 // repositories in this project ran `ark init`, never committed `.claude/`, and
 // carried Ark for weeks with no guidance at all.
 //
-// Staging rather than committing: Ark does not create commits in someone's
-// repository unasked, and the working tree may be mid-change. Staging puts the
-// file in `git status` where it cannot be missed, one step from done.
-// Best-effort — a repository without Git, or a locked index, must not fail
-// `ark init`.
-func stageSkill(ctx context.Context, root, path string) bool {
+// Committing rather than merely staging, because staging has the same defect
+// one step further along: it still depends on a human noticing and finishing
+// the job, and this failure is precisely that nobody ever does. Ark is being
+// asked to set the repository up; carrying its own setup to a committed state
+// is that task, not an overreach beyond it.
+//
+// Two guards keep it from being invasive. The commit names an explicit
+// pathspec, so nothing else that happened to be staged is swept in. And the
+// whole thing is best-effort — no Git, no identity configured, a locked index
+// or a repository mid-merge must not fail `ark init`.
+func commitSkill(ctx context.Context, root, path string) bool {
 	g := &git.Repo{Dir: root}
 	if g.IsTracked(ctx, path) {
 		return false
 	}
-	return g.Add(ctx, path) == nil
+	if err := g.Add(ctx, path); err != nil {
+		return false
+	}
+	return g.CommitPaths(ctx, "chore(ark): add the Ark agent skill\n\n"+
+		"Installed by `ark init`. Tracked so every clone, worktree and cloud\n"+
+		"sandbox gets the guidance — untracked it would exist on one machine.",
+		path) == nil
 }
 
 type skillReport struct {
-	Path    string `json:"path"`
-	Written bool   `json:"written"`
-	Staged  bool   `json:"staged"`
+	Path      string `json:"path"`
+	Written   bool   `json:"written"`
+	Committed bool   `json:"committed"`
 }
 
 func newSkillCmd(g *globals) *cobra.Command {
@@ -109,20 +120,23 @@ repository after upgrading Ark, or with --force to overwrite a local edit.`,
 			if err != nil {
 				return err
 			}
-			staged := false
+			committed := false
 			if wrote {
-				staged = stageSkill(cmd.Context(), a.Root, path)
+				committed = commitSkill(cmd.Context(), a.Root, path)
 			}
 			rel, relErr := filepath.Rel(a.Root, path)
 			if relErr != nil {
 				rel = path
 			}
 			p := g.printer(cmd)
-			return p.Result(skillReport{Path: path, Written: wrote, Staged: staged}, func() {
+			return p.Result(skillReport{Path: path, Written: wrote, Committed: committed}, func() {
 				if wrote {
 					p.Line("Wrote %s", rel)
-					if staged {
-						p.Line("Staged it. Commit it, or no other clone gets the guidance.")
+					if committed {
+						p.Line("Committed it, so every clone gets the guidance.")
+					} else {
+						p.Line("NOT committed — track it yourself, or no other clone gets it:")
+						p.Line("  git add %s && git commit -m 'chore(ark): add the Ark agent skill'", rel)
 					}
 					return
 				}

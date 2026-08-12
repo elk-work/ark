@@ -132,7 +132,7 @@ func TestSkillCoversTheMomentsThatActuallyGetMissed(t *testing.T) {
 // sandbox runs with no guidance while the repository looks fully adopted.
 // Two repositories in this project failed exactly this way: `ark init` wrote
 // .claude/, nobody committed it, and they carried Ark for weeks with no skill.
-func TestSkillIsStagedSoOtherClonesGetIt(t *testing.T) {
+func TestSkillIsCommittedSoOtherClonesGetIt(t *testing.T) {
 	root := t.TempDir()
 	runGit := func(args ...string) string {
 		t.Helper()
@@ -156,30 +156,120 @@ func TestSkillIsStagedSoOtherClonesGetIt(t *testing.T) {
 		t.Fatal("first install should write the file")
 	}
 
-	if staged := stageSkill(context.Background(), root, path); !staged {
-		t.Fatal("stageSkill reported it did not stage a freshly written skill")
+	if committed := commitSkill(context.Background(), root, path); !committed {
+		t.Fatal("commitSkill reported it did not commit a freshly written skill")
 	}
 
-	// The contract: git now knows about it, so a commit carries it to clones.
-	if out := runGit("diff", "--cached", "--name-only"); !strings.Contains(out, "SKILL.md") {
-		t.Errorf("skill is not in the index; staged output = %q", out)
+	// The contract: it is committed, so a clone of HEAD carries the guidance.
+	if out := runGit("ls-files", "--", ".claude/skills/ark/SKILL.md"); !strings.Contains(out, "SKILL.md") {
+		t.Errorf("skill is not tracked; ls-files = %q", out)
+	}
+	if out := runGit("status", "--porcelain"); strings.Contains(out, "SKILL.md") {
+		t.Errorf("skill should be committed, not left pending; status = %q", out)
 	}
 
 	// Idempotent: already tracked means nothing more to do.
-	runGit("commit", "-q", "-m", "add skill")
-	if staged := stageSkill(context.Background(), root, path); staged {
-		t.Error("stageSkill should report no work once the skill is tracked")
+	if committed := commitSkill(context.Background(), root, path); committed {
+		t.Error("commitSkill should report no work once the skill is tracked")
 	}
 }
 
 // A directory that is not a Git repository must not break `ark init`.
-func TestSkillStagingIsBestEffortOutsideGit(t *testing.T) {
+func TestSkillTrackingIsBestEffortOutsideGit(t *testing.T) {
 	root := t.TempDir()
 	_, path, err := installSkill(root, false)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if staged := stageSkill(context.Background(), root, path); staged {
-		t.Error("staging cannot succeed outside a Git repository")
+	if committed := commitSkill(context.Background(), root, path); committed {
+		t.Error("tracking cannot succeed outside a Git repository")
+	}
+}
+
+// Ark commits a file it wrote itself; it must never sweep up whatever else the
+// working tree had staged. The explicit pathspec is the guard, so pin it.
+func TestSkillCommitDoesNotSweepUpOtherStagedWork(t *testing.T) {
+	root := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+	runGit("init", "-q", ".")
+	runGit("config", "user.email", "t@example.com")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(root, "seed.txt"), []byte("seed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "seed.txt")
+	runGit("commit", "-q", "-m", "seed")
+
+	// Someone is mid-change with unrelated work staged.
+	if err := os.WriteFile(filepath.Join(root, "wip.txt"), []byte("half done\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "wip.txt")
+
+	_, path, err := installSkill(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !commitSkill(context.Background(), root, path) {
+		t.Fatal("commitSkill should have committed the skill")
+	}
+
+	// The skill landed...
+	if out := runGit("show", "--name-only", "--format=", "HEAD"); !strings.Contains(out, "SKILL.md") {
+		t.Errorf("skill not in HEAD commit: %q", out)
+	}
+	// ...and the unrelated staged file did NOT ride along.
+	if out := runGit("show", "--name-only", "--format=", "HEAD"); strings.Contains(out, "wip.txt") {
+		t.Error("commit swept up unrelated staged work")
+	}
+	if out := runGit("status", "--porcelain"); !strings.Contains(out, "wip.txt") {
+		t.Errorf("unrelated work should still be staged and uncommitted; status = %q", out)
+	}
+}
+
+// Ark no longer writes a repository-level .ark/ rule: .ark/.gitignore contains
+// `*`, so Ark state is self-ignoring on every branch. The rule was redundant,
+// and left untracked it read as an un-ignored database. Pin that .ark/ stays
+// invisible to Git with no repository-level rule at all.
+func TestArkStateIsSelfIgnoringWithoutARepoGitignore(t *testing.T) {
+	root := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+	runGit("init", "-q", ".")
+	runGit("config", "user.email", "t@example.com")
+	runGit("config", "user.name", "t")
+
+	// Simulate what app.Init writes for Ark state.
+	if err := os.MkdirAll(filepath.Join(root, ".ark"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{".gitignore": "*\n", "ark.db": "not really sqlite"} {
+		if err := os.WriteFile(filepath.Join(root, ".ark", name), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(root, ".gitignore")); !os.IsNotExist(err) {
+		t.Fatal("test precondition: there must be no repository-level .gitignore")
+	}
+	if out := runGit("status", "--porcelain"); strings.Contains(out, ".ark") {
+		t.Errorf(".ark/ must be invisible to Git without a repo-level rule; status = %q", out)
 	}
 }

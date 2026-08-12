@@ -181,6 +181,18 @@ func (r *Repo) IsTracked(ctx context.Context, path string) bool {
 	return err == nil && res.ExitCode == 0
 }
 
+// CommitPaths commits only the named paths, leaving the rest of the index
+// untouched. The pathspec matters: Ark commits files it wrote itself, and must
+// never sweep up whatever else the working tree happened to have staged.
+func (r *Repo) CommitPaths(ctx context.Context, message string, paths ...string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	args := append([]string{"commit", "-m", message, "--"}, paths...)
+	_, err := r.Run(ctx, args...)
+	return err
+}
+
 // Fetch fetches from the named remote. A missing remote is not an error for
 // local-only repositories.
 func (r *Repo) Fetch(ctx context.Context, remote string) error {

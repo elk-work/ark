@@ -188,8 +188,6 @@ func Init(ctx context.Context, dir, repoID string) (*InitResult, error) {
 		return nil, err
 	}
 
-	ensureGitignore(root)
-
 	return &InitResult{
 		RepositoryID:   repoID,
 		Root:           root,
@@ -216,30 +214,14 @@ func trimNL(s string) string {
 	return s
 }
 
-// ensureGitignore adds .ark/ to the repository's .gitignore so Ark state
-// never lands in source history. Best effort; init succeeds without it.
-func ensureGitignore(root string) {
-	path := filepath.Join(root, ".gitignore")
-	body, err := os.ReadFile(path)
-	if err != nil && !os.IsNotExist(err) {
-		return
-	}
-	for _, line := range splitLines(string(body)) {
-		if line == ".ark/" || line == ".ark" {
-			return
-		}
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	prefix := ""
-	if len(body) > 0 && body[len(body)-1] != '\n' {
-		prefix = "\n"
-	}
-	f.WriteString(prefix + ".ark/\n")
-}
+// Ark deliberately does NOT add a `.ark/` rule to the repository's .gitignore.
+// `.ark/.gitignore` contains `*` (written above), so Ark state ignores itself
+// on every branch, including ones where the repository .gitignore is absent —
+// a repository-level rule adds nothing. It did add harm: nothing committed the
+// rule, so every `ark init` left a stray untracked .gitignore that reads as an
+// un-ignored SQLite database and sends people hunting a hazard that does not
+// exist. Verified: with no repository-level rule at all, `.ark/` does not
+// appear in `git status`.
 
 func splitLines(s string) []string {
 	var out []string

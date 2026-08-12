@@ -32,7 +32,7 @@ func newInitCmd(g *globals) *cobra.Command {
 			// wrong is omission — sessions ending unrecorded, repositories
 			// never given a remote. Guidance only helps if it arrives in the
 			// agent's context without anyone remembering to fetch it.
-			skillWritten, skillStaged := false, false
+			skillWritten, skillCommitted := false, false
 			skillPath := ""
 			if withSkill, _ := cmd.Flags().GetBool("skill"); withSkill {
 				skillWritten, skillPath, err = installSkill(res.Root, false)
@@ -43,7 +43,7 @@ func newInitCmd(g *globals) *cobra.Command {
 				// skill reaches no other clone, and the repository looks
 				// adopted while every other session runs without guidance.
 				if skillWritten {
-					skillStaged = stageSkill(cmd.Context(), res.Root, skillPath)
+					skillCommitted = commitSkill(cmd.Context(), res.Root, skillPath)
 				}
 			}
 
@@ -57,10 +57,10 @@ func newInitCmd(g *globals) *cobra.Command {
 				}
 				p.Line("  actor       %s (%s)", res.ActorName, res.DefaultActorID)
 				if skillWritten {
-					if skillStaged {
-						p.Line("  skill       %s (staged)", SkillPath)
+					if skillCommitted {
+						p.Line("  skill       %s (committed)", SkillPath)
 					} else {
-						p.Line("  skill       %s (NOT staged)", SkillPath)
+						p.Line("  skill       %s (NOT committed)", SkillPath)
 					}
 				}
 				// Say this every time. A repository with no remote records to
@@ -69,19 +69,15 @@ func newInitCmd(g *globals) *cobra.Command {
 				p.Line("")
 				p.Line("Not yet syncing. Until a remote is set this records to this machine only:")
 				p.Line("  ark remote set <sync-service-url> && ark login && ark sync")
-				// Same reasoning, same failure shape: uncommitted, the skill
+				// Same reasoning, same failure shape: untracked, the skill
 				// exists on this machine only and no other session gets it.
-				if skillWritten {
+				// Only worth saying when it did NOT land — a successful commit
+				// already reported itself above.
+				if skillWritten && !skillCommitted {
 					p.Line("")
-					if skillStaged {
-						p.Line("The skill is staged but not committed. Commit it — until you do, no")
-						p.Line("other clone or sandbox has the guidance:")
-						p.Line("  git commit -m 'chore(ark): add the Ark agent skill' -- %s", SkillPath)
-					} else {
-						p.Line("The skill could not be staged. Track it yourself — until it is committed,")
-						p.Line("no other clone or sandbox has the guidance:")
-						p.Line("  git add %s", SkillPath)
-					}
+					p.Line("The skill could not be committed. Track it yourself — until it is, no")
+					p.Line("other clone or sandbox has the guidance:")
+					p.Line("  git add %s && git commit -m 'chore(ark): add the Ark agent skill'", SkillPath)
 				}
 			})
 		},

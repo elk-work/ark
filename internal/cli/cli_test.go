@@ -96,10 +96,16 @@ func TestEndToEnd(t *testing.T) {
 	if _, err := arkErr(t, dir, "init"); err == nil {
 		t.Fatal("second init should fail")
 	}
-	// .gitignore picked up .ark/
-	gi, _ := os.ReadFile(filepath.Join(dir, ".gitignore"))
-	if !strings.Contains(string(gi), ".ark/") {
-		t.Errorf(".gitignore missing .ark/: %q", gi)
+	// Ark deliberately writes no repository-level .ark/ rule — .ark/.gitignore
+	// contains `*`, so Ark state ignores itself on every branch. A repo-level
+	// rule added nothing and, left untracked, read as an un-ignored database.
+	if gi, err := os.ReadFile(filepath.Join(dir, ".ark", ".gitignore")); err != nil {
+		t.Errorf("read .ark/.gitignore: %v", err)
+	} else if strings.TrimSpace(string(gi)) != "*" {
+		t.Errorf(".ark/.gitignore = %q, want %q", gi, "*")
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".gitignore")); !os.IsNotExist(err) {
+		t.Errorf("init should leave no repository-level .gitignore, got err = %v", err)
 	}
 
 	// 2. create task
@@ -377,8 +383,12 @@ func TestMergeWithRemote(t *testing.T) {
 
 	dir := gitRepo(t)
 	gitOut(t, dir, "remote", "add", "origin", origin)
-	gitOut(t, dir, "push", "-u", "origin", "main")
+	// init before the first push: `ark init` commits the agent skill, so it
+	// belongs in the initial push like any other commit. Pushing first and
+	// initializing after would leave local main ahead of origin before the
+	// scenario even starts.
 	ark(t, dir, "init")
+	gitOut(t, dir, "push", "-u", "origin", "main")
 
 	other := t.TempDir()
 	gitOut(t, filepath.Dir(other), "clone", origin, other)
