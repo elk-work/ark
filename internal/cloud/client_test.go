@@ -3,6 +3,7 @@ package cloud
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -187,5 +188,89 @@ func TestNewNormalizesBaseURLAndResolvesEnvToken(t *testing.T) {
 	}
 	if c.Token != "env-token" {
 		t.Errorf("Token = %q, want env-token", c.Token)
+	}
+}
+
+// A credential is per service, not per repository, so `ark login` should be
+// able to tell you the token is wrong while you are still holding it — rather
+// than at the next sync, in a different repository, probably for someone else.
+//
+// The probe asks an authenticated route about a repository that cannot exist:
+// a live token earns a not-found, a dead one earns a 401.
+func TestVerifyTokenSeparatesADeadTokenFromAnUnknownRepository(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		wantErr bool
+	}{
+		{"server rejects the token", http.StatusUnauthorized,
+			`{"code":"permission","message":"invalid or missing token"}`, true},
+		{"token fine, throwaway repo absent", http.StatusNotFound,
+			`{"code":"not_found","message":"repository not registered"}`, false},
+		{"token fine, repo somehow present", http.StatusOK,
+			`{"records":[],"tombstones":[],"server_revision":0}`, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var sawAuth string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				sawAuth = r.Header.Get("Authorization")
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body)
+			}))
+			defer srv.Close()
+
+			err := VerifyToken(context.Background(), srv.URL, "candidate-token")
+			if tc.wantErr && err == nil {
+				t.Fatal("a rejected token must not verify — that is the whole point")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("token should have verified: %v", err)
+			}
+			if sawAuth != "Bearer candidate-token" {
+				t.Errorf("probe sent %q; it must present the candidate, not a stored credential", sawAuth)
+			}
+		})
+	}
+}
+
+// An unreachable server is not a bad token, and saying so would send someone
+// hunting for a credential problem they do not have.
+func TestVerifyTokenReportsUnreachableAsOfflineNotPermission(t *testing.T) {
+	err := VerifyToken(context.Background(), "http://127.0.0.1:1", "tok")
+	if err == nil {
+		t.Fatal("an unreachable server should be an error")
+	}
+	var arkErr *records.Error
+	if !errors.As(err, &arkErr) || arkErr.Kind != records.KindOffline {
+		t.Errorf("got %v, want an offline error", err)
+	}
+}
+
+// The 401 a client sees at sync time must point at the fix. The server's own
+// wording ("invalid or missing token") cannot distinguish a stale credential
+// from an absent one, and by that point the client definitely has one.
+func TestRejectedCredentialErrorNamesTheRemedy(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		io.WriteString(w, `{"code":"permission","message":"invalid or missing token"}`)
+	}))
+	defer srv.Close()
+
+	t.Setenv("ARK_TOKEN", "stale")
+	c, err := New(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = c.RegisterRepo(context.Background(), api.RegisterRepositoryRequest{ID: "r", Name: "r"})
+	if err == nil {
+		t.Fatal("expected a permission error")
+	}
+	if !strings.Contains(err.Error(), "ark login") {
+		t.Errorf("error should tell the reader what to do, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "rotated") {
+		t.Errorf("error should name the likely cause, got: %v", err)
 	}
 }

@@ -47,7 +47,7 @@ func TestTokenResolutionOrder(t *testing.T) {
 	}
 
 	// The credentials file is the last resort.
-	if err := writeFileToken(remoteHost(credsTestRemote), "from-file"); err != nil {
+	if err := writeFileToken(RemoteHost(credsTestRemote), "from-file"); err != nil {
 		t.Fatalf("write file token: %v", err)
 	}
 	if tok, err := ResolveToken(credsTestRemote); err != nil || tok != "from-file" {
@@ -150,8 +150,8 @@ func TestRemoteHostNormalization(t *testing.T) {
 		{"ark.example.com", "ark.example.com"},
 	}
 	for _, tc := range cases {
-		if got := remoteHost(tc.remote); got != tc.want {
-			t.Errorf("remoteHost(%q) = %q, want %q", tc.remote, got, tc.want)
+		if got := RemoteHost(tc.remote); got != tc.want {
+			t.Errorf("RemoteHost(%q) = %q, want %q", tc.remote, got, tc.want)
 		}
 	}
 }

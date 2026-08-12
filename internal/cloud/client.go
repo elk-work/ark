@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -34,6 +35,39 @@ func New(remote string) (*Client, error) {
 		Token:   token,
 		HTTP:    &http.Client{Timeout: 60 * time.Second},
 	}, nil
+}
+
+// VerifyToken reports whether the server accepts a token, without storing it.
+//
+// It probes an authenticated route with a repository id that cannot exist. A
+// live token earns a not-found; a dead one earns a 401. That difference is the
+// whole signal, and it is why `ark login` can tell you the credential is wrong
+// while you are still holding it, rather than at the next sync.
+func VerifyToken(ctx context.Context, remote, token string) error {
+	c := &Client{
+		BaseURL: strings.TrimSuffix(remote, "/"),
+		Token:   token,
+		HTTP:    &http.Client{Timeout: 30 * time.Second},
+	}
+	err := c.do(ctx, http.MethodPost, "/v1/sync/pull",
+		api.PullRequest{RepositoryID: "00000000000000000000000000", AfterRevision: 0}, nil)
+	if err == nil {
+		return nil
+	}
+	var arkErr *records.Error
+	if errors.As(err, &arkErr) {
+		switch arkErr.Kind {
+		case records.KindPermission:
+			return records.Permissionf("the server rejected this token")
+		case records.KindNotFound:
+			return nil // authenticated; the throwaway repository simply is not there
+		case records.KindOffline:
+			return err
+		}
+	}
+	// Anything else means we reached the server and it did not object to who we
+	// are, which is all this check claims to establish.
+	return nil
 }
 
 func (c *Client) do(ctx context.Context, method, path string, in, out any) error {
@@ -79,7 +113,11 @@ func statusError(status int, e api.Error) error {
 	}
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return &records.Error{Kind: records.KindPermission, Message: msg}
+		// The server's own wording is "invalid or missing token", which cannot
+		// distinguish a stale credential from an absent one — and the client
+		// always has one by this point, or it would not have got here.
+		return &records.Error{Kind: records.KindPermission,
+			Message: msg + " — the stored credential was not accepted; it may have been rotated. Run `ark login`"}
 	case http.StatusNotFound:
 		return records.NotFoundf("%s", msg)
 	case http.StatusConflict:
