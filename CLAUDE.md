@@ -29,7 +29,9 @@ with machine-readable flags — never reimplement Git. Schema lives in
 - Comments, thread messages: append-only; corrections use `supersedes_id`.
 - Submitted reviews are immutable; artifacts are immutable by checksum.
 - Every local write logs a mutation in the same transaction — no exceptions.
-- Task/PR numbers are display aliases; ULIDs are authoritative.
+- Task/PR numbers are display aliases; ULIDs are authoritative. In prose,
+  write `a#13` (never bare `#13`, which reads as GitHub) and prefix across
+  repositories: `signal-a#14`, `pulse-a#4`. See README "Writing about tasks".
 - Errors use `records.Error` kinds; CLI exit codes follow spec §22
   (2 validation, 3 not found, 4 conflict, 5 permission, 6 offline, 7 partial).
 - `--json` output is a stable interface for agents; treat field renames as

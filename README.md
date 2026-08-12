@@ -134,6 +134,24 @@ before you finish.
 - **References.** Tasks and PRs accept their number (`1`) or any unambiguous
   ULID prefix; threads, runs, and artifacts accept ULID prefixes.
 
+### Writing about tasks
+
+Task numbers are **repository-local display aliases**, not identifiers. The
+ULID is authoritative, and a number can be rewritten when the sync server
+resolves a collision. Two habits follow, and they matter as soon as a second
+repository starts using Ark:
+
+- **Write `a#13`, never bare `#13`.** A bare `#13` reads as a GitHub issue or
+  pull request, and both live in the same sentences.
+- **Prefix across repositories: `signal-a#14`, `pulse-a#4`.** Numbering
+  restarts per repository, so `a#14` alone is ambiguous the moment anyone
+  works in two of them. Drop the prefix only inside a repository's own
+  records, where the context is unambiguous.
+
+For a reference that must survive — a commit message, a design doc, anything
+outliving the task — add a ULID prefix, since it is the part that cannot
+change: `signal-a#14 (01KYM1NCY7)`.
+
 ## Principles (short form)
 
 1. **Do not rebuild Git.** Ark references Git objects; it never replaces them.
