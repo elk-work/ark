@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -122,5 +124,62 @@ func TestSkillCoversTheMomentsThatActuallyGetMissed(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("frontmatter is missing %q", want)
 		}
+	}
+}
+
+// Writing the skill is not the guarantee — being *tracked* is. An untracked
+// skill exists on one machine, so every other clone, worktree and cloud
+// sandbox runs with no guidance while the repository looks fully adopted.
+// Two repositories in this project failed exactly this way: `ark init` wrote
+// .claude/, nobody committed it, and they carried Ark for weeks with no skill.
+func TestSkillIsStagedSoOtherClonesGetIt(t *testing.T) {
+	root := t.TempDir()
+	runGit := func(args ...string) string {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+	runGit("init", "-q", ".")
+	runGit("config", "user.email", "t@example.com")
+	runGit("config", "user.name", "t")
+
+	wrote, path, err := installSkill(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !wrote {
+		t.Fatal("first install should write the file")
+	}
+
+	if staged := stageSkill(context.Background(), root, path); !staged {
+		t.Fatal("stageSkill reported it did not stage a freshly written skill")
+	}
+
+	// The contract: git now knows about it, so a commit carries it to clones.
+	if out := runGit("diff", "--cached", "--name-only"); !strings.Contains(out, "SKILL.md") {
+		t.Errorf("skill is not in the index; staged output = %q", out)
+	}
+
+	// Idempotent: already tracked means nothing more to do.
+	runGit("commit", "-q", "-m", "add skill")
+	if staged := stageSkill(context.Background(), root, path); staged {
+		t.Error("stageSkill should report no work once the skill is tracked")
+	}
+}
+
+// A directory that is not a Git repository must not break `ark init`.
+func TestSkillStagingIsBestEffortOutsideGit(t *testing.T) {
+	root := t.TempDir()
+	_, path, err := installSkill(root, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if staged := stageSkill(context.Background(), root, path); staged {
+		t.Error("staging cannot succeed outside a Git repository")
 	}
 }

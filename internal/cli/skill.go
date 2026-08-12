@@ -1,12 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 
 	"github.com/spf13/cobra"
 
+	"github.com/elkproject/ark/internal/git"
 	"github.com/elkproject/ark/internal/records"
 	"github.com/elkproject/ark/skills"
 )
@@ -52,9 +54,33 @@ func installSkill(root string, force bool) (wrote bool, path string, err error) 
 	return true, path, nil
 }
 
+// stageSkill adds the skill to the index if it is not tracked yet.
+//
+// Writing the file is not enough, and the difference is not cosmetic. The
+// skill's whole design is that it reaches agents automatically because it is a
+// *tracked* file — every clone, every worktree, every cloud sandbox. Left
+// untracked it exists on exactly one machine, and the repository looks adopted
+// while no other session ever sees the guidance. That is not hypothetical: two
+// repositories in this project ran `ark init`, never committed `.claude/`, and
+// carried Ark for weeks with no guidance at all.
+//
+// Staging rather than committing: Ark does not create commits in someone's
+// repository unasked, and the working tree may be mid-change. Staging puts the
+// file in `git status` where it cannot be missed, one step from done.
+// Best-effort — a repository without Git, or a locked index, must not fail
+// `ark init`.
+func stageSkill(ctx context.Context, root, path string) bool {
+	g := &git.Repo{Dir: root}
+	if g.IsTracked(ctx, path) {
+		return false
+	}
+	return g.Add(ctx, path) == nil
+}
+
 type skillReport struct {
 	Path    string `json:"path"`
 	Written bool   `json:"written"`
+	Staged  bool   `json:"staged"`
 }
 
 func newSkillCmd(g *globals) *cobra.Command {
@@ -83,14 +109,21 @@ repository after upgrading Ark, or with --force to overwrite a local edit.`,
 			if err != nil {
 				return err
 			}
+			staged := false
+			if wrote {
+				staged = stageSkill(cmd.Context(), a.Root, path)
+			}
 			rel, relErr := filepath.Rel(a.Root, path)
 			if relErr != nil {
 				rel = path
 			}
 			p := g.printer(cmd)
-			return p.Result(skillReport{Path: path, Written: wrote}, func() {
+			return p.Result(skillReport{Path: path, Written: wrote, Staged: staged}, func() {
 				if wrote {
 					p.Line("Wrote %s", rel)
+					if staged {
+						p.Line("Staged it. Commit it, or no other clone gets the guidance.")
+					}
 					return
 				}
 				if _, statErr := os.Stat(path); statErr == nil {

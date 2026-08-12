@@ -32,11 +32,18 @@ func newInitCmd(g *globals) *cobra.Command {
 			// wrong is omission — sessions ending unrecorded, repositories
 			// never given a remote. Guidance only helps if it arrives in the
 			// agent's context without anyone remembering to fetch it.
-			skillWritten := false
+			skillWritten, skillStaged := false, false
+			skillPath := ""
 			if withSkill, _ := cmd.Flags().GetBool("skill"); withSkill {
-				skillWritten, _, err = installSkill(res.Root, false)
+				skillWritten, skillPath, err = installSkill(res.Root, false)
 				if err != nil {
 					return err
+				}
+				// Writing it is not the job; being tracked is. An untracked
+				// skill reaches no other clone, and the repository looks
+				// adopted while every other session runs without guidance.
+				if skillWritten {
+					skillStaged = stageSkill(cmd.Context(), res.Root, skillPath)
 				}
 			}
 
@@ -50,7 +57,11 @@ func newInitCmd(g *globals) *cobra.Command {
 				}
 				p.Line("  actor       %s (%s)", res.ActorName, res.DefaultActorID)
 				if skillWritten {
-					p.Line("  skill       %s", SkillPath)
+					if skillStaged {
+						p.Line("  skill       %s (staged)", SkillPath)
+					} else {
+						p.Line("  skill       %s (NOT staged)", SkillPath)
+					}
 				}
 				// Say this every time. A repository with no remote records to
 				// one machine, with no backup and no second reader, and that
@@ -58,6 +69,20 @@ func newInitCmd(g *globals) *cobra.Command {
 				p.Line("")
 				p.Line("Not yet syncing. Until a remote is set this records to this machine only:")
 				p.Line("  ark remote set <sync-service-url> && ark login && ark sync")
+				// Same reasoning, same failure shape: uncommitted, the skill
+				// exists on this machine only and no other session gets it.
+				if skillWritten {
+					p.Line("")
+					if skillStaged {
+						p.Line("The skill is staged but not committed. Commit it — until you do, no")
+						p.Line("other clone or sandbox has the guidance:")
+						p.Line("  git commit -m 'chore(ark): add the Ark agent skill' -- %s", SkillPath)
+					} else {
+						p.Line("The skill could not be staged. Track it yourself — until it is committed,")
+						p.Line("no other clone or sandbox has the guidance:")
+						p.Line("  git add %s", SkillPath)
+					}
+				}
 			})
 		},
 	}

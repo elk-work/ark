@@ -164,6 +164,23 @@ func (r *Repo) Checkout(ctx context.Context, branch string) error {
 	return err
 }
 
+// Add stages paths. Used for files Ark itself writes into the working tree:
+// a file Ark created but left untracked reaches no other clone, which for the
+// agent skill means the guidance silently does not exist for anyone else.
+func (r *Repo) Add(ctx context.Context, paths ...string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	_, err := r.Run(ctx, append([]string{"add", "--"}, paths...)...)
+	return err
+}
+
+// IsTracked reports whether path is known to the index.
+func (r *Repo) IsTracked(ctx context.Context, path string) bool {
+	res, err := r.Run(ctx, "ls-files", "--error-unmatch", "--", path)
+	return err == nil && res.ExitCode == 0
+}
+
 // Fetch fetches from the named remote. A missing remote is not an error for
 // local-only repositories.
 func (r *Repo) Fetch(ctx context.Context, remote string) error {
