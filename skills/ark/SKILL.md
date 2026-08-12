@@ -142,6 +142,32 @@ repeated push is a no-op, there is no cursor to keep, and an interrupted run
 needs no repair. A repository can be backfilled from nothing. Push after
 finishing a run, alongside `ark sync`.
 
+## Writing task numbers
+
+Ark numbers tasks **per repository**, and the number is a display alias — the
+ULID is authoritative, and the sync server may rewrite a number when two
+offline clients mint the same one. So a number is for reading, not for
+identity.
+
+| Write | Means |
+|---|---|
+| `a#13` | task 13 in **this** repository |
+| `signal-a#14`, `pulse-a#4` | a task in another repository — always prefix |
+| `#6` | a GitHub issue or PR, unchanged |
+
+**Never write a bare `#13` for an Ark task.** It reads as a GitHub issue, and
+both turn up in the same sentences. Prefix with the repository whenever you
+are referring outside the one you are in: `signal-a#14` and `pulse-a#14` are
+different tasks.
+
+For a reference meant to outlive the task — a commit message, a design doc, a
+comment another repository will read — append a ULID prefix, the part that
+cannot change:
+
+```text
+signal-a#14 (01KYM1NCY7)
+```
+
 ## For parsing
 
 - `--json` on every command; treat the field names as a stable interface.
