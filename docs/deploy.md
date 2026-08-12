@@ -23,5 +23,5 @@ reference deployment runs a single instance.
 
 The maintainers' own environment (GCP project, bucket, Cloud Run service,
 service account, secret name, deploy command) is documented privately in
-the `elkproject/elk` meta-repo (`ark/docs/elkproject-deployment.md`).
+the `elkproject/elk` meta-repo (`docs/ark/elkproject-deployment.md`).
 Useful only with access to that project; nothing in Ark depends on it.

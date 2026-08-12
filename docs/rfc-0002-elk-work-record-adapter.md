@@ -2,7 +2,7 @@
 
 > Note (2026-08-11): `adoption.md`, `adoption-phase-d-verdict.md`, and
 > `ops/elkproject-deployment.md` cited below were project-internal and moved to
-> the maintainers' private meta-repo (`elkproject/elk`, `ark/docs/`) before this
+> the maintainers' private meta-repo (`elkproject/elk`, `docs/ark/`) before this
 > repository was opened. Citations to them are preserved as-is.
 
 

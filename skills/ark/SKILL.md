@@ -26,16 +26,38 @@ Run this before anything else in a repo that has `.ark/`:
 ark status
 ```
 
-Read the `sync` line. There are three failure states, and the third is the
-dangerous one because it looks fine:
+Read the `sync` line. There are three failure states. Two of them are dangerous,
+and for the same reason — they are **quiet**. Nothing breaks, the work proceeds,
+and no record is kept:
 
 | What you see | What it means | What to do |
 |---|---|---|
-| `ark: command not found` | Ark isn't installed | Note it and skip Ark for this session. Don't block the work. |
+| `ark: command not found` | Ark isn't installed **in this environment** | **Say so prominently in your reply, at the end of the session as well as the start.** Don't block the work — but don't let it pass silently either. See below. |
 | `not an Ark repository` | Never initialized | Ask whether to adopt Ark here. Don't initialize a repo unasked. |
 | `sync  no remote configured; N local mutations recorded` | **Recording to one laptop only.** No backup, no second reader, nothing reaches Elk. | Fix it now — see below. |
 
-That third line is the one that has actually cost this project history. A
+### When Ark isn't installed, escalate — do not just skip
+
+This instruction used to read "note it and skip Ark for this session." That was
+wrong, and it cost a full two-week measurement window: work moved to an
+environment where the binary was never installed, every session skipped Ark
+exactly as instructed, and the repositories went fourteen days with **zero
+records of any type** while looking perfectly healthy. A silent skip is
+indistinguishable from an unused tool.
+
+So when you see `command not found`:
+
+- **Report it in your response to the human**, in the summary they will actually
+  read — not only in a tool call they may scroll past. Name the environment.
+- **Say what was lost**: "this session recorded nothing in Ark" is the sentence
+  that matters, not "ark is not installed."
+- **Point at the fix.** A missing binary in a sandbox or cloud environment is
+  almost never a per-session problem; it is the environment's setup script
+  missing an install step. Fixing that is what stops it recurring. A tool that
+  works only on one laptop is not installed.
+- **Still don't block the work.** Escalating and blocking are different things.
+
+The third line is the one that has actually cost this project history. A
 repository can look healthy, accumulate weeks of work, and be one disk failure
 from losing all of it. If you see it, say so and fix it:
 
