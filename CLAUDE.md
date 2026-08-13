@@ -65,8 +65,8 @@ Ark bootstraps on GitHub and has no `.ark/` of its own — deliberately. See
   repository** with "no `.ark` directory found". Expected; do not `ark init`.
 - File Ark feature requests and bugs as **GitHub issues on `elkproject/ark`**
   (`gh issue create -R elkproject/ark`), not as Ark tasks.
-- To exercise Ark for real, use a repo that carries `.ark/` — **pulse, scout,
-  or signal** (`ark -C pulse status`). `pulse` is the smallest.
+- To exercise Ark for real, use a repo that carries `.ark/` — **scout, signal,
+  pulse, watch, or tailor** (`ark -C pulse status`). `pulse` is the smallest.
 
 ## What is deliberately absent (V1)
 
