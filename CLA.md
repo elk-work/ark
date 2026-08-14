@@ -2,12 +2,12 @@
 
 *Adapted from the Apache Software Foundation Individual Contributor License
 Agreement v2.2. This agreement is in effect as an ICLA-style license grant
-(not a copyright assignment), administered by the owner of the `elkproject`
+(not a copyright assignment), administered by the owner of the `elk-work`
 GitHub organization (Issac Roth).*
 
 Thank you for your interest in contributing to Ark and other Elk Project
 software (the "Project", currently administered by the owner of the
-`elkproject` GitHub organization, hereafter "the Steward").
+`elk-work` GitHub organization, hereafter "the Steward").
 
 By signing this Agreement (including by posting the signing comment on a
 pull request when prompted by the CLA workflow), You accept and agree to the

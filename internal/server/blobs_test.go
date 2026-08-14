@@ -285,7 +285,7 @@ func TestRegisterBackfillsButNeverRenames(t *testing.T) {
 		return
 	}
 
-	reg("scout", "main", "https://github.com/elkproject/scout.git")
+	reg("scout", "main", "https://github.com/elk-work/scout.git")
 	if n, b, r := meta(); n != "scout" || b != "main" || r == "" {
 		t.Fatalf("first registration should set everything: %q %q %q", n, b, r)
 	}
@@ -299,7 +299,7 @@ func TestRegisterBackfillsButNeverRenames(t *testing.T) {
 	if b != "main" {
 		t.Errorf("default_branch was overwritten to %q", b)
 	}
-	if r != "https://github.com/elkproject/scout.git" {
+	if r != "https://github.com/elk-work/scout.git" {
 		t.Errorf("git_remote_url was cleared to %q", r)
 	}
 

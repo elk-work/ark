@@ -103,7 +103,7 @@ valuable than no record — it stops the next agent repeating the attempt.
 The result summary is the single highest-value string you will write all
 session. Make it specific and factual:
 
-> Adapter landed (PR elkproject/pulse#2, branch android-adapter). First real
+> Adapter landed (PR elk-work/pulse#2, branch android-adapter). First real
 > run vs iOS baseline: 4 match, 3 known-gap, 9 closed-gap, 0 new-drift — the
 > punch list was 12 days stale. After pruning the 9 closed waivers: 13 match,
 > 3 known-gap, 0 drift.

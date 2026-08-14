@@ -52,7 +52,7 @@ short index of deployment options.
 **Ark bootstraps on GitHub. This repository has no `.ark/` directory of its
 own**, and that is deliberate: a work record system cannot be the sole tracker
 of its own development before it is trustworthy enough to depend on. Ark's
-issues and pull requests therefore live on GitHub, at `elkproject/ark`.
+issues and pull requests therefore live on GitHub, at `elk-work/ark`.
 
 So, in this repository:
 
@@ -74,7 +74,7 @@ Prerequisites: Go >= 1.26, `git` on your PATH. No C toolchain required.
 The repository is currently private, so clone and build from source:
 
 ```sh
-git clone git@github.com:elkproject/ark.git
+git clone git@github.com:elk-work/ark.git
 cd ark
 go build ./cmd/ark
 ```
