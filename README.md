@@ -61,11 +61,11 @@ So, in this repository:
   fix by running `ark init`.
 - File issues and open pull requests on GitHub in the ordinary way.
 - To exercise Ark against a real repository, use one that actually carries
-  `.ark/`. Within the Elk project family those are **pulse**, **scout**, and
-  **signal** — e.g. `ark -C pulse status`.
+  `.ark/`. Within the Elk project family those are **scout**, **signal**,
+  **pulse**, **watch**, and **tailor** — e.g. `ark -C pulse status`.
 
-The same reasoning is why `scout` stays GitHub-primary while the other Elk
-submodules move to Ark-primary with GitHub as a backup mirror.
+Those five are Ark-primary; this repository is the exception, not they. Ark
+passed its adoption HOLD on 2026-08-12, scout included.
 
 ## Install
 
