@@ -173,21 +173,25 @@ identity.
 
 | Write | Means |
 |---|---|
-| `a#13` | task 13 in **this** repository |
-| `signal-a#14`, `pulse-a#4` | a task in another repository — always prefix |
+| `ark:signal#14` | Ark task 14 in the signal repository |
+| `ark:signal#14 (01KYM1NCY7)` | the same, made durable — see below |
 | `#6` | a GitHub issue or PR, unchanged |
 
-**Never write a bare `#13` for an Ark task.** It reads as a GitHub issue, and
-both turn up in the same sentences. Prefix with the repository whenever you
-are referring outside the one you are in: `signal-a#14` and `pulse-a#14` are
-different tasks.
+**Never write a bare `#13` for an Ark task.** GitHub links it to an issue of
+that number in whatever repository is being viewed — silently wrong rather
+than merely unhelpful. `ark:` cannot be mistaken and never auto-links.
+
+**Always name the repository, even the one you are in.** References travel:
+into commit messages, PR bodies, other repositories' docs. `ark:signal#14` and
+`ark:pulse#14` are different tasks, and a bare number stops meaning anything
+the moment the sentence moves.
 
 For a reference meant to outlive the task — a commit message, a design doc, a
 comment another repository will read — append a ULID prefix, the part that
 cannot change:
 
 ```text
-signal-a#14 (01KYM1NCY7)
+ark:signal#14 (01KYM1NCY7)
 ```
 
 ## For parsing
