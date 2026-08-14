@@ -64,15 +64,15 @@ Ark bootstraps on GitHub and has no `.ark/` of its own — deliberately. See
 
 - `ark status`, `ark task`, and every other record command **fail in this
   repository** with "no `.ark` directory found". Expected; do not `ark init`.
-- File Ark feature requests and bugs as **GitHub issues on `elkproject/ark`**
-  (`gh issue create -R elkproject/ark`), not as Ark tasks.
+- File Ark feature requests and bugs as **GitHub issues on `elk-work/ark`**
+  (`gh issue create -R elk-work/ark`), not as Ark tasks.
 - To exercise Ark for real, use a repo that carries `.ark/` — **scout, signal,
   pulse, watch, or tailor** (`ark -C pulse status`). `pulse` is the smallest.
 
 ## Landing a PR
 
 Green CI, not a draft, no `hold` label ⇒ it lands — the fleet-wide standard is
-[elk/docs/pr-flow.md](https://github.com/elkproject/elk/blob/main/docs/pr-flow.md).
+[elk/docs/pr-flow.md](https://github.com/elk-work/elk/blob/main/docs/pr-flow.md).
 
 ## What is deliberately absent (V1)
 
