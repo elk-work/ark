@@ -141,16 +141,17 @@ ULID is authoritative, and a number can be rewritten when the sync server
 resolves a collision. Two habits follow, and they matter as soon as a second
 repository starts using Ark:
 
-- **Write `a#13`, never bare `#13`.** A bare `#13` reads as a GitHub issue or
-  pull request, and both live in the same sentences.
-- **Prefix across repositories: `signal-a#14`, `pulse-a#4`.** Numbering
-  restarts per repository, so `a#14` alone is ambiguous the moment anyone
-  works in two of them. Drop the prefix only inside a repository's own
-  records, where the context is unambiguous.
+- **Write `ark:signal#14`, never bare `#14`.** A bare `#14` reads as a GitHub
+  issue or pull request — GitHub will even link it to one — and both live in
+  the same sentences. `ark:` cannot be mistaken and never auto-links.
+- **Name the repository, including the one you are in.** Numbering restarts
+  per repository, so `ark:signal#14` and `ark:pulse#14` are different tasks,
+  and references travel: into commit messages, PR bodies, other repositories'
+  docs, where the surrounding context is gone.
 
 For a reference that must survive — a commit message, a design doc, anything
 outliving the task — add a ULID prefix, since it is the part that cannot
-change: `signal-a#14 (01KYM1NCY7)`.
+change: `ark:signal#14 (01KYM1NCY7)`.
 
 ## Principles (short form)
 
