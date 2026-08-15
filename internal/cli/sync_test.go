@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/elkproject/ark/internal/server"
-	"github.com/elkproject/ark/internal/servertest"
+	"github.com/elk-work/ark/internal/server"
+	"github.com/elk-work/ark/internal/servertest"
 )
 
 // startSyncServer boots the real server over temp-dir SQLite repository

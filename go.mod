@@ -1,4 +1,4 @@
-module github.com/elkproject/ark
+module github.com/elk-work/ark
 
 go 1.26.5
 

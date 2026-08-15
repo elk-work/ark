@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"strings"
 
-	"github.com/elkproject/ark/internal/records"
+	"github.com/elk-work/ark/internal/records"
 )
 
 // Comment belongs to one parent record. Published comments are append-only;

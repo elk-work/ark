@@ -71,16 +71,20 @@ passed its adoption HOLD on 2026-08-12, scout included.
 
 Prerequisites: Go >= 1.26, `git` on your PATH. No C toolchain required.
 
-The repository is currently private, so clone and build from source:
+```sh
+go install github.com/elk-work/ark/cmd/ark@latest
+```
+
+Prebuilt binaries for macOS and Linux (arm64 and amd64) are attached to each
+[release](https://github.com/elk-work/ark/releases).
+
+To build from source instead:
 
 ```sh
 git clone git@github.com:elk-work/ark.git
 cd ark
 go build ./cmd/ark
 ```
-
-Once the repository is public, `go install github.com/elkproject/ark/cmd/ark@latest`
-will work as well.
 
 ## Quick start
 

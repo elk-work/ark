@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/elkproject/ark/skills"
+	"github.com/elk-work/ark/skills"
 )
 
 // The skill is the durable answer to Ark's real failure mode — sessions that

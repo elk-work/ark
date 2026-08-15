@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/elkproject/ark/internal/records"
+	"github.com/elk-work/ark/internal/records"
 )
 
 // CreateActor inserts an actor row. Actors are identity records, not work

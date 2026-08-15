@@ -8,9 +8,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/elkproject/ark/internal/git"
-	"github.com/elkproject/ark/internal/records"
-	"github.com/elkproject/ark/skills"
+	"github.com/elk-work/ark/internal/git"
+	"github.com/elk-work/ark/internal/records"
+	"github.com/elk-work/ark/skills"
 )
 
 // SkillPath is where the guidance lands in a repository. Claude Code and

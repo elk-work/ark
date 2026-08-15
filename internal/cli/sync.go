@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	arksync "github.com/elkproject/ark/internal/sync"
+	arksync "github.com/elk-work/ark/internal/sync"
 )
 
 func newSyncCmd(g *globals) *cobra.Command {

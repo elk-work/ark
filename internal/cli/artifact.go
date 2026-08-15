@@ -6,10 +6,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/elkproject/ark/internal/app"
-	"github.com/elkproject/ark/internal/records"
-	"github.com/elkproject/ark/internal/store"
-	arksync "github.com/elkproject/ark/internal/sync"
+	"github.com/elk-work/ark/internal/app"
+	"github.com/elk-work/ark/internal/records"
+	"github.com/elk-work/ark/internal/store"
+	arksync "github.com/elk-work/ark/internal/sync"
 )
 
 func newArtifactCmd(g *globals) *cobra.Command {

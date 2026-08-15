@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/elkproject/ark/internal/records"
+	"github.com/elk-work/ark/internal/records"
 )
 
 func TestPromotionLifecycle(t *testing.T) {
