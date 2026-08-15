@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/elkproject/ark/internal/records"
+	"github.com/elk-work/ark/internal/records"
 )
 
 // gitRepo creates a Git repository with one commit on main.

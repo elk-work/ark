@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/elkproject/ark/internal/store"
-	"github.com/elkproject/ark/pkg/api"
+	"github.com/elk-work/ark/internal/store"
+	"github.com/elk-work/ark/pkg/api"
 )
 
 var testRepo = Repo{ID: "01REPO", Name: "signal"}

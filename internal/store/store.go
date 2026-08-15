@@ -12,8 +12,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/elkproject/ark/internal/db"
-	"github.com/elkproject/ark/internal/records"
+	"github.com/elk-work/ark/internal/db"
+	"github.com/elk-work/ark/internal/records"
 )
 
 // Actor is the identity performing the current command.

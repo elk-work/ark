@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/elkproject/ark/internal/records"
-	"github.com/elkproject/ark/pkg/api"
+	"github.com/elk-work/ark/internal/records"
+	"github.com/elk-work/ark/pkg/api"
 )
 
 // A client must tolerate record types it does not know. Server and client

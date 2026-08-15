@@ -11,8 +11,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/elkproject/ark/internal/records"
-	"github.com/elkproject/ark/pkg/api"
+	"github.com/elk-work/ark/internal/records"
+	"github.com/elk-work/ark/pkg/api"
 )
 
 // Rules per record type. Append-only types never conflict; mergeable types

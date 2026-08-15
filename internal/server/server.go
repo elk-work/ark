@@ -14,9 +14,9 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/elkproject/ark/internal/records"
-	"github.com/elkproject/ark/internal/server/repodb"
-	"github.com/elkproject/ark/pkg/api"
+	"github.com/elk-work/ark/internal/records"
+	"github.com/elk-work/ark/internal/server/repodb"
+	"github.com/elk-work/ark/pkg/api"
 )
 
 // Server is the Ark sync service.

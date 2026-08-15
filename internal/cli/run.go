@@ -3,8 +3,8 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/elkproject/ark/internal/records"
-	"github.com/elkproject/ark/internal/store"
+	"github.com/elk-work/ark/internal/records"
+	"github.com/elk-work/ark/internal/store"
 )
 
 func newRunCmd(g *globals) *cobra.Command {

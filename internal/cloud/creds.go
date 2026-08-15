@@ -11,7 +11,7 @@ import (
 
 	"github.com/BurntSushi/toml"
 
-	"github.com/elkproject/ark/internal/records"
+	"github.com/elk-work/ark/internal/records"
 )
 
 // Token resolution order (docs/v1-spec.md §20): environment variable, OS

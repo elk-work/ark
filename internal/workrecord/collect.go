@@ -4,7 +4,7 @@ import (
 	"context"
 	"sort"
 
-	"github.com/elkproject/ark/internal/store"
+	"github.com/elk-work/ark/internal/store"
 )
 
 // Collect walks a repository's records and returns every work-record event

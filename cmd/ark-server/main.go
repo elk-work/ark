@@ -24,9 +24,9 @@ import (
 
 	"cloud.google.com/go/storage"
 
-	"github.com/elkproject/ark/internal/buildinfo"
-	"github.com/elkproject/ark/internal/server"
-	"github.com/elkproject/ark/internal/server/repodb"
+	"github.com/elk-work/ark/internal/buildinfo"
+	"github.com/elk-work/ark/internal/server"
+	"github.com/elk-work/ark/internal/server/repodb"
 )
 
 // version is set at build time via -ldflags "-X main.version=...". Left

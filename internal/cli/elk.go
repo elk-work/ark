@@ -12,8 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/elkproject/ark/internal/records"
-	"github.com/elkproject/ark/internal/workrecord"
+	"github.com/elk-work/ark/internal/records"
+	"github.com/elk-work/ark/internal/workrecord"
 )
 
 // newElkCmd builds `ark elk`, the work-record adapter's client-side half.

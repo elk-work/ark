@@ -8,9 +8,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/elkproject/ark/internal/app"
-	"github.com/elkproject/ark/internal/output"
-	"github.com/elkproject/ark/internal/records"
+	"github.com/elk-work/ark/internal/app"
+	"github.com/elk-work/ark/internal/output"
+	"github.com/elk-work/ark/internal/records"
 )
 
 // globals carries flag state shared by every command.

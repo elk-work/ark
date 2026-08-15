@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/elkproject/ark/pkg/api"
+	"github.com/elk-work/ark/pkg/api"
 )
 
 func sha256Hex(b []byte) string {

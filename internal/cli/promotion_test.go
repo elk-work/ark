@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/elkproject/ark/internal/records"
+	"github.com/elk-work/ark/internal/records"
 )
 
 type promotionJSON struct {
