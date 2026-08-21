@@ -135,8 +135,37 @@ The endpoint comes from --url or ARK_ELK_ENDPOINT; the bearer token from
 	return cmd
 }
 
-// postEvents delivers one batch and returns the connector's ledger.
+// elkMaxBatch is scout/supabase/functions/gh-connector/ark.ts MAX_BATCH.
+// The ingest route rejects the whole POST over this ("split and resend"); a
+// repository that has grown past it otherwise cannot deliver at all. Overlap
+// across chunks is safe: Elk deduplicates on external_id.
+const elkMaxBatch = 500
+
+// postEvents delivers events in chunks of elkMaxBatch and returns the
+// concatenated connector ledger.
 func postEvents(ctx context.Context, endpoint, token string, events []workrecord.Event) (elkPushResult, error) {
+	var merged elkPushResult
+	merged.Endpoint = endpoint
+	if len(events) == 0 {
+		return merged, nil
+	}
+	for start := 0; start < len(events); start += elkMaxBatch {
+		end := start + elkMaxBatch
+		if end > len(events) {
+			end = len(events)
+		}
+		chunk, err := postEventBatch(ctx, endpoint, token, events[start:end])
+		if err != nil {
+			return merged, err
+		}
+		merged.Accepted += chunk.Accepted
+		merged.Results = append(merged.Results, chunk.Results...)
+		merged.Dropped = append(merged.Dropped, chunk.Dropped...)
+	}
+	return merged, nil
+}
+
+func postEventBatch(ctx context.Context, endpoint, token string, events []workrecord.Event) (elkPushResult, error) {
 	var out elkPushResult
 	body, err := json.Marshal(events)
 	if err != nil {
