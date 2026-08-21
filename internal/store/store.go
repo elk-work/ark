@@ -29,13 +29,23 @@ type Actor struct {
 
 // Store performs record operations for one repository as one actor.
 type Store struct {
-	DB     *sql.DB
-	RepoID string
-	Actor  Actor
+	DB            *sql.DB
+	RepoID        string
+	Actor         Actor
+	AfterMutation func()
 }
 
 func (s *Store) inTx(ctx context.Context, fn func(tx *sql.Tx) error) error {
-	return db.InTx(ctx, s.DB, fn)
+	if err := db.InTx(ctx, s.DB, fn); err != nil {
+		return err
+	}
+	// Delivery hooks run only after the record and its mutation are durable.
+	// They deliberately cannot return an error: an optional observer must
+	// never turn a successful local filing into a failed command.
+	if s.AfterMutation != nil {
+		s.AfterMutation()
+	}
+	return nil
 }
 
 // logMutation appends the intent behind a record change to the mutation log,
