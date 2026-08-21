@@ -42,6 +42,24 @@ task/PR fields merge independently, concurrent title/body edits surface in
 numbers minted concurrently by offline clients are renumbered by the server
 (the ULID is authoritative).
 
+### Elk work-record delivery
+
+`ark elk push` normalizes this repository's work records and sends them to
+Elk's authenticated work-record endpoint. When both existing environment
+settings are present, every successful local filing starts that replay-safe
+push immediately after its SQLite transaction commits:
+
+```sh
+export ARK_ELK_ENDPOINT=https://example.invalid/gh-connector/ark/events
+export ARK_ELK_TOKEN=... # resolve from your secret store; never commit it
+ark task create -t "Ship the widget"
+```
+
+The filing never waits on Elk and remains successful through an Elk outage.
+Delivery output and failures append to `.ark/elk-push.log`; the manual
+`ark elk push` command remains available for retries and backfills. Elk dedupes
+on event keys, so this immediate path can safely overlap a scheduled puller.
+
 Running the service yourself: [docs/self-hosting.md](docs/self-hosting.md)
 covers both storage modes, the single-token auth model, health checks, and
 the backup/replay recovery path. [docs/deploy.md](docs/deploy.md) is the

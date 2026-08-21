@@ -145,6 +145,16 @@ both — or migrating between them — is safe by construction. Duplicate emissi
 from N clients is precisely what the `(provider, external_id)` unique index is
 for.
 
+**Follow-up, 2026-08-21 — push after each local filing.** Once event latency
+became a stated requirement, the client-side producer moved from an explicit
+sync-time command to a post-commit observer on the shared store transaction
+seam. With `ARK_ELK_ENDPOINT` and `ARK_ELK_TOKEN` present, a successful local
+mutation starts the existing `ark elk push` command as a detached child. It is
+strictly after commit and fail-open: no Elk request runs inside the SQLite
+transaction, and a launch, auth, or network failure cannot change the filing's
+result. `.ark/elk-push.log` retains the child output for inspection. The
+scheduled puller remains the reconciler; event-key dedup makes the overlap safe.
+
 ## The mapping
 
 Ark record → Elk object. The governing principle is Elk's, not Ark's: a
