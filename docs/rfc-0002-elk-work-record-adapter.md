@@ -155,6 +155,11 @@ transaction, and a launch, auth, or network failure cannot change the filing's
 result. `.ark/elk-push.log` retains the child output for inspection. The
 scheduled puller remains the reconciler; event-key dedup makes the overlap safe.
 
+The ingest route caps a POST at 500 events (`MAX_BATCH` in Scout's ark
+adapter) and rejects the whole body over that. `ark elk push` splits at that
+cap and delivers sequentially. A repository that has grown past it — scout
+crossed 500 events on 2026-08-21 — cannot deliver in one request.
+
 ## The mapping
 
 Ark record → Elk object. The governing principle is Elk's, not Ark's: a
