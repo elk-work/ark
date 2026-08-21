@@ -78,13 +78,17 @@ func Open(ctx context.Context, dir string, opts Options) (*Context, error) {
 		d.Close()
 		return nil, err
 	}
+	s := &store.Store{DB: d, RepoID: cfg.RepositoryID, Actor: *actor}
+	if push := newElkFilingPush(root, arkDir, opts.Debug); push != nil {
+		s.AfterMutation = push.launch
+	}
 	return &Context{
 		Root:   root,
 		ArkDir: arkDir,
 		Config: cfg,
 		DB:     d,
 		Git:    &git.Repo{Dir: root, Debug: opts.Debug},
-		Store:  &store.Store{DB: d, RepoID: cfg.RepositoryID, Actor: *actor},
+		Store:  s,
 	}, nil
 }
 

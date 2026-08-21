@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -42,6 +43,31 @@ func mutationCount(t *testing.T, s *Store) int {
 		t.Fatalf("count mutations: %v", err)
 	}
 	return n
+}
+
+func TestAfterMutationRunsOnlyAfterCommit(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	called := 0
+	s.AfterMutation = func() { called++ }
+
+	if _, err := s.CreateTask(ctx, "committed", ""); err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("after-mutation calls = %d, want 1", called)
+	}
+
+	want := errors.New("rollback")
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		return want
+	})
+	if !errors.Is(err, want) {
+		t.Fatalf("rollback error = %v, want %v", err, want)
+	}
+	if called != 1 {
+		t.Fatalf("rolled-back transaction triggered delivery; calls = %d", called)
+	}
 }
 
 func TestTaskLifecycle(t *testing.T) {
