@@ -21,3 +21,25 @@ jobs:
         run: go build ./...
       - name: test
         run: go test -race ./...
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        shell: pwsh
+        run: |
+          $files = @(gofmt -l .)
+          if ($files.Count -ne 0) {
+            $files | Write-Error
+            exit 1
+          }
+      - name: vet
+        run: go vet ./...
+      - name: build
+        run: go build ./...
+      - name: test
+        run: go test ./...

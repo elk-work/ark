@@ -1,0 +1,14 @@
+* text=auto
+.gitattributes text eol=lf
+
+# Go tooling and embedded text expect LF on every development platform.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+*.md text eol=lf
+*.sql text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf

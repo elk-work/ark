@@ -31,7 +31,7 @@ See [docs/v1-spec.md](docs/v1-spec.md) for the full specification and
 
 ```sh
 ark remote set https://ark.example.com   # per repository
-ark login                                # token -> keychain (or ~/.ark/credentials.toml)
+ark login                                # token -> keychain or user credentials file
 ark sync                                 # push mutations, upload blobs, pull records
 ```
 
@@ -87,21 +87,44 @@ passed its adoption HOLD on 2026-08-12, scout included.
 
 ## Install
 
-Prerequisites: Go >= 1.26, `git` on your PATH. No C toolchain required.
+Ark release binaries do not require Go or a C toolchain. Ark invokes the Git
+CLI, so install [Git](https://git-scm.com/downloads) and make sure `git` is on
+your PATH.
+
+### Windows (PowerShell)
+
+The installer selects amd64 or arm64, verifies the release SHA-256, installs
+without administrator privileges, and adds its directory to your user PATH:
+
+```powershell
+$installer = Join-Path $env:TEMP 'install-ark.ps1'
+Invoke-WebRequest https://raw.githubusercontent.com/elk-work/ark/main/scripts/install.ps1 -OutFile $installer
+Unblock-File $installer
+& $installer
+ark --version
+```
+
+Open a new terminal if another program does not see the updated PATH. See
+[docs/windows.md](docs/windows.md) for manual installation, joining an
+existing Ark project, authentication, and source-development steps.
+
+### Go toolchain (all platforms)
+
+With Go >= 1.26.5 installed:
 
 ```sh
 go install github.com/elk-work/ark/cmd/ark@latest
 ```
 
-Prebuilt binaries for macOS and Linux (arm64 and amd64) are attached to each
-[release](https://github.com/elk-work/ark/releases).
+Prebuilt binaries for Windows, macOS, and Linux (arm64 and amd64) are attached
+to each [release](https://github.com/elk-work/ark/releases).
 
 To build from source instead:
 
 ```sh
 git clone git@github.com:elk-work/ark.git
 cd ark
-go build ./cmd/ark
+go build ./...
 ```
 
 ## Quick start

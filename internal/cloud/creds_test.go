@@ -23,6 +23,9 @@ func isolateHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	// os.UserHomeDir uses USERPROFILE on Windows, not HOME. Set both so a
+	// test run can never read or write the developer's real credentials.
+	t.Setenv("USERPROFILE", home)
 	t.Setenv("ARK_TOKEN", "")
 	return home
 }
@@ -109,13 +112,7 @@ func TestCredentialsFileKeepsOtherRemotesAndTightPermissions(t *testing.T) {
 		t.Errorf("b.example.com = %q, want tok-b (clobbered by rewrite)", got)
 	}
 
-	fi, err := os.Stat(filepath.Join(home, ".ark", "credentials.toml"))
-	if err != nil {
-		t.Fatalf("stat credentials: %v", err)
-	}
-	if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Errorf("credentials file mode = %o, want 600", perm)
-	}
+	assertRestrictedCredentials(t, filepath.Join(home, ".ark", "credentials.toml"))
 }
 
 // TestStoreTokenFallsBackToCredentialsFile: off macOS there is no keychain,

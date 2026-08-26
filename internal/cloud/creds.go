@@ -129,5 +129,9 @@ func writeFileToken(host, token string) error {
 		os.Remove(path + ".tmp")
 		return err
 	}
+	if err := restrictCredentialFile(path + ".tmp"); err != nil {
+		os.Remove(path + ".tmp")
+		return err
+	}
 	return os.Rename(path+".tmp", path)
 }
