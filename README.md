@@ -126,9 +126,45 @@ ark pr create -t "Round widget" --task 1 --head widget-branch
 ark pr review 1 --approve -b "LGTM"
 ark pr merge 1                # verifies Git state, merges, pushes if origin exists
 
+ark review                    # what ran here, what it produced, what still needs a person
+ark review --html --open      # the same as a self-contained page
+
 ark search widget             # FTS5 across tasks, comments, threads, PRs, reviews
 ark status
 ```
+
+### Reading a session back
+
+`ark review` is the read side of everything above. It gathers the runs in
+scope with what already hangs off them — the task, the thread, the pull
+request and its reviews, the artifacts, and the diff between the two commits
+the run recorded — and answers two questions separately, because one status
+word cannot answer both:
+
+- **liveness** — is anything happening? `working` · `waiting` · `errored` · `idle`
+- **outcome** — did the work land? `settled` · `faulted` · `unanswered` · `unclear`
+
+They are independent. A run can be idle and settled, or idle and unanswered,
+and those are opposite situations. Anything not settled carries one sentence
+saying what would move it, and `waiting` sorts above `errored` because a
+person is the only thing that will move it.
+
+```sh
+ark review                        # finished since the last review, plus anything still running
+ark review --since 24h            # a window of your own
+ark review --run <id>             # one run
+ark review --json                 # the same data, stable, for an agent
+ark review --html --out page.html # a self-contained page: one file, no requests
+ark review --run <id> --artifact  # attach the page to the run
+```
+
+`ark run finish` attaches a rendered review to the run automatically, so the
+session is saved as part of the saved session. `--no-review` (or
+`ARK_NO_RUN_REVIEW=1`) turns that off.
+
+It adds nothing: no record type, no storage, no server surface. The only state
+it keeps is a timestamp in `.ark/review-cursor`, which you can delete at any
+time — the next review is simply wider.
 
 ## For agents
 

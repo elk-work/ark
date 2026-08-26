@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en"{{if .Dark}} data-theme="dark"{{end}}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{.Title}}</title>
+<style>{{.CSS}}</style>
+</head>
+<body>
+<div class="shell">
+
+<header class="doc">
+  <button class="themes" type="button" id="themetoggle">theme</button>
+  <h1>{{.Repo.Name}}</h1>
+  <p class="subtitle">
+    {{.ScopeText}}<span class="sep">·</span>{{.RunCount}}<span class="sep">·</span>{{.GeneratedAt}}{{if .Repo.Branch}}<span class="sep">·</span>on <code>{{.Repo.Branch}}</code>{{end}}
+  </p>
+</header>
+
+<nav class="nav" aria-label="Runs">
+  <ol>
+  {{range .Runs}}
+    <li><a href="#{{.Anchor}}">
+      <span class="dot live-{{.Liveness}}" aria-hidden="true"></span>
+      <span class="navtitle">{{.Headline}}</span>
+      <span class="navmeta">{{.Liveness}} · {{.Outcome}}</span>
+    </a></li>
+  {{else}}
+    <li class="empty">no runs</li>
+  {{end}}
+  </ol>
+</nav>
+
+<main>
+{{if not .Runs}}
+  <p class="empty">No agent runs in this scope. Nothing ran, or everything ran before the window began.</p>
+{{end}}
+{{range .Runs}}
+<article class="run" id="{{.Anchor}}">
+  <h2>{{.Headline}} <span class="runid mono">{{.ShortID}}</span></h2>
+
+  <div class="axes">
+    <span class="chip chip-live"><span class="dot live-{{.Liveness}}" aria-hidden="true"></span> {{.Liveness}}</span>
+    <span class="chip chip-out-{{.Outcome}}"><span class="glyph" aria-hidden="true">{{.OutcomeGlyph}}</span>{{.Outcome}}</span>
+    <span class="chip">{{.Status}}</span>
+    {{if .Timing}}<span class="chip">{{.Timing}}</span>{{end}}
+  </div>
+
+  {{if .NeedBecause}}
+  <p class="need{{if eq .Liveness "waiting"}} need-waiting{{end}}">{{.NeedBecause}}</p>
+  {{end}}
+
+  {{if or .InputSummary .ResultSummary}}
+  <dl class="summaries">
+    {{if .InputSummary}}<dt>Asked</dt><dd>{{.InputSummary}}</dd>{{end}}
+    {{if .ResultSummary}}<dt>Reported</dt><dd>{{.ResultSummary}}</dd>{{end}}
+  </dl>
+  {{end}}
+
+  {{if .Links}}
+  <p class="links">
+    {{range .Links}}<span><span class="k">{{.Kind}}</span> {{.Text}}</span>{{end}}
+  </p>
+  {{end}}
+
+  <section class="block">
+    <h3>Change</h3>
+    {{with .Diff}}
+      {{if .Unavailable}}
+        <p class="nodiff">{{.Unavailable}}</p>
+      {{else}}
+        {{range .Files}}
+        <details class="diff"{{if .Open}} open{{end}}>
+          <summary>
+            <span class="path">{{if .OldPath}}{{.OldPath}} → {{end}}{{.Path}}</span>
+            <span class="counts"><span class="plus">+{{.Insertions}}</span> <span class="minus">−{{.Deletions}}</span></span>
+          </summary>
+          {{if .Binary}}<p class="nodiff" style="padding:0.5rem 0.7rem">binary file</p>{{end}}
+          {{range .Hunks}}
+          <div class="hunk">
+            <table>
+              <tr class="hdr"><td colspan="4" class="mono">{{.Header}}</td></tr>
+              {{range .Lines}}
+              <tr class="{{.Kind}}">
+                <td class="num">{{.Old}}</td>
+                <td class="num">{{.New}}</td>
+                <td class="mark" aria-hidden="true">{{.Glyph}}</td>
+                <td class="src">{{.HTML}}</td>
+              </tr>
+              {{end}}
+            </table>
+          </div>
+          {{end}}
+          {{if .Truncated}}<p class="nodiff" style="padding:0.4rem 0.7rem">…truncated; read the rest with <code>git diff</code></p>{{end}}
+        </details>
+        {{end}}
+        {{if .Truncated}}<p class="nodiff">…more files changed than this page renders</p>{{end}}
+        {{if .Commits}}
+        <ul class="commits">
+          {{range .Commits}}<li><span class="sha mono">{{.Short}}</span><span>{{.Subject}}</span></li>{{end}}
+        </ul>
+        {{end}}
+      {{end}}
+    {{end}}
+  </section>
+
+  {{if .Artifacts}}
+  <section class="block">
+    <h3>Produced</h3>
+    <ul class="plain">
+      {{range .Artifacts}}<li><span>{{.Name}}</span><span class="meta">{{.Meta}}</span></li>{{end}}
+    </ul>
+  </section>
+  {{end}}
+
+  {{if .ThreadTitle}}
+  <section class="block">
+    <h3>{{.ThreadTitle}}</h3>
+    {{range .Thread}}
+      {{if .IsToolStrip}}
+      <details class="tools">
+        <summary>
+          <span>{{.Label}}</span>
+          {{if .Errors}}<span class="errbadge">{{.Errors}} error{{if gt .Errors 1}}s{{end}}</span>{{end}}
+        </summary>
+        <div class="toolbody">
+          {{range .Messages}}
+          <div class="msg msg-{{.Role}}"><div class="who">{{.Role}}</div><div class="body">{{.Body}}</div></div>
+          {{end}}
+        </div>
+      </details>
+      {{else}}
+        {{range .Messages}}
+        <div class="msg msg-{{.Role}}"><div class="who">{{.Role}}</div><div class="body">{{.Body}}</div></div>
+        {{end}}
+      {{end}}
+    {{end}}
+  </section>
+  {{end}}
+
+  {{if .Comments}}
+  <section class="block">
+    <h3>Comments</h3>
+    {{range .Comments}}
+    <div class="msg"><div class="who">{{.Who}}</div><div class="body">{{.Body}}</div></div>
+    {{end}}
+  </section>
+  {{end}}
+</article>
+{{end}}
+</main>
+
+<aside class="rail">
+  <section>
+    <h3>Liveness</h3>
+    <dl>
+      <dt>waiting</dt><dd>{{.Totals.Waiting}}</dd>
+      <dt>errored</dt><dd>{{.Totals.Errored}}</dd>
+      <dt>working</dt><dd>{{.Totals.Working}}</dd>
+      <dt>idle</dt><dd>{{.Totals.Idle}}</dd>
+    </dl>
+  </section>
+  <section>
+    <h3>Outcome</h3>
+    <dl>
+      <dt>settled</dt><dd>{{.Totals.Settled}}</dd>
+      <dt>faulted</dt><dd>{{.Totals.Faulted}}</dd>
+      <dt>unanswered</dt><dd>{{.Totals.Unanswered}}</dd>
+      <dt>unclear</dt><dd>{{.Totals.Unclear}}</dd>
+    </dl>
+  </section>
+  <section>
+    <h3>Change</h3>
+    <dl>
+      <dt>files</dt><dd>{{.Totals.FilesTouched}}</dd>
+      <dt>added</dt><dd>+{{.Totals.Insertions}}</dd>
+      <dt>removed</dt><dd>−{{.Totals.Deletions}}</dd>
+    </dl>
+  </section>
+  <section class="legend">
+    <h3>Reading this</h3>
+    <p><strong>Liveness</strong> is about the run: is anything happening. <strong>Outcome</strong> is about the work: did it land.</p>
+    <p>They are independent. A run can be idle and settled, or idle and unanswered, and those are opposite situations.</p>
+    <p>Waiting sorts above errored, because a person is the only thing that will move it.</p>
+  </section>
+</aside>
+
+<footer class="doc">
+  <p>{{.Repo.Name}} · repository <span class="mono">{{.Repo.ID}}</span> · generated by <code>ark review</code></p>
+  <p>Design borrowed with thanks from pretty-cc (Eric Nguyen, MIT) and agentglass (SirAllap/agentglass, MIT).</p>
+</footer>
+
+</div>
+<script>
+(function () {
+  var root = document.documentElement;
+  var key = "ark-review-theme";
+  try {
+    var saved = localStorage.getItem(key);
+    if (saved) { root.setAttribute("data-theme", saved); }
+  } catch (e) { /* private window, blocked storage: the media query still works */ }
+  var btn = document.getElementById("themetoggle");
+  if (!btn) { return; }
+  btn.addEventListener("click", function () {
+    var dark = root.getAttribute("data-theme") === "dark" ||
+      (!root.getAttribute("data-theme") &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches);
+    var next = dark ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem(key, next); } catch (e) {}
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,340 @@
+/* Six tokens, two themes, one stylesheet.
+   The dark theme remaps the same six names rather than forking any rule;
+   if a colour appears anywhere below that is not one of these (or one of
+   the four diff colours, which are deliberately outside the palette), that
+   is a bug. Borrowed from pretty-cc — MIT (c) 2026 Eric Nguyen. */
+:root {
+  --bg: #fbfaf7;
+  --fg: #1d1b18;
+  --muted: #6d675e;
+  --line: #e4ded3;
+  --accent: #96551f;
+  --code-bg: #f4f0e8;
+
+  /* The diff palette is its own thing on purpose: blue for added, brick for
+     deleted, both chosen so neither can be mistaken for the warm accent.
+     Two tones each — a pale line wash and a saturated span — so the line
+     says "something here changed" and the span says "this is what". */
+  --add-wash: #e6eefb;
+  --add-span: #b9d3f4;
+  --add-ink: #17518f;
+  --del-wash: #fbeae7;
+  --del-span: #f2c4ba;
+  --del-ink: #9d3421;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161513;
+    --fg: #ece7de;
+    --muted: #9b9287;
+    --line: #332f29;
+    --accent: #d99a5b;
+    --code-bg: #201e1a;
+
+    --add-wash: #10243c;
+    --add-span: #1d4a80;
+    --add-ink: #9cc4f5;
+    --del-wash: #331a16;
+    --del-span: #6f2a1d;
+    --del-ink: #f0a893;
+  }
+}
+
+/* The toggle wins over the media query in both directions. */
+:root[data-theme="dark"] {
+  --bg: #161513;
+  --fg: #ece7de;
+  --muted: #9b9287;
+  --line: #332f29;
+  --accent: #d99a5b;
+  --code-bg: #201e1a;
+  --add-wash: #10243c;
+  --add-span: #1d4a80;
+  --add-ink: #9cc4f5;
+  --del-wash: #331a16;
+  --del-span: #6f2a1d;
+  --del-ink: #f0a893;
+}
+
+:root[data-theme="light"] {
+  --bg: #fbfaf7;
+  --fg: #1d1b18;
+  --muted: #6d675e;
+  --line: #e4ded3;
+  --accent: #96551f;
+  --code-bg: #f4f0e8;
+  --add-wash: #e6eefb;
+  --add-span: #b9d3f4;
+  --add-ink: #17518f;
+  --del-wash: #fbeae7;
+  --del-span: #f2c4ba;
+  --del-ink: #9d3421;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font: 400 16px/1.55 ui-serif, Charter, "Iowan Old Style", "Source Serif 4",
+        Georgia, "Times New Roman", serif;
+}
+
+/* No webfont is loaded. This page is meant to survive as an artifact —
+   attached to a run, read years later, possibly offline — and a font
+   request would make how it looks depend on a network it may not have. */
+
+code, pre, .mono {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+               "Liberation Mono", monospace;
+  font-size: 0.85em;
+}
+
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+/* Priority clamp: the measure is fixed and never grows, the rail gives way
+   first, the nav second. What survives to the narrowest window is the
+   thing you came to read. */
+.shell {
+  display: grid;
+  grid-template-columns: minmax(0, 13rem) minmax(0, 47.5rem) minmax(0, 19rem);
+  grid-template-areas:
+    ".   head ."
+    "nav main rail"
+    ".   foot .";
+  gap: 0 2.5rem;
+  justify-content: center;
+  padding: 2rem 1.25rem 6rem;
+}
+
+header.doc { grid-area: head; }
+.nav       { grid-area: nav; }
+main       { grid-area: main; }
+.rail      { grid-area: rail; }
+footer.doc { grid-area: foot; }
+
+@media (max-width: 84rem) {
+  .shell {
+    grid-template-columns: minmax(0, 13rem) minmax(0, 47.5rem);
+    grid-template-areas: ". head" "nav main" ". foot";
+  }
+  .rail { display: none; }
+}
+
+@media (max-width: 66rem) {
+  .shell {
+    grid-template-columns: minmax(0, 47.5rem);
+    grid-template-areas: "head" "main" "foot";
+  }
+  .nav { display: none; }
+}
+
+.nav, .rail { position: sticky; top: 2rem; align-self: start; max-height: calc(100vh - 4rem); overflow: auto; }
+
+.nav ol { list-style: none; margin: 0; padding: 0; }
+.nav li { margin: 0 0 0.15rem; }
+.nav a {
+  display: grid;
+  grid-template-columns: 0.65rem 1fr;
+  gap: 0.5rem;
+  align-items: baseline;
+  padding: 0.3rem 0.4rem;
+  border-radius: 3px;
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+.nav a:hover { background: var(--code-bg); }
+.nav .navtitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nav .navmeta { grid-column: 2; color: var(--muted); font-size: 0.72rem; }
+
+/* Liveness reads as a rail dot; outcome reads as a glyph. Two axes, two
+   shapes, so neither is guessing at the other. Borrowed from agentglass
+   (SirAllap/agentglass, MIT). */
+.dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; display: inline-block; }
+.live-working { background: var(--accent); }
+.live-waiting { background: var(--del-ink); }
+.live-errored { background: var(--del-span); border: 1px solid var(--del-ink); }
+.live-idle    { background: transparent; border: 1px solid var(--line); }
+
+header.doc { margin: 0 0 2rem; }
+
+h1 { font-size: 1.5rem; line-height: 1.2; margin: 0 0 0.35rem; font-weight: 600; letter-spacing: -0.01em; }
+.subtitle { color: var(--muted); font-size: 0.9rem; margin: 0; }
+.subtitle .sep { opacity: 0.5; padding: 0 0.4rem; }
+
+.themes {
+  float: right;
+  font: inherit;
+  font-size: 0.75rem;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  padding: 0.2rem 0.55rem;
+  cursor: pointer;
+}
+.themes:hover { color: var(--fg); border-color: var(--muted); }
+
+main { min-width: 0; }
+
+.run {
+  border-top: 1px solid var(--line);
+  padding: 1.75rem 0 0.5rem;
+  min-width: 0;
+}
+.run:first-child { border-top: none; padding-top: 0; }
+
+.run h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0 0 0.3rem;
+  display: flex;
+  gap: 0.5rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.run h2 .runid { color: var(--muted); font-weight: 400; }
+
+.axes { display: flex; gap: 0.4rem; flex-wrap: wrap; margin: 0 0 0.75rem; }
+.chip {
+  font-size: 0.72rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.chip .glyph { font-weight: 700; padding-right: 0.3rem; }
+.chip-live { border-color: var(--accent); color: var(--accent); }
+.chip-out-faulted, .chip-out-unanswered { border-color: var(--del-ink); color: var(--del-ink); }
+
+.need {
+  border-left: 3px solid var(--accent);
+  background: var(--code-bg);
+  padding: 0.6rem 0.85rem;
+  margin: 0 0 1rem;
+  font-size: 0.92rem;
+}
+.need-waiting { border-left-color: var(--del-ink); }
+
+.summaries { margin: 0 0 1rem; }
+.summaries dt {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-top: 0.7rem;
+}
+.summaries dd { margin: 0.15rem 0 0; white-space: pre-wrap; }
+
+.links { display: flex; flex-wrap: wrap; gap: 0.4rem 0.9rem; margin: 0 0 1rem; font-size: 0.88rem; }
+.links .k { color: var(--muted); }
+
+section.block { margin: 0 0 1.25rem; min-width: 0; }
+section.block > h3 {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  font-weight: 600;
+  margin: 0 0 0.5rem;
+}
+
+/* Diff. Colour is never the only signal: every changed line carries a
+   +/− glyph in the gutter and a stripe down its left edge, so the page
+   still reads correctly in greyscale or with colour vision deficiency. */
+.diff { border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+.diff + .diff { margin-top: 0.75rem; }
+.diff summary {
+  cursor: pointer;
+  padding: 0.4rem 0.7rem;
+  background: var(--code-bg);
+  display: flex;
+  gap: 0.6rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.diff summary::-webkit-details-marker { color: var(--muted); }
+.diff .path { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.8rem; overflow-wrap: anywhere; }
+.diff .counts { margin-left: auto; font-size: 0.75rem; white-space: nowrap; }
+.diff .counts .plus { color: var(--add-ink); }
+.diff .counts .minus { color: var(--del-ink); }
+
+.hunk { overflow-x: auto; }
+.hunk table { border-collapse: collapse; width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.76rem; }
+.hunk td { padding: 0 0.4rem; vertical-align: top; white-space: pre; }
+.hunk td.num { text-align: right; color: var(--muted); user-select: none; width: 1%; opacity: 0.7; }
+.hunk td.mark { width: 1%; user-select: none; text-align: center; font-weight: 700; padding: 0 0.15rem; }
+.hunk td.src { width: 100%; }
+.hunk .hdr td { background: var(--code-bg); color: var(--muted); }
+.hunk tr.add { background: var(--add-wash); }
+.hunk tr.add td.mark { color: var(--add-ink); box-shadow: inset 2px 0 0 var(--add-ink); }
+.hunk tr.del { background: var(--del-wash); }
+.hunk tr.del td.mark { color: var(--del-ink); box-shadow: inset 2px 0 0 var(--del-ink); }
+.hunk tr.add mark { background: var(--add-span); color: inherit; border-radius: 2px; }
+.hunk tr.del mark { background: var(--del-span); color: inherit; border-radius: 2px; }
+
+.nodiff { color: var(--muted); font-size: 0.88rem; font-style: italic; }
+
+.commits { list-style: none; margin: 0.5rem 0 0; padding: 0; font-size: 0.82rem; }
+.commits li { display: flex; gap: 0.6rem; padding: 0.1rem 0; }
+.commits .sha { color: var(--muted); }
+
+/* Thread. A tool strip collapses; a run of tool calls is noise until it
+   isn't, and the summary carries a badge when one of them errored so the
+   closed state never hides a failure. Subagent turns never collapse. */
+.msg { border-left: 2px solid var(--line); padding: 0.15rem 0 0.15rem 0.75rem; margin: 0 0 0.7rem; min-width: 0; }
+.msg .who { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
+.msg .body { white-space: pre-wrap; overflow-wrap: anywhere; margin-top: 0.1rem; }
+.msg-agent { border-left-color: var(--accent); }
+.msg-user { border-left-color: var(--fg); }
+
+.tools { border: 1px dashed var(--line); border-radius: 4px; margin: 0 0 0.7rem; }
+.tools > summary { cursor: pointer; padding: 0.35rem 0.7rem; font-size: 0.8rem; color: var(--muted); display: flex; gap: 0.5rem; align-items: baseline; }
+.tools[open] > summary { border-bottom: 1px dashed var(--line); }
+.tools .toolbody { padding: 0.5rem 0.7rem; }
+.tools .toolbody .msg { border-left-color: var(--line); }
+.errbadge {
+  background: var(--del-span);
+  color: var(--del-ink);
+  border: 1px solid var(--del-ink);
+  border-radius: 999px;
+  font-size: 0.68rem;
+  padding: 0 0.5rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+
+ul.plain { list-style: none; margin: 0; padding: 0; font-size: 0.9rem; }
+ul.plain li { padding: 0.15rem 0; display: flex; gap: 0.6rem; }
+ul.plain .meta { color: var(--muted); font-size: 0.82rem; }
+
+/* Rail. Compresses first; nothing here is the point of the page. */
+.rail { font-size: 0.82rem; }
+.rail h3 { font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 0.4rem; font-weight: 600; }
+.rail section { margin: 0 0 1.5rem; }
+.rail dl { display: grid; grid-template-columns: auto 1fr; gap: 0.1rem 0.6rem; margin: 0; }
+.rail dt { color: var(--muted); }
+.rail dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.rail .legend { color: var(--muted); line-height: 1.4; }
+.rail .legend p { margin: 0 0 0.5rem; }
+
+footer.doc { border-top: 1px solid var(--line); margin-top: 2rem; padding-top: 1rem; color: var(--muted); font-size: 0.78rem; }
+footer.doc p { margin: 0 0 0.35rem; }
+
+.empty { color: var(--muted); font-style: italic; }
+
+@media print {
+  .nav, .rail, .themes { display: none; }
+  .shell { grid-template-columns: 1fr; }
+  details { display: block; }
+  details > *:not(summary) { display: block !important; }
+}
