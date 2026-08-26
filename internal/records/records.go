@@ -117,6 +117,54 @@ func Truncate(s string, max int) string {
 	return string(r[:max-1]) + "…"
 }
 
+// TimeCompare orders two stored timestamps chronologically, returning -1, 0
+// or 1 the way strings.Compare does.
+//
+// Never order stored timestamps with `<` on the strings. time.RFC3339Nano
+// "removes trailing zeros from the seconds field", so the textual length of
+// the fractional part depends on the value and lexical order stops matching
+// chronological order the moment one timestamp lands on a round nanosecond:
+//
+//	earlier: 2026-08-26T07:00:00.92899Z
+//	later:   2026-08-26T07:00:00.928991Z
+//
+// Both agree through ".92899". The next byte is 'Z' (0x5A) in the earlier one
+// and '1' (0x31) in the later one, so the *later* timestamp sorts first. Go's
+// own documentation calls the format unsuitable for sorting for this reason.
+// It is not a rare edge either: records.Now() takes whatever resolution the
+// host clock offers, and on a microsecond-resolution clock every value is
+// trimmed, which put roughly one adjacent pair in 160 out of order in a
+// 200k-sample measurement on macOS.
+//
+// A value that does not parse — an empty column, or a caller-supplied
+// `--since` written as a bare date — falls back to a byte comparison for that
+// pair, which is what such inputs already relied on.
+func TimeCompare(a, b string) int {
+	if a == b {
+		return 0
+	}
+	ta, errA := time.Parse(time.RFC3339Nano, a)
+	tb, errB := time.Parse(time.RFC3339Nano, b)
+	if errA != nil || errB != nil {
+		return strings.Compare(a, b)
+	}
+	switch {
+	case ta.Before(tb):
+		return -1
+	case ta.After(tb):
+		return 1
+	}
+	return 0
+}
+
+// TimeBefore reports whether stored timestamp a is chronologically before b.
+// See TimeCompare for why the strings must not be compared directly.
+func TimeBefore(a, b string) bool { return TimeCompare(a, b) < 0 }
+
+// TimeAfter reports whether stored timestamp a is chronologically after b.
+// See TimeCompare for why the strings must not be compared directly.
+func TimeAfter(a, b string) bool { return TimeCompare(a, b) > 0 }
+
 // FormatTime renders a stored RFC3339 timestamp for human display.
 func FormatTime(s string) string {
 	t, err := time.Parse(time.RFC3339Nano, s)
