@@ -45,11 +45,18 @@ func GetActor(ctx context.Context, d *sql.DB, id string) (*Actor, error) {
 
 // FindAgentActor returns the actor row for a named agent (creating it if
 // missing) so repeated runs by the same agent share one identity.
+//
+// Sync can leave more than one actor row for a name, so the lookup has to
+// pick one and always pick the same one: the first registration, which is the
+// lowest ULID. Ordering by created_at would not be that — it is RFC3339Nano
+// text, which SQLite compares byte by byte and which does not sort
+// chronologically (records.TimeCompare) — and with LIMIT 1 the misorder
+// changes which identity every later run is attributed to.
 func FindAgentActor(ctx context.Context, d *sql.DB, agentName, agentVersion, delegatedBy string) (*Actor, error) {
 	var a Actor
 	var typ string
 	err := d.QueryRowContext(ctx, `SELECT id, type, name, email, agent_name, agent_version, delegated_by
-		FROM actors WHERE type = 'agent' AND agent_name = ? ORDER BY created_at LIMIT 1`, agentName).
+		FROM actors WHERE type = 'agent' AND agent_name = ? ORDER BY id LIMIT 1`, agentName).
 		Scan(&a.ID, &typ, &a.Name, &a.Email, &a.AgentName, &a.AgentVersion, &a.DelegatedBy)
 	if err == nil {
 		a.Type = records.ActorType(typ)

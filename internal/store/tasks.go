@@ -88,9 +88,12 @@ func (s *Store) ResolveTask(ctx context.Context, ref string) (*Task, error) {
 	ref = strings.TrimSpace(ref)
 	if n, err := strconv.ParseInt(ref, 10, 64); err == nil {
 		// Numbers can transiently duplicate mid-sync; the oldest record wins.
+		// "Oldest" is the lowest ULID, not the lowest created_at — the text
+		// ordering of an RFC3339Nano stamp is not chronological, and this
+		// LIMIT 1 decides *which* task a bare number resolves to.
 		row := s.DB.QueryRowContext(ctx, `SELECT `+taskCols+` FROM tasks
 			WHERE repository_id = ? AND number = ? AND deleted_at IS NULL
-			ORDER BY created_at LIMIT 1`, s.RepoID, n)
+			ORDER BY id LIMIT 1`, s.RepoID, n)
 		t, err := scanTask(row)
 		if err == sql.ErrNoRows {
 			return nil, records.NotFoundf("task #%d not found", n)

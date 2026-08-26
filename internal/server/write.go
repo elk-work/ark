@@ -165,6 +165,14 @@ func rememberResponse(ctx context.Context, tx *sql.Tx, key string, resp api.Reco
 // authority it claims to act under, and a later request cannot re-point an
 // existing agent at a different human, because delegated_by is read from the
 // stored record and never from the request.
+//
+// The lookup picks the first registration, keyed on record_id — the client's
+// ULID, which is immutable and lexically sortable. Not created_at: this
+// server writes it as RFC3339Nano text and SQLite compares TEXT byte by byte,
+// so it does not order chronologically (records.TimeCompare), and under
+// LIMIT 1 that decides which identity a remote write is attributed to. Not
+// server_revision either — every update rewrites it, so it is last-touched
+// order rather than registration order.
 func resolveWriter(ctx context.Context, tx *sql.Tx, wr api.Writer) (string, error) {
 	name := strings.TrimSpace(wr.AgentName)
 	if name == "" {
@@ -175,7 +183,7 @@ func resolveWriter(ctx context.Context, tx *sql.Tx, wr api.Writer) (string, erro
 	err := tx.QueryRowContext(ctx, `SELECT record_id FROM records
 		WHERE record_type = 'actor' AND deleted_at IS NULL
 		  AND data->>'type' = 'agent' AND data->>'agent_name' = ?
-		ORDER BY created_at LIMIT 1`, name).Scan(&actorID)
+		ORDER BY record_id LIMIT 1`, name).Scan(&actorID)
 	if err == nil {
 		return actorID, nil
 	}

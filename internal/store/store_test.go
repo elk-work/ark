@@ -406,7 +406,7 @@ func TestMutationPayloads(t *testing.T) {
 	st := "blocked"
 	s.UpdateTask(ctx, task.ID, TaskEdit{Status: &st})
 
-	rows, err := s.DB.Query(`SELECT record_type, operation, payload_json FROM mutations ORDER BY created_at`)
+	rows, err := s.DB.Query(`SELECT record_type, operation, payload_json FROM mutations ORDER BY id`)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -656,7 +656,11 @@ Sync has two directions.
 
 ## 9.1 Push
 
-The client sends pending mutations in creation order.
+The client sends pending mutations in creation order, which it takes from the
+mutation ULID and not from `created_at`. ULIDs are minted with monotonic
+entropy, so they order strictly by creation even for two mutations logged in
+one transaction; `created_at` is RFC3339Nano text, which SQLite compares byte
+by byte and which therefore does not sort chronologically (`records.TimeCompare`).
 
 Request:
 

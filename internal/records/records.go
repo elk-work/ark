@@ -153,6 +153,17 @@ func Truncate(s string, max int) string {
 // A value that does not parse — an empty column, or a caller-supplied
 // `--since` written as a bare date — falls back to a byte comparison for that
 // pair, which is what such inputs already relied on.
+//
+// SQLite has no equivalent, because SQLite compares TEXT byte by byte and
+// there is nothing to route through. So do not write `ORDER BY created_at`
+// (or `activated_at`, or `started_at`) — it carries exactly this defect.
+// Order by the record's ULID `id` instead: NewID() mints it from the same
+// clock reading, ULIDs are lexically sortable by construction, and the ULID
+// is the authoritative identifier anyway. Ordering by it is both correct and
+// cheaper than ordering a text timestamp. The one thing to check first is
+// that the column really is a NewID()-era stamp and not a time supplied from
+// outside the process; for an externally supplied time the id is not a
+// substitute, and the fix is a stored comparable form.
 func TimeCompare(a, b string) int {
 	if a == b {
 		return 0

@@ -11,11 +11,25 @@ import (
 	"github.com/elk-work/ark/pkg/api"
 )
 
-// PendingMutationRows returns the pending mutation queue in creation order.
+// PendingMutationRows returns the pending mutation queue in the order the
+// mutations were written, which is the order the server must replay them in.
+//
+// The ordering key is the ULID, not created_at. Both are produced by the same
+// logMutation call, but only the ULID orders correctly in SQLite: created_at
+// is RFC3339Nano text, that format trims trailing zeros from the fractional
+// second, and SQLite compares TEXT byte by byte — so ".1724Z" sorts *after*
+// ".172492Z" (see records.TimeCompare). The ULID carries no such trap.
+//
+// It is also strictly stronger here. records.NewID() uses monotonic entropy,
+// so ids increase on every call within a process even inside one millisecond;
+// that is what keeps several mutations logged in a single transaction — a
+// promotion superseding its predecessor, say — in the order they were made.
+// created_at cannot do that: two calls can land on the same clock tick and
+// tie, and a tie in a replay queue is a coin flip.
 func (s *Store) PendingMutationRows(ctx context.Context) ([]api.Mutation, error) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT id, record_type, record_id, operation,
 		base_server_revision, payload_json, created_at, created_by
-		FROM mutations WHERE repository_id = ? AND status = 'pending' ORDER BY created_at, id`,
+		FROM mutations WHERE repository_id = ? AND status = 'pending' ORDER BY id`,
 		s.RepoID)
 	if err != nil {
 		return nil, records.DBErr("load pending mutations", err)
