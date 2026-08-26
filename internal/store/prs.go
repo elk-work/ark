@@ -117,9 +117,12 @@ func scanPR(row interface{ Scan(...any) error }) (*PullRequest, error) {
 func (s *Store) ResolvePR(ctx context.Context, ref string) (*PullRequest, error) {
 	ref = strings.TrimSpace(ref)
 	if n, err := strconv.ParseInt(ref, 10, 64); err == nil {
+		// As in ResolveTask: numbers can transiently duplicate mid-sync and
+		// the oldest record wins, which is the lowest ULID. created_at is
+		// RFC3339Nano text and does not order chronologically.
 		pr, err := scanPR(s.DB.QueryRowContext(ctx, `SELECT `+prCols+` FROM pull_requests
 			WHERE repository_id = ? AND number = ? AND deleted_at IS NULL
-			ORDER BY created_at LIMIT 1`, s.RepoID, n))
+			ORDER BY id LIMIT 1`, s.RepoID, n))
 		if err == sql.ErrNoRows {
 			return nil, records.NotFoundf("pull request #%d not found", n)
 		}
@@ -217,7 +220,7 @@ func (s *Store) SubmitReview(ctx context.Context, prRef, state, body, commitSHA 
 func (s *Store) ListReviews(ctx context.Context, prID string) ([]*Review, error) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT id, repository_id, pull_request_id, state, body,
 		commit_sha, created_at, created_by, created_by_type
-		FROM reviews WHERE pull_request_id = ? AND deleted_at IS NULL ORDER BY created_at`, prID)
+		FROM reviews WHERE pull_request_id = ? AND deleted_at IS NULL ORDER BY id`, prID)
 	if err != nil {
 		return nil, records.DBErr("list reviews", err)
 	}

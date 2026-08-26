@@ -92,10 +92,15 @@ type activePromotion struct {
 
 // activePromotions returns every promotion still active for one
 // (environment, service), in activation order.
+//
+// Ordered by ULID. CreatePromotion sets activated_at from the same
+// records.Now() reading it gives created_at and it is never caller-supplied,
+// so the id says the same thing — and says it correctly, which RFC3339Nano
+// text does not (records.TimeCompare).
 func activePromotions(tx *sql.Tx, repoID, environment, service string) ([]activePromotion, error) {
 	rows, err := tx.Query(`SELECT id, server_revision FROM promotions
 		WHERE repository_id = ? AND environment = ? AND service = ?
-		AND ended_at IS NULL AND deleted_at IS NULL ORDER BY activated_at, id`,
+		AND ended_at IS NULL AND deleted_at IS NULL ORDER BY id`,
 		repoID, environment, service)
 	if err != nil {
 		return nil, records.DBErr("find active promotions", err)
@@ -181,7 +186,7 @@ func (s *Store) ListPromotions(ctx context.Context, environment string, activeOn
 	if activeOnly {
 		q += ` AND ended_at IS NULL`
 	}
-	q += ` ORDER BY activated_at, id`
+	q += ` ORDER BY id`
 	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, records.DBErr("list promotions", err)

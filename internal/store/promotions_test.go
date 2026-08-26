@@ -131,7 +131,7 @@ func TestPromotionMutationPayloads(t *testing.T) {
 	p2, _ := s.CreatePromotion(ctx, &Promotion{Environment: "production", MergeCommitSHA: "def456"})
 
 	rows, err := s.DB.Query(`SELECT record_id, operation, payload_json FROM mutations
-		WHERE record_type = 'promotion' ORDER BY created_at, id`)
+		WHERE record_type = 'promotion' ORDER BY id`)
 	if err != nil {
 		t.Fatal(err)
 	}

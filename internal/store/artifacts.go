@@ -150,7 +150,7 @@ func (s *Store) ListArtifacts(ctx context.Context, parentType, parentID string) 
 		q += ` AND parent_type = ? AND parent_id = ?`
 		args = append(args, parentType, parentID)
 	}
-	q += ` ORDER BY created_at`
+	q += ` ORDER BY id`
 	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, records.DBErr("list artifacts", err)

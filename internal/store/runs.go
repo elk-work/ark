@@ -171,7 +171,7 @@ func (s *Store) ListRuns(ctx context.Context, taskID string) ([]*Run, error) {
 		q += ` AND task_id = ?`
 		args = append(args, taskID)
 	}
-	q += ` ORDER BY created_at`
+	q += ` ORDER BY id`
 	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, records.DBErr("list runs", err)

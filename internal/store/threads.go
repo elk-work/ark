@@ -99,7 +99,7 @@ func (s *Store) ListThreads(ctx context.Context, taskID string) ([]*Thread, erro
 		q += ` AND task_id = ?`
 		args = append(args, taskID)
 	}
-	q += ` ORDER BY created_at`
+	q += ` ORDER BY id`
 	rows, err := s.DB.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, records.DBErr("list threads", err)
@@ -194,7 +194,7 @@ func (s *Store) ListMessages(ctx context.Context, threadID string) ([]*Message, 
 	rows, err := s.DB.QueryContext(ctx, `SELECT id, thread_id, role, body, metadata_json,
 		created_at, created_by, created_by_type, COALESCE(supersedes_id, '')
 		FROM thread_messages WHERE thread_id = ? AND deleted_at IS NULL
-		ORDER BY created_at`, threadID)
+		ORDER BY id`, threadID)
 	if err != nil {
 		return nil, records.DBErr("list messages", err)
 	}

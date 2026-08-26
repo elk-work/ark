@@ -39,9 +39,11 @@ func newConflictListCmd(g *globals) *cobra.Command {
 				return err
 			}
 			defer a.Close()
+			// Oldest first, by ULID — created_at is RFC3339Nano text, which
+			// SQLite orders byte by byte and not chronologically.
 			rows, err := a.DB.QueryContext(cmd.Context(), `SELECT id, record_type, record_id,
 				mutation_id, status, created_at FROM conflicts WHERE status = 'unresolved'
-				ORDER BY created_at`)
+				ORDER BY id`)
 			if err != nil {
 				return records.DBErr("list conflicts", err)
 			}

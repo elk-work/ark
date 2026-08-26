@@ -70,7 +70,7 @@ func (s *Store) ListComments(ctx context.Context, parentType, parentID string) (
 	rows, err := s.DB.QueryContext(ctx, `SELECT id, repository_id, parent_type, parent_id, body,
 		created_at, created_by, created_by_type, COALESCE(supersedes_id, '')
 		FROM comments WHERE parent_type = ? AND parent_id = ? AND deleted_at IS NULL
-		ORDER BY created_at`, parentType, parentID)
+		ORDER BY id`, parentType, parentID)
 	if err != nil {
 		return nil, records.DBErr("list comments", err)
 	}
