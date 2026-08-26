@@ -270,6 +270,69 @@ and falls back to the credentials file elsewhere.
 
 ---
 
+## Work-record write routes
+
+Most of `/v1` is the sync protocol: `POST /v1/sync/push` speaks mutations
+because the caller is expected to *be* another copy of Ark. Three routes
+are not that. They let an ordinary program — a CI job, a script, a
+dashboard — write a work record without reimplementing Ark's record
+model. See `docs/rfc-0004-work-record-write-api.md` for why they exist
+and what they deliberately leave out.
+
+```text
+POST /v1/repositories/{repo}/tasks              create a task
+POST /v1/repositories/{repo}/comments           comment on a task, PR, run, or review
+POST /v1/repositories/{repo}/tasks/{id}/status  move a task within the allowed set
+```
+
+`{repo}` is the repository ULID. `{id}` and every `parent_id` is the
+record's ULID — never a display number, because the service renumbers
+colliding numbers and a number-keyed write could land on a different
+record.
+
+**Every write is attributed to an agent acting under a human.** A request
+names its writer once:
+
+```sh
+curl -sS "$ARK_URL/v1/repositories/$REPO/tasks" \
+  -H "Authorization: Bearer $ARK_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: $(uuidgen)" \
+  -d '{"writer":{"agent_name":"ci","delegated_by":"<human actor ULID>"},
+       "title":"Nightly build failed","body":"see run 4821"}'
+```
+
+The first write under a given `agent_name` creates that agent actor, and
+`delegated_by` must name a human actor already in the repository — find
+one with `ark task view` on any existing record, or let a client sync
+first. Later writes reuse the actor and read `delegated_by` from the
+stored record, so a request cannot re-point a registered agent at
+somebody else.
+
+**`Idempotency-Key` is required on the two create routes.** The service
+persists with a compare-and-swap and replays the whole request on a lost
+race, so a keyless create could file the same task twice. A replay
+returns the original response with `Idempotency-Replayed: true`. The
+status route does not need one: asking for the status a task already has
+returns the record and writes nothing.
+
+The response is the record as written, including the ULID and — for a
+task — the display number, which is final at that moment because the
+service allocated it:
+
+```json
+{"record":{"record_type":"task","record_id":"01K3…","data":{"number":41,…},
+ "server_revision":412},"server_revision":412}
+```
+
+Clients receive it on their next `ark sync`.
+
+These routes sit behind the same bearer token as everything else, with
+the same consequence recorded above: anyone holding it can write to every
+repository the service knows about.
+
+---
+
 ## Health check
 
 ```text
