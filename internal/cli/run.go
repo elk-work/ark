@@ -125,9 +125,19 @@ func newRunFinishCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Saving the review as part of the saved session. Strictly after
+			// the finish and fail-open: a run that finished, finished, and a
+			// renderer fault must not be able to say otherwise.
+			var reviewErr error
+			if !skipRunReview(cmd) {
+				reviewErr = attachRunReview(ctx, a, r)
+			}
 			p := g.printer(cmd)
 			return p.Result(r, func() {
 				p.Line("Finished run %s: %s", r.ID, r.Status)
+				if reviewErr != nil {
+					p.Line("  (no review attached: %v)", reviewErr)
+				}
 			})
 		},
 	}
@@ -135,6 +145,7 @@ func newRunFinishCmd(g *globals) *cobra.Command {
 	cmd.Flags().StringP("result", "r", "", "what the run produced")
 	cmd.Flags().String("commit", "", "resulting commit SHA (defaults to current HEAD)")
 	cmd.Flags().Int64("exit-code", 0, "process exit code")
+	cmd.Flags().Bool("no-review", false, "do not attach a rendered review to the run (or set ARK_NO_RUN_REVIEW)")
 	return cmd
 }
 

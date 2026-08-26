@@ -57,7 +57,10 @@ func TestTwoClientSync(t *testing.T) {
 		ID string `json:"id"`
 	}
 	arkJSON(t, a, &run, "--agent", "claude-code", "run", "start", "--task", "1", "-i", "do the work")
-	ark(t, a, "--agent", "claude-code", "run", "finish", run.ID, "-s", "succeeded", "-r", "done")
+	// --no-review keeps this test about sync: finishing a run also attaches a
+	// rendered review, and the artifact assertions below are about the one
+	// artifact this test creates on purpose.
+	ark(t, a, "--agent", "claude-code", "run", "finish", run.ID, "-s", "succeeded", "-r", "done", "--no-review")
 
 	evidence := filepath.Join(a, "evidence.txt")
 	os.WriteFile(evidence, []byte("proof\n"), 0o644)

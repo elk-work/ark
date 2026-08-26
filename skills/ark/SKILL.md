@@ -100,6 +100,18 @@ ark sync
 Use `-s failed` when it didn't work. A failed run with an honest result is more
 valuable than no record — it stops the next agent repeating the attempt.
 
+Finishing also attaches a rendered review of the run — the task, the thread,
+the diff between the two commits it recorded — as a `review.html` artifact, so
+the session is saved as part of the saved session. Pass `--no-review` when you
+don't want one.
+
+**Asked what happened here?** `ark review` is the read side. It answers two
+questions separately — *is anything happening* (`working`/`waiting`/`errored`/`idle`)
+and *did the work land* (`settled`/`faulted`/`unanswered`/`unclear`) — and gives
+every unsettled run one sentence saying what would move it. `ark review --json`
+is the parseable form; `--since 24h` or `--run <id>` narrow it. Reach for it
+before reconstructing a session from `git log`.
+
 The result summary is the single highest-value string you will write all
 session. Make it specific and factual:
 
