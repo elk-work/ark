@@ -138,3 +138,47 @@ type Error struct {
 	Code    string `json:"code"` // validation|not_found|conflict|permission|internal
 	Message string `json:"message"`
 }
+
+// Writer names the agent identity a server-side write is attributed to.
+// The service resolves it to a repository-local actor: first use creates
+// that actor, every later write reuses it, and DelegatedBy is read from the
+// stored actor record rather than from the request. See
+// docs/rfc-0004-work-record-write-api.md Decision 2.
+type Writer struct {
+	AgentName    string `json:"agent_name"`
+	AgentVersion string `json:"agent_version,omitempty"`
+	// DelegatedBy is the ULID of a human actor already in the repository.
+	// Consulted only when the agent actor is created; ignored afterwards.
+	DelegatedBy string `json:"delegated_by,omitempty"`
+}
+
+// CreateTaskRequest is the body of POST /v1/repositories/{repo}/tasks.
+type CreateTaskRequest struct {
+	Writer Writer `json:"writer"`
+	Title  string `json:"title"`
+	Body   string `json:"body,omitempty"`
+	Status string `json:"status,omitempty"` // defaults to open
+}
+
+// CreateCommentRequest is the body of POST /v1/repositories/{repo}/comments.
+type CreateCommentRequest struct {
+	Writer       Writer `json:"writer"`
+	ParentType   string `json:"parent_type"`
+	ParentID     string `json:"parent_id"`
+	Body         string `json:"body"`
+	SupersedesID string `json:"supersedes_id,omitempty"`
+}
+
+// TaskStatusRequest is the body of
+// POST /v1/repositories/{repo}/tasks/{id}/status.
+type TaskStatusRequest struct {
+	Writer Writer `json:"writer"`
+	Status string `json:"status"`
+}
+
+// RecordResponse is what every write route returns: the record as written,
+// and the revision that carries it to clients on their next pull.
+type RecordResponse struct {
+	Record         Record `json:"record"`
+	ServerRevision int64  `json:"server_revision"`
+}

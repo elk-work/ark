@@ -52,6 +52,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/sync/push", s.auth(s.handlePush))
 	mux.HandleFunc("POST /v1/sync/pull", s.auth(s.handlePull))
 	mux.HandleFunc("GET /v1/repositories/{repo}/records/{type}/{id}", s.auth(s.handleGetRecord))
+	// Work-record write routes (docs/rfc-0004-work-record-write-api.md):
+	// what a program uses instead of speaking the mutation protocol.
+	mux.HandleFunc("POST /v1/repositories/{repo}/tasks", s.auth(s.handleCreateTask))
+	mux.HandleFunc("POST /v1/repositories/{repo}/comments", s.auth(s.handleCreateComment))
+	mux.HandleFunc("POST /v1/repositories/{repo}/tasks/{id}/status", s.auth(s.handleTaskStatus))
 	mux.HandleFunc("POST /v1/pull-requests/{id}/merge", s.auth(s.handleMerge))
 	mux.HandleFunc("POST /v1/artifacts/upload-url", s.auth(s.handleUploadURL))
 	mux.HandleFunc("POST /v1/artifacts/confirm", s.auth(s.handleConfirmUpload))
