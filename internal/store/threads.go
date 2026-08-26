@@ -136,8 +136,8 @@ func (s *Store) CloseThread(ctx context.Context, ref string) (*Thread, error) {
 			t.ClosedAt, t.ID); err != nil {
 			return records.DBErr("close thread", err)
 		}
-		return s.logMutation(tx, records.TypeThread, t.ID, "update",
-			0, map[string]string{"status": "closed", "closed_at": t.ClosedAt})
+		return s.logUpdate(tx, records.TypeThread, t.ID,
+			map[string]string{"status": "closed", "closed_at": t.ClosedAt})
 	})
 	if err != nil {
 		return nil, err

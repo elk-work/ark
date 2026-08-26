@@ -128,11 +128,7 @@ func (s *Store) EndPromotion(ctx context.Context, ref string) (*Promotion, error
 			end.EndedAt, p.ID); err != nil {
 			return records.DBErr("end promotion", err)
 		}
-		var rev int64
-		if err := tx.QueryRow(`SELECT server_revision FROM promotions WHERE id = ?`, p.ID).Scan(&rev); err != nil {
-			return records.DBErr("read revision", err)
-		}
-		return s.logMutation(tx, records.TypePromotion, p.ID, "update", rev, end)
+		return s.logUpdate(tx, records.TypePromotion, p.ID, end)
 	})
 	if err != nil {
 		return nil, err

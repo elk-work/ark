@@ -75,10 +75,9 @@ type RunFinish struct {
 
 // FinishRun completes a run with a terminal status.
 func (s *Store) FinishRun(ctx context.Context, ref string, fin RunFinish) (*Run, error) {
-	switch fin.Status {
-	case "succeeded", "failed", "cancelled":
-	default:
-		return nil, records.Validationf("finish status must be succeeded, failed, or cancelled (got %q)", fin.Status)
+	if !records.TerminalRunStatus(fin.Status) {
+		return nil, records.Validationf("finish status must be %s (got %q)",
+			strings.Join(records.TerminalRunStatuses, ", "), fin.Status)
 	}
 	r, err := s.ResolveRun(ctx, ref)
 	if err != nil {
@@ -88,27 +87,42 @@ func (s *Store) FinishRun(ctx context.Context, ref string, fin RunFinish) (*Run,
 		return nil, records.Validationf("run %s already finished (%s)", r.ID, r.Status)
 	}
 	fin.FinishedAt = records.Now()
-	r.Status = fin.Status
-	r.ResultSummary = fin.ResultSummary
-	r.ExitCode = fin.ExitCode
-	r.ResultCommitSHA = fin.ResultCommitSHA
-	r.FinishedAt = fin.FinishedAt
+	var finished *Run
 	err = s.inTx(ctx, func(tx *sql.Tx) error {
 		var exit any
 		if fin.ExitCode != nil {
 			exit = *fin.ExitCode
 		}
-		if _, err := tx.Exec(`UPDATE agent_runs SET status = ?, result_summary = ?,
+		res, err := tx.Exec(`UPDATE agent_runs SET status = ?, result_summary = ?,
 			exit_code = ?, result_commit_sha = ?, finished_at = ? WHERE id = ?`,
-			fin.Status, fin.ResultSummary, exit, fin.ResultCommitSHA, fin.FinishedAt, r.ID); err != nil {
+			fin.Status, fin.ResultSummary, exit, fin.ResultCommitSHA, fin.FinishedAt, r.ID)
+		if err != nil {
 			return records.DBErr("finish run", err)
 		}
-		return s.logMutation(tx, records.TypeRun, r.ID, "update", 0, fin)
+		if n, _ := res.RowsAffected(); n == 0 {
+			return records.Conflictf("run %s changed concurrently; retry", r.ID)
+		}
+		// Read the run back rather than returning the values we meant to
+		// write. A finish that reports success has to mean the stored record
+		// says so: the failure this guards against wrote result_summary and
+		// finished_at while status stayed "running", and every caller — the
+		// CLI line, --json, anything waiting on the run — was told
+		// "succeeded" because it was reading the in-memory copy
+		// (elk-work/ark#28).
+		finished, err = scanRun(tx.QueryRow(`SELECT `+runCols+` FROM agent_runs WHERE id = ?`, r.ID))
+		if err != nil {
+			return records.DBErr("reload finished run", err)
+		}
+		if !records.TerminalRunStatus(finished.Status) {
+			return records.Conflictf("run %s did not reach a terminal status (still %s)",
+				r.ID, finished.Status)
+		}
+		return s.logUpdate(tx, records.TypeRun, r.ID, fin)
 	})
 	if err != nil {
 		return nil, err
 	}
-	return r, nil
+	return finished, nil
 }
 
 const runCols = `id, repository_id, task_id, thread_id, agent_name, agent_version, status,

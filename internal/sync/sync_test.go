@@ -687,3 +687,277 @@ func TestUpdateStampsUpdatedAtFromTheMutationNotTheCreate(t *testing.T) {
 		t.Errorf("a joining client sees updated_at frozen at creation")
 	}
 }
+
+// An update mutation must carry the revision the record is actually at on
+// the server. The server's field-level merge (spec §10.4) drops every field
+// whose server-side revision is newer than the mutation's base, so an update
+// that claims a base of 0 has every field the record was created with
+// discarded — cloud wins — while still being reported applied.
+//
+// The tests below are all the same shape: create the record, sync so the
+// create lands on its own, then change it and sync again. The second sync is
+// the one that matters, because a create and an update pushed together are
+// rescued by the server's session-revision lift (engine.go, sessionRevisions)
+// and never exercise the merge at all. That is why elk-work/ark#28 only
+// showed up in a `.ark/` another session was syncing — the concurrent sync
+// pushed the create, so the finish travelled alone.
+//
+// Each test asserts through a second client as well, because the local row
+// is only a copy: the question is what the server's document says.
+
+func TestFinishRunAfterTheRunHasAlreadySynced(t *testing.T) {
+	_, url := startServer(t)
+	a := newClient(t, url, "")
+	ctx := context.Background()
+
+	run, err := a.Store.StartRun(ctx, &store.Run{AgentName: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, a) // the create reaches the server on its own
+
+	if _, err := a.Store.FinishRun(ctx, run.ID, store.RunFinish{
+		Status: "succeeded", ResultSummary: "did the thing"}); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, a) // push the finish, then pull the server's copy back over it
+
+	got, err := a.Store.ResolveRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The reported shape: the two fields absent from the create payload stuck,
+	// and the one present in it reverted.
+	if got.Status != "succeeded" {
+		t.Errorf("status = %q, want succeeded (result_summary = %q, finished_at = %q)",
+			got.Status, got.ResultSummary, got.FinishedAt)
+	}
+	if got.ResultSummary != "did the thing" {
+		t.Errorf("result_summary = %q, want %q", got.ResultSummary, "did the thing")
+	}
+	if got.FinishedAt == "" {
+		t.Error("finished_at is empty")
+	}
+
+	b := newClient(t, url, a.Config.RepositoryID)
+	mustRun(t, b)
+	fromB, err := b.Store.ResolveRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromB.Status != "succeeded" {
+		t.Errorf("a joining client sees status %q — the finish never reached the server", fromB.Status)
+	}
+}
+
+func TestCloseThreadAfterTheThreadHasAlreadySynced(t *testing.T) {
+	_, url := startServer(t)
+	a := newClient(t, url, "")
+	ctx := context.Background()
+
+	th, err := a.Store.CreateThread(ctx, "", "Working on it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, a)
+	if _, err := a.Store.CloseThread(ctx, th.ID); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, a)
+
+	got, err := a.Store.ResolveThread(ctx, th.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "closed" {
+		t.Errorf("status = %q, want closed (closed_at = %q)", got.Status, got.ClosedAt)
+	}
+
+	b := newClient(t, url, a.Config.RepositoryID)
+	mustRun(t, b)
+	fromB, err := b.Store.ResolveThread(ctx, th.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromB.Status != "closed" {
+		t.Errorf("a joining client sees status %q — the close never reached the server", fromB.Status)
+	}
+}
+
+func TestMergePRAfterThePRHasAlreadySynced(t *testing.T) {
+	_, url := startServer(t)
+	a := newClient(t, url, "")
+	ctx := context.Background()
+
+	pr, err := a.Store.CreatePR(ctx, &store.PullRequest{
+		Title: "Change", BaseBranch: "main", HeadBranch: "feature",
+		BaseCommitSHA: "aaa", HeadCommitSHA: "bbb"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, a)
+	if err := a.Store.MarkPRMerged(ctx, pr, "ccc", "bbb"); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, a)
+
+	got, err := a.Store.ResolvePR(ctx, pr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "merged" {
+		t.Errorf("status = %q, want merged (merge_commit_sha = %q, merged_at = %q)",
+			got.Status, got.MergeCommitSHA, got.MergedAt)
+	}
+
+	b := newClient(t, url, a.Config.RepositoryID)
+	mustRun(t, b)
+	fromB, err := b.Store.ResolvePR(ctx, pr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromB.Status != "merged" {
+		t.Errorf("a joining client sees status %q — the merge never reached the server", fromB.Status)
+	}
+}
+
+// A record synced long ago and edited repeatedly must keep every edit: each
+// update rebases on the revision the previous one produced.
+func TestRepeatedEditsAfterSyncAllSurvive(t *testing.T) {
+	_, url := startServer(t)
+	a := newClient(t, url, "")
+	ctx := context.Background()
+
+	task, err := a.Store.CreateTask(ctx, "Ship it", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{"in_progress", "blocked", "in_progress", "done"} {
+		mustRun(t, a)
+		s := status
+		if _, err := a.Store.UpdateTask(ctx, task.ID, store.TaskEdit{Status: &s}); err != nil {
+			t.Fatalf("set %s: %v", s, err)
+		}
+	}
+	mustRun(t, a)
+
+	b := newClient(t, url, a.Config.RepositoryID)
+	mustRun(t, b)
+	fromB, err := b.Store.ResolveTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromB.Status != "done" {
+		t.Errorf("status = %q, want done", fromB.Status)
+	}
+}
+
+// The base revision the client stamps on an update is the record's current
+// server revision, not a literal. This is the invariant the tests above
+// depend on, asserted directly so a regression names itself.
+func TestUpdateMutationsCarryTheRecordsServerRevision(t *testing.T) {
+	_, url := startServer(t)
+	a := newClient(t, url, "")
+	ctx := context.Background()
+
+	run, err := a.Store.StartRun(ctx, &store.Run{AgentName: "claude"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, a)
+
+	rev := scalar[int64](t, a, `SELECT server_revision FROM agent_runs WHERE id = ?`, run.ID)
+	if rev == 0 {
+		t.Fatal("precondition: the run should carry a server revision after its first sync")
+	}
+	if _, err := a.Store.FinishRun(ctx, run.ID, store.RunFinish{Status: "succeeded"}); err != nil {
+		t.Fatal(err)
+	}
+	base := scalar[int64](t, a, `SELECT base_server_revision FROM mutations
+		WHERE record_id = ? AND operation = 'update'`, run.ID)
+	if base != rev {
+		t.Errorf("update mutation base_server_revision = %d, want %d (the run's revision)", base, rev)
+	}
+}
+
+// A pull applies the server's document over the local row without consulting
+// sync_state, so it will overwrite a change that is committed locally but not
+// yet pushed. That is reachable in practice: a second session sharing one
+// .ark/ pushes its own view of the queue and then pulls into the shared
+// database, so its pull can land over the first session's fresh write.
+//
+// The overwrite is a window, not a loss. ApplyPull does not touch the
+// mutations table, so the queued mutation is still there and the next full
+// sync replays it. This test pins that down, because it is the difference
+// between the pull being a nuisance and the pull being a data-integrity bug —
+// and it is what rules the pull out as the cause of elk-work/ark#28, where
+// the loss was permanent and no replay was left to make.
+func TestPullOverAnUnpushedEditIsRecoveredByTheNextSync(t *testing.T) {
+	_, url := startServer(t)
+	a := newClient(t, url, "")
+	ctx := context.Background()
+
+	task, err := a.Store.CreateTask(ctx, "Original", "body one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, a)
+
+	// A second client changes a different field, so the server's revision
+	// moves past a's cursor and the next pull carries the record.
+	b := newClient(t, url, a.Config.RepositoryID)
+	mustRun(t, b)
+	newBody := "body two"
+	if _, err := b.Store.UpdateTask(ctx, task.ID, store.TaskEdit{Body: &newBody}); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, b)
+
+	// a edits locally and does not push.
+	newTitle := "Renamed locally"
+	if _, err := a.Store.UpdateTask(ctx, task.ID, store.TaskEdit{Title: &newTitle}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Someone else pulls into the same database, without pushing a's queue.
+	client, err := Client(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := Pull(ctx, a, client, &Result{}); err != nil {
+		t.Fatal(err)
+	}
+	afterPull, err := a.Store.ResolveTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterPull.Title != "Original" {
+		t.Logf("note: the pull no longer overwrites unpushed local state (title = %q)", afterPull.Title)
+	}
+	if n, err := a.Store.PendingMutations(ctx); err != nil || n != 1 {
+		t.Fatalf("pending mutations after pull = %d (err %v), want 1 — the replay is what makes the overwrite recoverable", n, err)
+	}
+
+	// The next full sync pushes the queued edit and both values converge.
+	mustRun(t, a)
+	final, err := a.Store.ResolveTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if final.Title != "Renamed locally" {
+		t.Errorf("title = %q, want the local edit back", final.Title)
+	}
+	if final.Body != "body two" {
+		t.Errorf("body = %q, want the remote edit kept", final.Body)
+	}
+
+	c := newClient(t, url, a.Config.RepositoryID)
+	mustRun(t, c)
+	fromC, err := c.Store.ResolveTask(ctx, task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fromC.Title != "Renamed locally" || fromC.Body != "body two" {
+		t.Errorf("a joining client sees title %q, body %q", fromC.Title, fromC.Body)
+	}
+}

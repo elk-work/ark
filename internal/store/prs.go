@@ -261,7 +261,7 @@ func (s *Store) UpdatePRHead(ctx context.Context, pr *PullRequest, headSHA strin
 		if n, _ := res.RowsAffected(); n == 0 {
 			return records.Conflictf("pull request #%d is no longer open", pr.Number)
 		}
-		return s.logMutation(tx, records.TypePullRequest, pr.ID, "update", 0, change)
+		return s.logUpdate(tx, records.TypePullRequest, pr.ID, change)
 	})
 	if err == nil {
 		pr.HeadCommitSHA = headSHA
@@ -283,7 +283,7 @@ func (s *Store) MarkPRMerged(ctx context.Context, pr *PullRequest, mergeSHA, hea
 		if n, _ := res.RowsAffected(); n == 0 {
 			return records.Conflictf("pull request #%d is no longer open", pr.Number)
 		}
-		return s.logMutation(tx, records.TypePullRequest, pr.ID, "update", 0, change)
+		return s.logUpdate(tx, records.TypePullRequest, pr.ID, change)
 	})
 	if err == nil {
 		pr.Status = "merged"
@@ -314,7 +314,7 @@ func (s *Store) ClosePR(ctx context.Context, ref string) (*PullRequest, error) {
 		if n, _ := res.RowsAffected(); n == 0 {
 			return records.Conflictf("pull request #%d is no longer open", pr.Number)
 		}
-		return s.logMutation(tx, records.TypePullRequest, pr.ID, "update", 0, change)
+		return s.logUpdate(tx, records.TypePullRequest, pr.ID, change)
 	})
 	if err != nil {
 		return nil, err

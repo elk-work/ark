@@ -192,11 +192,7 @@ func (s *Store) UpdateTask(ctx context.Context, ref string, edit TaskEdit) (*Tas
 		if err := s.ftsSet(tx, records.TypeTask, t.ID, t.Title, t.Body); err != nil {
 			return err
 		}
-		var rev int64
-		if err := tx.QueryRow(`SELECT server_revision FROM tasks WHERE id = ?`, t.ID).Scan(&rev); err != nil {
-			return records.DBErr("read revision", err)
-		}
-		return s.logMutation(tx, records.TypeTask, t.ID, "update", rev, edit)
+		return s.logUpdate(tx, records.TypeTask, t.ID, edit)
 	})
 	if err != nil {
 		return nil, err
