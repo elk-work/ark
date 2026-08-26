@@ -120,16 +120,22 @@ func writeFileToken(host, token string) error {
 	if err != nil {
 		return err
 	}
+	// Restrict the temp file BEFORE the token reaches the disk. OpenFile's
+	// mode argument does not configure a Windows ACL at all, and on Unix it is
+	// ignored when the file already exists — so a temp file left behind by an
+	// interrupted login would carry its old, wider permissions through the
+	// rename and onto the real credential file.
+	if err := restrictCredentialFile(path + ".tmp"); err != nil {
+		f.Close()
+		os.Remove(path + ".tmp")
+		return err
+	}
 	if err := toml.NewEncoder(f).Encode(c); err != nil {
 		f.Close()
 		os.Remove(path + ".tmp")
 		return err
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(path + ".tmp")
-		return err
-	}
-	if err := restrictCredentialFile(path + ".tmp"); err != nil {
 		os.Remove(path + ".tmp")
 		return err
 	}

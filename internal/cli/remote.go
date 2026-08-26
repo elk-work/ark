@@ -83,9 +83,11 @@ means one ` + "`ark login`" + `, not one per repository.
 Run it anywhere with --remote, or inside a repository to use that
 repository's configured remote.
 
-The token goes to the macOS keychain when available, otherwise to
-~/.ark/credentials.toml (mode 0600). Tokens are never written inside the
-repository. Pass --token, or pipe the token on stdin.`,
+The token goes to the macOS keychain when available, otherwise to a
+per-user credentials file: ~/.ark/credentials.toml (mode 0600), or
+%USERPROFILE%\.ark\credentials.toml with a current-user-only ACL on Windows.
+Tokens are never written inside the repository. Pass --token, or pipe the
+token on stdin.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			remote := strings.TrimRight(remoteFlag, "/")

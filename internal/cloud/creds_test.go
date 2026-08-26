@@ -115,6 +115,35 @@ func TestCredentialsFileKeepsOtherRemotesAndTightPermissions(t *testing.T) {
 	assertRestrictedCredentials(t, filepath.Join(home, ".ark", "credentials.toml"))
 }
 
+// TestCredentialsFileIsRestrictedDespiteAStaleTempFile: an interrupted login
+// can leave credentials.toml.tmp behind. O_CREATE does not re-apply its mode
+// to a file that already exists — and on Windows the mode never configured the
+// ACL in the first place — so the next login must restrict the temp file
+// itself before the token goes into it, or it inherits the stale file's wider
+// permissions all the way through the rename.
+func TestCredentialsFileIsRestrictedDespiteAStaleTempFile(t *testing.T) {
+	home := isolateHome(t)
+	path := filepath.Join(home, ".ark", "credentials.toml")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A world-readable leftover from a login that died mid-write.
+	if err := os.WriteFile(path+".tmp", []byte("remnant\n"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeFileToken("a.example.com", "tok-a"); err != nil {
+		t.Fatal(err)
+	}
+	assertRestrictedCredentials(t, path)
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("credentials.toml.tmp survived the write (%v); a token file was left behind", err)
+	}
+	if got := fileToken("a.example.com"); got != "tok-a" {
+		t.Errorf("a.example.com = %q, want tok-a", got)
+	}
+}
+
 // TestStoreTokenFallsBackToCredentialsFile: off macOS there is no keychain,
 // so StoreToken lands in ~/.ark/credentials.toml and ResolveToken finds it
 // again (spec §20). Skipped on darwin: the keychain path would write a real
