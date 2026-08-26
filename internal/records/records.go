@@ -71,6 +71,20 @@ var TaskStatuses = []string{"open", "in_progress", "blocked", "done", "closed"}
 // Run statuses.
 var RunStatuses = []string{"queued", "running", "succeeded", "failed", "cancelled"}
 
+// TerminalRunStatuses are the statuses a run can finish in. The complement —
+// queued, running — is a run still in flight.
+var TerminalRunStatuses = []string{"succeeded", "failed", "cancelled"}
+
+// TerminalRunStatus reports whether a run status means the run has ended.
+func TerminalRunStatus(status string) bool {
+	for _, s := range TerminalRunStatuses {
+		if status == s {
+			return true
+		}
+	}
+	return false
+}
+
 // PR statuses.
 var PRStatuses = []string{"open", "merged", "closed"}
 

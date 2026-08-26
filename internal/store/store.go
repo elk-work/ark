@@ -67,6 +67,37 @@ func (s *Store) logMutation(tx *sql.Tx, rt records.RecordType, recordID, operati
 	return nil
 }
 
+// logUpdate logs an update mutation against the revision the record is
+// currently at on the server.
+//
+// Every update path must go through this rather than passing a base revision
+// of its own. `base_server_revision` is how the client says "this change was
+// made against that version of the record", and the server's field-level
+// merge (docs/v1-spec.md §10.4) drops — cloud-wins — every field whose
+// server-side revision is newer than the base. A literal 0 therefore claims
+// the change was made against a record the server had never written, so
+// *every* field the record carried at creation is treated as a concurrent
+// remote edit and silently discarded, while the mutation is still reported
+// applied. For a run that meant `status` never left "running" once the run
+// had been pushed by an earlier sync, though `result_summary` and
+// `finished_at` — absent from the create payload, so carrying no field
+// revision — merged cleanly (elk-work/ark#28).
+//
+// A record that has never synced sits at revision 0, which is the honest
+// base for it, so this is also correct offline.
+func (s *Store) logUpdate(tx *sql.Tx, rt records.RecordType, recordID string, payload any) error {
+	table, ok := tableForType(string(rt))
+	if !ok {
+		return records.Validationf("no local table for record type %q", rt)
+	}
+	var rev int64
+	if err := tx.QueryRow(fmt.Sprintf(
+		`SELECT server_revision FROM %s WHERE id = ?`, table), recordID).Scan(&rev); err != nil {
+		return records.DBErr("read revision", err)
+	}
+	return s.logMutation(tx, rt, recordID, "update", rev, payload)
+}
+
 // ftsSet replaces the search-index entry for a record.
 func (s *Store) ftsSet(tx *sql.Tx, rt records.RecordType, id, title, body string) error {
 	if _, err := tx.Exec(`DELETE FROM fts WHERE record_type = ? AND record_id = ?`, string(rt), id); err != nil {

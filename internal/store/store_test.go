@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -426,5 +427,68 @@ func TestMutationPayloads(t *testing.T) {
 	// The update payload carries only the changed field.
 	if muts[1].payload != `{"status":"blocked"}` {
 		t.Errorf("update payload = %s", muts[1].payload)
+	}
+}
+
+// A finish that reports success has to mean the stored record says so.
+// FinishRun returns the run it read back inside the transaction rather than
+// the in-memory copy it meant to write, so a caller — the CLI line, --json,
+// anything waiting on the run — cannot be told "succeeded" over a row that
+// still says "running".
+func TestFinishRunReportsTheStoredRecordNotTheIntent(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+
+	r, err := s.StartRun(ctx, &Run{AgentName: "claude", BranchName: "work"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	exit := int64(0)
+	fin, err := s.FinishRun(ctx, r.ID, RunFinish{Status: "succeeded",
+		ResultSummary: "done", ExitCode: &exit, ResultCommitSHA: "def456"})
+	if err != nil {
+		t.Fatalf("finish: %v", err)
+	}
+	if !records.TerminalRunStatus(fin.Status) {
+		t.Fatalf("finish returned a non-terminal status %q", fin.Status)
+	}
+	stored, err := s.ResolveRun(ctx, r.ID)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if !reflect.DeepEqual(fin, stored) {
+		t.Errorf("finish returned a record the database does not hold:\n got %+v\nwant %+v", fin, stored)
+	}
+	// Fields the finish never mentioned still come back, because the run was
+	// read rather than reconstructed.
+	if fin.AgentName != "claude" || fin.BranchName != "work" || fin.StartedAt == "" {
+		t.Errorf("finish dropped fields it did not write: %+v", fin)
+	}
+}
+
+// The guard is on the status the row actually ends at, so a status Ark does
+// not consider terminal can never be reported as a finish.
+func TestFinishRunRejectsEveryNonTerminalStatus(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	for _, status := range append(records.RunStatuses, "", "Succeeded", "done") {
+		if records.TerminalRunStatus(status) {
+			continue
+		}
+		r, err := s.StartRun(ctx, &Run{AgentName: "claude"})
+		if err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		if _, err := s.FinishRun(ctx, r.ID, RunFinish{Status: status}); err == nil {
+			t.Errorf("finish accepted non-terminal status %q", status)
+		}
+		got, err := s.ResolveRun(ctx, r.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Status != "running" || got.FinishedAt != "" {
+			t.Errorf("rejected finish left state behind: status %q, finished_at %q",
+				got.Status, got.FinishedAt)
+		}
 	}
 }

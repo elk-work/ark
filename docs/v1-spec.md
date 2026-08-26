@@ -637,6 +637,13 @@ conflict
 
 Local state and mutation insertion must happen in the same SQLite transaction.
 
+`base_server_revision` is the record's current `server_revision` at the moment
+the change is made — 0 only for a `create`, or for a record that has never
+synced. It is not a placeholder. §10.1 reads it as "the version this change was
+made against", and §10.4 drops every field whose server-side revision is newer
+than it, so a base that understates the record's revision silently discards the
+change field by field while the mutation is still reported applied.
+
 ---
 
 ## 9. Sync Model
