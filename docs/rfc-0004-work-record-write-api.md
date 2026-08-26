@@ -289,6 +289,12 @@ that.
 *Namespace.* Caller-supplied keys are stored prefixed (`idem:<key>`) so they
 cannot collide with, or read back, a mutation id.
 
+*What a replay does not check.* A key replays the first outcome regardless of
+what the second request's body said. Rejecting a reused key with a changed body
+— the stricter and more common contract — needs a stored request fingerprint,
+and `applied_mutations` has no column for one. Recorded below as an accepted
+cost with its remedy, rather than half-enforced.
+
 *Why the status route is exempt.* A status transition is an assertion about
 state, not an increment. If the task is already in the requested status the
 handler returns the current record and **mints no revision** — the same
@@ -437,6 +443,12 @@ rolls it forward.
 - **A required `Idempotency-Key` is friction for a casual `curl`.** Accepted:
   duplicate tasks that nothing can distinguish afterwards are worse than a
   header.
+- **A reused `Idempotency-Key` with a different body replays the first
+  outcome** rather than rejecting the second request. The stricter contract
+  needs a stored request fingerprint and `applied_mutations` has no column for
+  one; adding it is a migration and a decision about what to hash. The failure
+  it would catch is a client bug (recycling a key across distinct writes), and
+  the current behaviour fails safe — nothing extra is written.
 - **`applied_mutations` grows without bound.** Already true of push; these
   routes add rows at human rather than sync rates. Whatever eventually prunes
   it prunes both.
