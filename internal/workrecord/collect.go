@@ -4,6 +4,7 @@ import (
 	"context"
 	"sort"
 
+	"github.com/elk-work/ark/internal/records"
 	"github.com/elk-work/ark/internal/store"
 )
 
@@ -113,8 +114,8 @@ func Collect(ctx context.Context, s *store.Store, r Repo, opt Options) ([]Event,
 	// Stable order: by when it happened, then by key so equal timestamps
 	// (Ark writes a whole batch in one transaction) stay deterministic.
 	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].OccurredAt != out[j].OccurredAt {
-			return out[i].OccurredAt < out[j].OccurredAt
+		if c := records.TimeCompare(out[i].OccurredAt, out[j].OccurredAt); c != 0 {
+			return c < 0
 		}
 		return out[i].ExternalID < out[j].ExternalID
 	})
@@ -122,7 +123,7 @@ func Collect(ctx context.Context, s *store.Store, r Repo, opt Options) ([]Event,
 	if opt.Since != "" {
 		filtered := out[:0:0]
 		for _, e := range out {
-			if e.OccurredAt > opt.Since {
+			if records.TimeAfter(e.OccurredAt, opt.Since) {
 				filtered = append(filtered, e)
 			}
 		}

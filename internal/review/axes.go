@@ -103,7 +103,7 @@ func waitingOnAPerson(r *Run) (bool, string) {
 func latestReview(pr *PullRequest) (string, string) {
 	var state, at string
 	for _, rv := range pr.Reviews {
-		if rv.CreatedAt >= at {
+		if !records.TimeBefore(rv.CreatedAt, at) {
 			state, at = rv.State, rv.CreatedAt
 		}
 	}
@@ -189,7 +189,7 @@ func evidenceOfLife(r *Run) (string, int) {
 	last, sources := "", 0
 	consider := func(ts string) {
 		sources++
-		if ts > last {
+		if records.TimeAfter(ts, last) {
 			last = ts
 		}
 	}
@@ -239,7 +239,7 @@ func unclearWhy(r *Run) string {
 func lastActivity(r *Run) string {
 	last, _ := evidenceOfLife(r)
 	for _, ts := range []string{r.FinishedAt, r.StartedAt, r.CreatedAt} {
-		if ts > last {
+		if records.TimeAfter(ts, last) {
 			last = ts
 		}
 	}

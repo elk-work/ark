@@ -669,8 +669,12 @@ func TestUpdateStampsUpdatedAtFromTheMutationNotTheCreate(t *testing.T) {
 	if got.UpdatedAt == created {
 		t.Errorf("updated_at was reset to created_at (%s) — the sync round trip lost the edit's timestamp", created)
 	}
-	if got.UpdatedAt < localUpdatedAt {
-		t.Errorf("updated_at went backwards: %s < %s", got.UpdatedAt, localUpdatedAt)
+	// Compare as instants, not as text: time.RFC3339Nano trims trailing zeros
+	// from the fractional second, so two timestamps microseconds apart sort
+	// lexically in the wrong order whenever the earlier one's string is a
+	// prefix of the later one's. See records.TimeCompare.
+	if records.TimeBefore(got.UpdatedAt, localUpdatedAt) {
+		t.Errorf("updated_at went backwards: %s is before %s", got.UpdatedAt, localUpdatedAt)
 	}
 
 	// A second client sees the same thing, since it reads the same document.

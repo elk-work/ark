@@ -222,7 +222,7 @@ func selectRuns(ctx context.Context, s *store.Store, sc Scope) ([]*store.Run, er
 			out = append(out, r)
 			continue
 		}
-		if sc.Since == "" || r.FinishedAt > sc.Since {
+		if sc.Since == "" || records.TimeAfter(r.FinishedAt, sc.Since) {
 			out = append(out, r)
 		}
 	}
@@ -257,7 +257,7 @@ func sortRuns(runs []*Run) {
 		if rank[runs[i].Liveness] != rank[runs[j].Liveness] {
 			return rank[runs[i].Liveness] < rank[runs[j].Liveness]
 		}
-		return lastActivity(runs[i]) > lastActivity(runs[j])
+		return records.TimeAfter(lastActivity(runs[i]), lastActivity(runs[j]))
 	})
 }
 
