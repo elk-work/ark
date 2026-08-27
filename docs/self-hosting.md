@@ -227,15 +227,26 @@ carrying a one-hour expiry.
 **Client side.** The token resolves in this order:
 
 1. `ARK_TOKEN` in the environment
-2. the macOS keychain, service `ark`, account = the remote's host
+2. the OS keyring, service `ark`, account = the remote's host:
+   - macOS: the login keychain
+   - Windows: Credential Manager, as generic credential `ark:<host>`
+   - Linux: the Secret Service (GNOME Keyring, KWallet, `keepassxc`, …)
 3. the user credential file, keyed by remote host:
    - macOS/Linux: `~/.ark/credentials.toml`, mode 0600
    - Windows: `%USERPROFILE%\.ark\credentials.toml`, protected by a
      current-user-only ACL
 
 Tokens are never written into the repository — not into `.ark/config.toml`,
-not anywhere under `.ark/`. `ark login` writes to the keychain on macOS
-and falls back to the credentials file elsewhere.
+not anywhere under `.ark/` — and never passed to another process as a
+command-line argument.
+
+`ark login` writes to the keyring. When the keyring is unavailable — no
+Secret Service on a headless box, a locked or denied keychain — it says so
+on stderr and falls back to the credentials file; it never degrades to
+plaintext silently. `ark status` reports which of the three answered.
+
+Set `ARK_NO_KEYRING=1` to skip the keyring and use the file deliberately;
+that path is quiet, because you asked for it.
 
 ### Operational warnings
 
@@ -383,9 +394,9 @@ ark sync
 ```
 
 `ark remote set` writes the URL to `.ark/config.toml`. `ark login`
-stores the token outside the repository (keychain, else
-`~/.ark/credentials.toml`). Piping is preferred over `--token` to keep
-the value out of shell history:
+stores the token outside the repository (the OS keyring, else
+`~/.ark/credentials.toml`) and prints which one it used. Piping is
+preferred over `--token` to keep the value out of shell history:
 
 ```sh
 <your secret store: read the token> | ark login

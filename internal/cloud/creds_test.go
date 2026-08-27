@@ -4,21 +4,20 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
+	"strings"
 	"testing"
 
 	"github.com/elk-work/ark/internal/records"
 )
 
-// credsTestRemote uses an .invalid host (RFC 2606) so the darwin keychain
-// lookup — which runs against the developer's real keychain — can never
-// match an actual credential. That makes the keychain step a guaranteed
-// miss on macOS and a no-op elsewhere, letting these tests exercise the
-// env and file steps deterministically on every platform.
+// credsTestRemote uses an .invalid host (RFC 2606). The keyring is a fake in
+// every test below, so this is belt and braces — but it means that a test
+// added later which forgets to install the fake still cannot collide with a
+// real credential on the developer's machine.
 const credsTestRemote = "https://ark-creds-test.invalid"
 
-// isolateHome points HOME at a scratch directory and clears ARK_TOKEN so
-// token resolution can only find what the test plants.
+// isolateHome gives a test its own HOME, an empty keyring, and no ARK_TOKEN,
+// so token resolution can only find what that test plants.
 func isolateHome(t *testing.T) string {
 	t.Helper()
 	home := t.TempDir()
@@ -27,14 +26,19 @@ func isolateHome(t *testing.T) string {
 	// test run can never read or write the developer's real credentials.
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("ARK_TOKEN", "")
+	t.Setenv("ARK_NO_KEYRING", "")
+	useFakeKeyring(t)
 	return home
 }
 
-// TestTokenResolutionOrder: ARK_TOKEN beats the keychain beats the
-// credentials file, and with nothing planted anywhere resolution fails
-// with a permission error telling the user to log in (spec §20).
+// TestTokenResolutionOrder: ARK_TOKEN beats the keyring beats the credentials
+// file, and with nothing planted anywhere resolution fails with a permission
+// error telling the user to log in (spec §20). Each step is added on top of
+// the last, so every assertion is also a statement about precedence.
 func TestTokenResolutionOrder(t *testing.T) {
 	isolateHome(t)
+	fake := testKeyring(t)
+	host := RemoteHost(credsTestRemote)
 
 	// Nothing anywhere: a permission error (exit 5), not a panic or "".
 	_, err := ResolveToken(credsTestRemote)
@@ -50,17 +54,77 @@ func TestTokenResolutionOrder(t *testing.T) {
 	}
 
 	// The credentials file is the last resort.
-	if err := writeFileToken(RemoteHost(credsTestRemote), "from-file"); err != nil {
+	if err := writeFileToken(host, "from-file"); err != nil {
 		t.Fatalf("write file token: %v", err)
 	}
-	if tok, err := ResolveToken(credsTestRemote); err != nil || tok != "from-file" {
-		t.Fatalf("file resolution: %q (%v), want from-file", tok, err)
+	assertResolves(t, "from-file", SourceFile)
+
+	// The keyring outranks it.
+	if err := fake.Set(keychainService, host, "from-keyring"); err != nil {
+		t.Fatalf("plant keyring token: %v", err)
 	}
+	assertResolves(t, "from-keyring", SourceKeyring)
 
 	// ARK_TOKEN beats everything.
 	t.Setenv("ARK_TOKEN", "from-env")
-	if tok, err := ResolveToken(credsTestRemote); err != nil || tok != "from-env" {
-		t.Fatalf("env resolution: %q (%v), want from-env", tok, err)
+	assertResolves(t, "from-env", SourceEnv)
+}
+
+// assertResolves checks both halves of a resolution: the token, and the store
+// that `ark status` will name as having produced it.
+func assertResolves(t *testing.T, wantToken string, wantSource TokenSource) {
+	t.Helper()
+	cred, err := ResolveCredential(credsTestRemote)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if cred.Token != wantToken || cred.Source != wantSource {
+		t.Fatalf("resolved %q from %q, want %q from %q",
+			cred.Token, cred.Source, wantToken, wantSource)
+	}
+}
+
+// TestKeyringFailureIsAnnouncedBeforeTheFallback: a keyring that is locked,
+// denied, or absent must say so on stderr before resolution drops to reading
+// a plaintext file. Falling through in silence is the defect this replaces,
+// and the one the GitHub CLI maintainers regret (cli/cli#10108, #13317).
+func TestKeyringFailureIsAnnouncedBeforeTheFallback(t *testing.T) {
+	isolateHome(t)
+	fake := testKeyring(t)
+	fake.getErr = errors.New("the user name or passphrase you entered is not correct")
+	warnings := captureWarnings(t)
+
+	if err := writeFileToken(RemoteHost(credsTestRemote), "from-file"); err != nil {
+		t.Fatal(err)
+	}
+	assertResolves(t, "from-file", SourceFile)
+
+	got := warnings.String()
+	if !strings.Contains(got, "OS keyring unavailable") {
+		t.Errorf("warnings = %q, want it to report the keyring is unavailable", got)
+	}
+	if !strings.Contains(got, "not correct") {
+		t.Errorf("warnings = %q, want the underlying keyring error", got)
+	}
+	if !strings.Contains(got, credentialsPath()) {
+		t.Errorf("warnings = %q, want the fallback path named", got)
+	}
+}
+
+// TestKeyringMissIsSilent: "no entry for this host" is the ordinary state of a
+// machine that has never logged in. Warning about it would train people to
+// ignore the warning that matters.
+func TestKeyringMissIsSilent(t *testing.T) {
+	isolateHome(t)
+	warnings := captureWarnings(t)
+
+	if err := writeFileToken(RemoteHost(credsTestRemote), "from-file"); err != nil {
+		t.Fatal(err)
+	}
+	assertResolves(t, "from-file", SourceFile)
+
+	if got := warnings.String(); got != "" {
+		t.Errorf("warnings = %q, want none for an empty keyring", got)
 	}
 }
 
@@ -144,25 +208,157 @@ func TestCredentialsFileIsRestrictedDespiteAStaleTempFile(t *testing.T) {
 	}
 }
 
-// TestStoreTokenFallsBackToCredentialsFile: off macOS there is no keychain,
-// so StoreToken lands in ~/.ark/credentials.toml and ResolveToken finds it
-// again (spec §20). Skipped on darwin: the keychain path would write a real
-// entry into the developer's keychain, and the file path is covered above.
-func TestStoreTokenFallsBackToCredentialsFile(t *testing.T) {
-	if runtime.GOOS == "darwin" {
-		t.Skip("StoreToken on darwin writes the real macOS keychain; the file fallback is covered directly")
-	}
+// TestStoreTokenPrefersTheKeyring: with a working keyring the token goes
+// there and nowhere else — in particular, no plaintext file appears as a
+// side effect (spec §20).
+func TestStoreTokenPrefersTheKeyring(t *testing.T) {
 	isolateHome(t)
+	fake := testKeyring(t)
+	warnings := captureWarnings(t)
 
-	where, err := StoreToken(credsTestRemote, "stored-token")
+	src, err := StoreToken(credsTestRemote, "stored-token")
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	if where != credentialsPath() {
-		t.Errorf("stored in %q, want %q", where, credentialsPath())
+	if src != SourceKeyring {
+		t.Errorf("stored in %q, want %q", src, SourceKeyring)
 	}
-	if tok, err := ResolveToken(credsTestRemote); err != nil || tok != "stored-token" {
-		t.Fatalf("round trip: %q (%v), want stored-token", tok, err)
+	if got := fake.entries[fake.key(keychainService, RemoteHost(credsTestRemote))]; got != "stored-token" {
+		t.Errorf("keyring holds %q, want stored-token", got)
+	}
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Errorf("a credentials file exists (%v); the keyring took the token, so nothing should be on disk", err)
+	}
+	if got := warnings.String(); got != "" {
+		t.Errorf("warnings = %q, want none when the keyring works", got)
+	}
+	assertResolves(t, "stored-token", SourceKeyring)
+}
+
+// TestStoreTokenWarnsThenFallsBackToTheCredentialsFile: a keyring that
+// refuses the write must not cost the user their login, but it must also not
+// put a token in a plaintext file without saying so (spec §20).
+func TestStoreTokenWarnsThenFallsBackToTheCredentialsFile(t *testing.T) {
+	isolateHome(t)
+	testKeyring(t).setErr = errors.New("keyring is locked")
+	warnings := captureWarnings(t)
+
+	src, err := StoreToken(credsTestRemote, "stored-token")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if src != SourceFile {
+		t.Errorf("stored in %q, want %q", src, SourceFile)
+	}
+	if src.Description() != credentialsPath() {
+		t.Errorf("description = %q, want %q", src.Description(), credentialsPath())
+	}
+	assertRestrictedCredentials(t, credentialsPath())
+	assertResolves(t, "stored-token", SourceFile)
+
+	got := warnings.String()
+	if !strings.Contains(got, "OS keyring unavailable") || !strings.Contains(got, "locked") {
+		t.Errorf("warnings = %q, want the keyring failure reported", got)
+	}
+	if !strings.Contains(got, credentialsPath()) {
+		t.Errorf("warnings = %q, want the file it fell back to named", got)
+	}
+}
+
+// TestStoreTokenRemovesThePlaintextCopyItSupersedes: the upgrade path. Anyone
+// who logged in before the keyring worked on their platform has a token in
+// ~/.ark/credentials.toml. Once the keyring holds it, that file entry is a
+// plaintext copy nothing will ever read again — the keyring outranks it — so
+// leaving it behind would be a secret on disk with no purpose. Other remotes
+// in the same file are not this login's business and stay.
+func TestStoreTokenRemovesThePlaintextCopyItSupersedes(t *testing.T) {
+	isolateHome(t)
+	host := RemoteHost(credsTestRemote)
+
+	if err := writeFileToken(host, "old-plaintext"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileToken("other.example.com", "someone-elses"); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := StoreToken(credsTestRemote, "new-token"); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if got := fileToken(host); got != "" {
+		t.Errorf("credentials file still holds %q for %s", got, host)
+	}
+	if got := fileToken("other.example.com"); got != "someone-elses" {
+		t.Errorf("other.example.com = %q, want someone-elses (an unrelated remote was dropped)", got)
+	}
+	assertResolves(t, "new-token", SourceKeyring)
+}
+
+// TestStoreTokenRemovesTheCredentialsFileOnceItIsEmpty: the same, for the last
+// remote in the file. An empty credentials.toml is litter that reads, to
+// anyone auditing the machine later, like a credential store still in use.
+func TestStoreTokenRemovesTheCredentialsFileOnceItIsEmpty(t *testing.T) {
+	isolateHome(t)
+
+	if err := writeFileToken(RemoteHost(credsTestRemote), "old-plaintext"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StoreToken(credsTestRemote, "new-token"); err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Errorf("credentials file survives with nothing in it (%v)", err)
+	}
+}
+
+// TestNoKeyringOptsOutEntirely: ARK_NO_KEYRING makes the file the deliberate
+// choice, so the keyring is neither read nor written — and because the user
+// asked for this, it happens without a warning.
+func TestNoKeyringOptsOutEntirely(t *testing.T) {
+	isolateHome(t)
+	fake := testKeyring(t)
+	host := RemoteHost(credsTestRemote)
+	if err := fake.Set(keychainService, host, "in-the-keyring"); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("ARK_NO_KEYRING", "1")
+	warnings := captureWarnings(t)
+
+	src, err := StoreToken(credsTestRemote, "stored-token")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if src != SourceFile {
+		t.Errorf("stored in %q, want %q", src, SourceFile)
+	}
+	if got := fake.entries[fake.key(keychainService, host)]; got != "in-the-keyring" {
+		t.Errorf("keyring entry changed to %q; ARK_NO_KEYRING must not write to it", got)
+	}
+	// The keyring holds a different token, so this also proves it was skipped.
+	assertResolves(t, "stored-token", SourceFile)
+	if got := warnings.String(); got != "" {
+		t.Errorf("warnings = %q, want none for a deliberate opt-out", got)
+	}
+}
+
+// TestTokenSourceDescriptions: `ark login` and `ark status` print these, so
+// each source has to name a place rather than leak a token or print a blank.
+func TestTokenSourceDescriptions(t *testing.T) {
+	isolateHome(t)
+	cases := []struct {
+		source TokenSource
+		want   string
+	}{
+		{SourceEnv, "ARK_TOKEN"},
+		{SourceKeyring, keyringName()},
+		{SourceFile, credentialsPath()},
+		{SourceNone, "nowhere"},
+	}
+	for _, tc := range cases {
+		if got := tc.source.Description(); got != tc.want {
+			t.Errorf("%q.Description() = %q, want %q", tc.source, got, tc.want)
+		}
 	}
 }
 

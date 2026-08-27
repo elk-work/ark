@@ -1185,11 +1185,37 @@ The client stores credentials outside the repository.
 
 Do not store tokens in `.ark/config.toml`.
 
-Use:
+Token resolution is ordered, and the order is fixed:
 
-- OS keychain where available
-- environment variable fallback
-- local credential file with restricted permissions only as a development fallback
+1. the `ARK_TOKEN` environment variable
+2. the OS keyring — macOS Keychain, Windows Credential Manager, or the
+   freedesktop Secret Service — keyed by the sync service's host, so one
+   login covers every repository pointing at that service
+3. a local credential file with restricted permissions, as a fallback only
+
+A token must never be passed to another process as a command-line argument.
+The process table is readable by every user on the machine.
+
+The keyring is not optional where the platform has one. If the keyring is
+unavailable — absent, locked, denied, or a platform without one — the client
+must say so on the standard error stream **before** it falls back to the
+file. Degrading to plaintext in silence is not permitted. A keyring that
+answers and simply holds no entry for the host is a miss, not a failure, and
+is not announced.
+
+The fallback file is restricted to the current user before any token is
+written into it: mode 0600 on Unix, a DACL granting only the current account
+on Windows. Once the keyring holds a host's token, the client removes that
+host's entry from the fallback file — the keyring outranks it, so the copy
+would be a secret on disk that nothing will ever read.
+
+`ARK_NO_KEYRING` skips the keyring entirely, for a machine where the file is
+the deliberate choice. Storage then goes straight to the file, without a
+warning, because the operator asked for it.
+
+Commands report which store answered. `ark login` names where it wrote the
+token; `ark status` names where the token resolved from. Neither prints the
+token itself (§21).
 
 The cloud service must identify:
 
