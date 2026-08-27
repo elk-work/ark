@@ -33,8 +33,19 @@ not a dotfile.
 - **Linux** — a Secret Service keyring via `secret-tool` (GNOME Keyring / KWallet), or
   `pass`. On a **secure single-user machine**, a `chmod 600` file kept out of any synced
   or backed-up directory is an acceptable local equivalent.
-- **Windows** — Windows Credential Manager (`cmdkey`), or the 1Password CLI's own
-  biometric-unlocked storage after `op signin`.
+- **Windows** — Windows Credential Manager, as a *generic credential*, or the 1Password
+  CLI's own biometric-unlocked storage after `op signin`. Reach the store through the
+  Credential Management API — `CredWriteW` to store, `CredReadW` to read — which
+  PowerShell calls directly through `Add-Type`: nothing to install, and no secret on a
+  command line. It is the store `ark login` writes the sync token to, as `ark:<host>`;
+  see [windows.md](windows.md).
+
+  **Not `cmdkey`.** It cannot read a password back at all — `/list` prints target and
+  user names, and [its reference](https://learn.microsoft.com/en-us/windows-server/administration/windows-commands/cmdkey)
+  says "Passwords are not displayed after they're stored" — so nothing can retrieve
+  what it stored, which is the entire point of putting a token there. Its
+  `/pass:<password>` form also puts the secret in the command line, and so in the
+  process table, where any user on the machine can read it.
 
 Humans can skip service-account tokens entirely: `op signin` with your personal 1Password
 account grants whatever vaults you're a member of, and `op run` then works the same way.
