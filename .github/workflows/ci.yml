@@ -21,3 +21,55 @@ jobs:
         run: go build ./...
       - name: test
         run: go test -race ./...
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      # Check out the way a Windows developer actually does. Git for Windows
+      # defaults to core.autocrlf=true; without pinning it here the job would
+      # inherit whatever the runner image happens to set, so a regression in
+      # .gitattributes — the whole point of this job — could pass unnoticed.
+      - name: check out newlines the way Git for Windows does
+        run: git config --global core.autocrlf true
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: line endings
+        shell: pwsh
+        run: |
+          # Pass the paths as arguments rather than piping them into
+          # `git check-attr --stdin`: PowerShell terminates piped lines with
+          # CRLF and prefixes a BOM, so every path would come back unmatched
+          # and the check would silently measure nothing.
+          $tracked = @(git ls-files)
+          $pinned = @(git check-attr eol -- $tracked | ForEach-Object {
+            if ($_ -match '^(.+): eol: lf$') { $Matches[1] }
+          })
+          if ($pinned.Count -eq 0) {
+            Write-Output '.gitattributes pins no file to LF; it is missing or broken.'
+            exit 1
+          }
+          $converted = @($pinned | Where-Object {
+            [System.IO.File]::ReadAllBytes((Join-Path $PWD $_)) -contains 13
+          })
+          if ($converted.Count -ne 0) {
+            Write-Output 'CRLF in files .gitattributes pins to LF:'
+            $converted | ForEach-Object { Write-Output "  $_" }
+            exit 1
+          }
+          Write-Output "$($pinned.Count) of $($tracked.Count) tracked files pinned to LF, all verified"
+      - name: gofmt
+        shell: pwsh
+        run: |
+          $files = @(gofmt -l .)
+          if ($files.Count -ne 0) {
+            $files | Write-Error
+            exit 1
+          }
+      - name: vet
+        run: go vet ./...
+      - name: build
+        run: go build ./...
+      - name: test
+        run: go test ./...

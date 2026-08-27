@@ -28,7 +28,13 @@ gofmt -l .         # must print nothing
 go vet ./...       # must pass
 ```
 
-Requirements: Go ≥ 1.26, `git` on PATH. No C toolchain needed.
+Requirements: Go ≥ 1.26.5, `git` on PATH. No C toolchain needed.
+
+On Windows, use PowerShell and a normal Git checkout. The repository's
+`.gitattributes` keeps Go sources and the embedded Ark skill on LF regardless
+of the developer's global `core.autocrlf` setting. The same commands above run
+unchanged in PowerShell. See [docs/windows.md](docs/windows.md) for the full
+Windows setup and local-server smoke test.
 
 Run a single test: `go test ./internal/store -run TestName -v`
 

@@ -1,0 +1,28 @@
+* text=auto
+.gitattributes text eol=lf
+
+# Go tooling and embedded text expect LF on every development platform.
+*.go text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
+*.md text eol=lf
+*.sql text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.json text eol=lf
+
+# Assets compiled into the binary by go:embed. Left to `text=auto` these are
+# converted on a core.autocrlf=true checkout, so the same commit would embed
+# different bytes depending on who built it.
+*.css text eol=lf
+*.tmpl text eol=lf
+
+# Extensionless files a converted checkout would break in place: GNU make and
+# Docker both treat a trailing CR as part of the line.
+Makefile text eol=lf
+Dockerfile text eol=lf
+LICENSE text eol=lf
+.gitignore text eol=lf

@@ -228,7 +228,10 @@ carrying a one-hour expiry.
 
 1. `ARK_TOKEN` in the environment
 2. the macOS keychain, service `ark`, account = the remote's host
-3. `~/.ark/credentials.toml`, mode 0600, keyed by remote host
+3. the user credential file, keyed by remote host:
+   - macOS/Linux: `~/.ark/credentials.toml`, mode 0600
+   - Windows: `%USERPROFILE%\.ark\credentials.toml`, protected by a
+     current-user-only ACL
 
 Tokens are never written into the repository — not into `.ark/config.toml`,
 not anywhere under `.ark/`. `ark login` writes to the keychain on macOS
@@ -386,6 +389,12 @@ the value out of shell history:
 
 ```sh
 <your secret store: read the token> | ark login
+```
+
+PowerShell can read a token from a file without putting it in command history:
+
+```powershell
+Get-Content -Raw path\to\ark-token.txt | ark login
 ```
 
 For CI and agents, skip `ark login` and set `ARK_TOKEN` in the
