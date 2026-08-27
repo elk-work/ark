@@ -1285,6 +1285,15 @@ CLI exit codes:
 7 partial success requiring repair
 ```
 
+Exit code 2 covers **every** way the command line can be wrong, not only the
+checks Ark performs itself: an unknown command or subcommand, an unknown flag,
+a missing required flag, a bad flag value, and the wrong number of arguments.
+The caller cannot see which layer rejected the input, so the layers must not
+disagree — `unknown flag` and `invalid status` are one class of mistake from
+outside. A command group invoked with an unrecognised subcommand is an error,
+never a help screen with a success code; invoked bare, it prints help and
+succeeds.
+
 ---
 
 ## 23. Testing

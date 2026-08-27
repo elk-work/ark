@@ -5,8 +5,11 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/elk-work/ark/internal/app"
 	"github.com/elk-work/ark/internal/output"
@@ -102,7 +105,73 @@ live in .ark/ next to .git/ and sync to a shared service when configured.`,
 		newElkCmd(g),
 		newSkillCmd(g),
 	)
+	// Do this last, so it covers every command just added.
+	reportInputErrors(root)
 	return root
+}
+
+// reportInputErrors makes Cobra's own parse failures obey the exit-code
+// contract (spec §22: 2 for invalid input).
+//
+// Cobra reports a missing required flag, an unknown flag, a bad flag value and
+// a wrong argument count as a plain error, which records.ExitCode can only
+// score as 1 — a general failure. From outside, "unknown flag" and "invalid
+// status" are the same class of mistake, and --json plus the exit codes are
+// the interface agents script against, so the two have to agree.
+func reportInputErrors(root *cobra.Command) {
+	root.SetFlagErrorFunc(func(_ *cobra.Command, err error) error {
+		return records.Validationf("%v", err)
+	})
+
+	// Cobra validates required flags itself, but only after PersistentPreRunE
+	// and as a plain error, so get there first. If Cobra ever renames the
+	// annotation this check silently matches nothing and Cobra's own runs
+	// instead, dropping the exit code back to 1 — which is exactly what
+	// TestInputErrorsExitTwo asserts against.
+	root.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		var missing []string
+		cmd.Flags().VisitAll(func(f *pflag.Flag) {
+			req := f.Annotations[cobra.BashCompOneRequiredFlag]
+			if len(req) > 0 && req[0] == "true" && !f.Changed {
+				missing = append(missing, strconv.Quote(f.Name))
+			}
+		})
+		if len(missing) > 0 {
+			return records.Validationf("required flag(s) %s not set", strings.Join(missing, ", "))
+		}
+		return nil
+	}
+
+	markInputErrors(root)
+}
+
+func markInputErrors(cmd *cobra.Command) {
+	if cmd.Run == nil && cmd.RunE == nil && cmd.HasSubCommands() {
+		// A command group is not Runnable, and Cobra returns "print the help"
+		// for a non-runnable command BEFORE it ever validates arguments — so
+		// `ark task lst` printed help and exited 0, reporting success for work
+		// it did not do. Give the group a Run so the unknown subcommand is
+		// reached at all, and non-nil Args so Find stops short-circuiting into
+		// its own unknown-command error on the way past.
+		cmd.Args = cobra.ArbitraryArgs
+		cmd.RunE = func(c *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return records.Validationf("unknown command %q for %q", args[0], c.CommandPath())
+			}
+			return c.Help()
+		}
+	}
+	if inner := cmd.Args; inner != nil {
+		cmd.Args = func(c *cobra.Command, args []string) error {
+			if err := inner(c, args); err != nil {
+				return records.Validationf("%v", err)
+			}
+			return nil
+		}
+	}
+	for _, sub := range cmd.Commands() {
+		markInputErrors(sub)
+	}
 }
 
 // Execute runs the CLI and maps errors to the exit-code contract.
