@@ -79,9 +79,17 @@ ark status
 
 `ark login` accepts one token line on standard input. It stores a credential
 once per sync-service host, not once per project, so that login covers every
-Ark project using the same service. On Windows the fallback credential file is
-`%USERPROFILE%\.ark\credentials.toml`, protected by a current-user-only ACL;
-tokens are never stored inside the project. For CI and coding agents, set
+Ark project using the same service.
+
+On Windows the token goes to **Credential Manager**, as the generic credential
+`ark:<host>` — you can see it under *Control Panel → Credential Manager →
+Windows Credentials*. If Credential Manager is unavailable, `ark login` says so
+on stderr and falls back to `%USERPROFILE%\.ark\credentials.toml`, protected by
+a current-user-only ACL. It never falls back silently, and `ark status` reports
+which store the token came from. Set `ARK_NO_KEYRING=1` to choose the file
+deliberately.
+
+Tokens are never stored inside the project. For CI and coding agents, set
 `ARK_TOKEN` in the process environment instead:
 
 ```powershell

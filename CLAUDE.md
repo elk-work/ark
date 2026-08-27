@@ -54,8 +54,11 @@ retry, so they must be idempotent and reset their accumulators. The client
 blobs via signed URLs, then pulls records after its cursor and upserts them
 (internal/store/sync.go) with deferred FK checks. Server-assigned display
 numbers can be rewritten on collision — the ULID is authoritative, so local
-numbers are indexed but not unique. Tokens resolve ARK_TOKEN → macOS
-keychain → ~/.ark/credentials.toml and never live in the repository.
+numbers are indexed but not unique. Tokens resolve ARK_TOKEN → OS keyring
+(macOS Keychain, Windows Credential Manager, Secret Service, via
+zalando/go-keyring — pure Go) → ~/.ark/credentials.toml, never live in the
+repository, and never reach another process's argv. A keyring that fails
+warns on stderr before the fallback; see spec §20.
 
 ## This repository is not itself managed by Ark
 

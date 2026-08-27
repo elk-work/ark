@@ -31,7 +31,7 @@ See [docs/v1-spec.md](docs/v1-spec.md) for the full specification and
 
 ```sh
 ark remote set https://ark.example.com   # per repository
-ark login                                # token -> keychain or user credentials file
+ark login                                # token -> OS keyring, else credentials file
 ark sync                                 # push mutations, upload blobs, pull records
 ```
 

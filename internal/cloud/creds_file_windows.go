@@ -2,6 +2,10 @@ package cloud
 
 import "golang.org/x/sys/windows"
 
+// credentialFileProtection names, for a warning message, what stands between
+// the fallback file and everyone else on this machine.
+const credentialFileProtection = "an ACL granting only your Windows account"
+
 // restrictCredentialFile gives only the current Windows user access to the
 // credential file. os.FileMode permission bits do not configure Windows ACLs.
 func restrictCredentialFile(path string) error {

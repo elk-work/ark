@@ -3,6 +3,7 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
+	"github.com/elk-work/ark/internal/cloud"
 	"github.com/elk-work/ark/internal/records"
 )
 
@@ -18,6 +19,12 @@ type statusReport struct {
 	PendingMutations int64  `json:"pending_mutations"`
 	Conflicts        int64  `json:"unresolved_conflicts"`
 	Remote           string `json:"remote,omitempty"`
+	// TokenSource is which store answered for the sync token — env, keyring,
+	// file, or none — and is set only when a remote is configured. `ark login`
+	// says where it wrote the token; resolution deserves to be as legible,
+	// because reading one out of a plaintext file is a different state from
+	// reading one out of the keychain. Never the token itself.
+	TokenSource string `json:"token_source,omitempty"`
 }
 
 func newStatusCmd(g *globals) *cobra.Command {
@@ -42,6 +49,18 @@ func newStatusCmd(g *globals) *cobra.Command {
 			}
 			rep.Branch, _ = a.Git.CurrentBranch(ctx)
 			rep.Head, _ = a.Git.Head(ctx)
+
+			// Resolving here can warn on stderr that the keyring is locked or
+			// absent, which is exactly where someone would want to hear it. A
+			// missing credential is not a status failure — it is a state to
+			// report — so the error is deliberately dropped for the source.
+			tokenAt := cloud.SourceNone
+			if rep.Remote != "" {
+				if cred, err := cloud.ResolveCredential(rep.Remote); err == nil {
+					tokenAt = cred.Source
+				}
+				rep.TokenSource = string(tokenAt)
+			}
 
 			count := func(query string, dest *int64, args ...any) error {
 				if err := a.DB.QueryRowContext(ctx, query, args...).Scan(dest); err != nil {
@@ -75,6 +94,14 @@ func newStatusCmd(g *globals) *cobra.Command {
 					p.Line("sync        no remote configured; %d local mutations recorded", rep.PendingMutations)
 				} else {
 					p.Line("sync        %s (%d pending mutations)", rep.Remote, rep.PendingMutations)
+					switch tokenAt {
+					case cloud.SourceNone:
+						p.Line("token       none — run `ark login`")
+					case cloud.SourceFile:
+						p.Line("token       %s (plaintext fallback)", tokenAt.Description())
+					default:
+						p.Line("token       %s", tokenAt.Description())
+					}
 				}
 				if rep.Conflicts > 0 {
 					p.Line("conflicts   %d unresolved (see `ark conflict list`)", rep.Conflicts)

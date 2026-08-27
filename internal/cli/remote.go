@@ -83,11 +83,15 @@ means one ` + "`ark login`" + `, not one per repository.
 Run it anywhere with --remote, or inside a repository to use that
 repository's configured remote.
 
-The token goes to the macOS keychain when available, otherwise to a
-per-user credentials file: ~/.ark/credentials.toml (mode 0600), or
-%USERPROFILE%\.ark\credentials.toml with a current-user-only ACL on Windows.
-Tokens are never written inside the repository. Pass --token, or pipe the
-token on stdin.`,
+The token goes to this machine's OS keyring: the macOS keychain, Windows
+Credential Manager, or the Secret Service. If the keyring is unavailable Ark
+says so on stderr and falls back to a per-user credentials file —
+~/.ark/credentials.toml (mode 0600), or %USERPROFILE%\.ark\credentials.toml
+with a current-user-only ACL on Windows. Set ARK_NO_KEYRING=1 to choose that
+file deliberately and skip the keyring.
+
+Tokens are never written inside the repository, and never passed to another
+process as a command-line argument. Pass --token, or pipe the token on stdin.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			remote := strings.TrimRight(remoteFlag, "/")
@@ -131,13 +135,21 @@ token on stdin.`,
 				}
 			}
 
-			where, err := cloud.StoreToken(remote, token)
+			src, err := cloud.StoreToken(remote, token)
 			if err != nil {
 				return err
 			}
 			host := cloud.RemoteHost(remote)
+			where := src.Description()
 			p := g.printer(cmd)
-			return p.Result(map[string]string{"stored_in": where, "remote": remote, "host": host}, func() {
+			// storage is the machine-readable half of stored_in: agents branch
+			// on "keyring" vs "file", humans read the keychain's name or a path.
+			return p.Result(map[string]string{
+				"stored_in": where,
+				"storage":   string(src),
+				"remote":    remote,
+				"host":      host,
+			}, func() {
 				p.Line("Token stored in %s for %s", where, host)
 				p.Line("Covers every repository on this machine whose remote is %s.", host)
 			})
