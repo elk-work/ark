@@ -584,7 +584,14 @@ mutations
 sync_state
 conflicts
 actors
+deferred_records
 ```
+
+`deferred_records` holds pulled records whose referents have not arrived
+(§9.2). It is the one table with no foreign key of its own, deliberately: the
+reference it records as unresolvable can be the repository, and a ledger of
+unresolvable references that cannot be written when one does not resolve would
+reintroduce the failure it exists to prevent.
 
 Indexes should cover:
 
@@ -808,9 +815,13 @@ how often — is worth knowing.
 those render as orphans and nothing worse. Every other reference is a
 declared foreign key on the client, checked when the pull transaction commits
 (`PRAGMA defer_foreign_keys` defers that check; it does not remove it), so a
-client that pulls such a record without the record it names fails the entire
-pull — not that record, the pull — and its cursor does not advance, so the
-next pull fetches the same batch and fails again (elk-work/ark#75).
+client cannot store such a record the way the service does. Until
+elk-work/ark#75 it did not try to do anything else either: pulling one failed
+the entire pull — not that record, the pull — and left the cursor where it
+was, so the next pull fetched the same batch and failed again. A client now
+holds the record back and applies the rest of the batch (§9.2). That ends the
+wedge, not the defect: the record stays invisible on every client until the
+record it names arrives.
 
 Two things this deliberately is not. It is not **quarantine** — holding the
 child back until its referent lands and releasing it on pull — which is the
@@ -843,6 +854,68 @@ Response:
 ```
 
 The client applies pulled records inside one SQLite transaction.
+
+### Referential integrity
+
+This is the client half of the policy in §9.1, and the two are opposite by
+design: the service records a reference it cannot resolve and stores the
+record anyway, while the client sets the record aside and applies everything
+else. Neither side refuses the write, because on neither side is the record
+wrong — it is early.
+
+Every typed pointer between records is a declared foreign key —
+`reviews.pull_request_id`, `thread_messages.thread_id`, `agent_runs.task_id`,
+`agent_runs.thread_id`, `agent_threads.task_id`, `pull_requests.task_id`,
+`promotions.pull_request_id`, and the `supersedes_id` of a comment or a thread
+message. `comment.parent_id` and `artifact.parent_id` are polymorphic and
+carry none. The pull transaction sets `PRAGMA defer_foreign_keys = ON`, which
+moves those checks to `COMMIT` and does not remove them, so the client cannot
+do what the service does and simply store the orphan: writing it fails the
+commit, which fails the whole batch, which leaves the cursor where it was —
+and the next pull then requests the same range, receives the same record, and
+fails identically. That is a client permanently unable to sync with a
+repository over a record living on the service that nothing local can remove
+(elk-work/ark#75).
+
+**The client holds such a record back instead.** This is the judgment §9.2
+already makes about a record type the client does not know: a pull that cannot
+represent one record must still apply the others and still advance, because
+the alternative is not a partial sync but no sync at all.
+
+- **The batch applies and the cursor advances.** Only the record whose
+  reference did not resolve is set aside.
+- **It is retried within the same batch, to a fixpoint.** Revision order is
+  not dependency order — a parent can arrive after its own child in one
+  response — so a single pass would hold back a child whose parent came with
+  it. A record inserted earlier in the same transaction counts as present.
+- **It is kept, not dropped.** The held record is stored with the reference
+  that failed, and retried on every later pull, so it lands by itself once its
+  referent arrives; no operator action ends this state. Keeping it is not
+  optional: the cursor has moved past its revision, so the service will never
+  send it again, and dropping it would trade a wedged client for one that
+  quietly loses a record both sides hold.
+- **It is reported separately from an unknown record type.** The two are
+  opposite conditions with opposite answers — an unknown type means this build
+  is older than its service and the answer is to upgrade; a missing referent
+  means a record has not arrived and the answer is to wait — so a client must
+  not report them as one count.
+- **It is not a rejection and not a conflict.** Nothing has diverged: both
+  sides hold the same record and one of them has not been delivered yet. It
+  does not change the exit code of a sync (§22).
+
+The set self-clears, like the service's ledger and unlike a history reset: a
+held record is applied and forgotten on the first pull after its referent
+lands, and a held record whose tombstone arrives is forgotten too. So a
+non-empty set is always a current statement about what this checkout cannot
+yet see, which is why it needs no `resolved_at` — the record and its referent
+are one lookup apart, and the comparison is true whenever it is made.
+
+**The check reads its references from the schema**, not from a list of them
+kept beside it. A written list is a second copy of the schema, and the way a
+second copy fails is that a migration adds a foreign key to the first and
+nobody adds it to the second — at which point that reference goes unchecked,
+the record is written, and the commit fails exactly as it did before, with the
+check that was meant to prevent it appearing to have passed.
 
 ### The cursor is a high-water mark
 

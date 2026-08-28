@@ -316,19 +316,186 @@ func tableForType(recordType string) (string, bool) {
 	return "", false
 }
 
+// pulledTable maps a record type a pull can carry to the table it lands in.
+// It is tableForType plus actors: actors travel in a pull like records but
+// are not records — no mutation log, no tombstone, no sync_state — so
+// tableForType, which serves those paths, does not know them, while the
+// referential-integrity check below has to.
+//
+// A pulled table missing from here is a table whose references go unchecked,
+// which is the exact silence that check exists to end;
+// TestEveryForeignKeyOnAPulledTableIsChecked fails when one appears.
+func pulledTable(recordType string) (string, bool) {
+	if recordType == "actor" {
+		return "actors", true
+	}
+	return tableForType(recordType)
+}
+
+// foreignKey is one reference a table declares: the column carrying the id,
+// the table it points into, and the column there.
+type foreignKey struct {
+	Column string
+	Table  string
+	Target string
+}
+
+// refCheck carries what one pull has already established about references:
+// the foreign keys each table declares, and the referents already found.
+//
+// Only presence is remembered, never absence. A pull inserts records as it
+// goes, so a referent missing a moment ago can be present now — that is
+// exactly how a parent later in the batch rescues its child — while one
+// already found cannot go missing, because nothing in a pull deletes a row.
+type refCheck struct {
+	keys  map[string][]foreignKey
+	found map[string]bool
+}
+
+func newRefCheck() *refCheck {
+	return &refCheck{keys: map[string][]foreignKey{}, found: map[string]bool{}}
+}
+
+// foreignKeysOf reads a table's declared references out of the schema itself,
+// memoized for the length of one pull.
+//
+// Reading them rather than listing them in Go is the whole point. A written
+// list of "the references a review carries" is a second copy of the schema,
+// and the failure mode of a second copy is that a migration adds a reference
+// to the first and nobody adds it to the second — at which point that record
+// goes unchecked, gets written, and fails the commit exactly as it did before
+// elk-work/ark#75, with the check that was supposed to prevent it looking
+// like it had passed. There is nothing here to keep in step: the check is
+// derived from the constraint it is protecting, so a migration that adds a
+// foreign key is enforced on the pull path the moment it ships.
+func foreignKeysOf(tx *sql.Tx, table string, check *refCheck) ([]foreignKey, error) {
+	if fks, ok := check.keys[table]; ok {
+		return fks, nil
+	}
+	// The table name comes from pulledTable, never from the server.
+	rows, err := tx.Query(fmt.Sprintf(`PRAGMA foreign_key_list(%s)`, table))
+	if err != nil {
+		return nil, records.DBErr("read foreign keys", err)
+	}
+	defer rows.Close()
+	fks := []foreignKey{}
+	for rows.Next() {
+		var id, seq int
+		var refTable, from string
+		var to sql.NullString
+		var onUpdate, onDelete, match string
+		if err := rows.Scan(&id, &seq, &refTable, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			return nil, records.DBErr("scan foreign key", err)
+		}
+		target := to.String
+		if target == "" {
+			target = "id" // an omitted target means the referenced primary key
+		}
+		fks = append(fks, foreignKey{Column: from, Table: refTable, Target: target})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, records.DBErr("read foreign keys", err)
+	}
+	check.keys[table] = fks
+	return fks, nil
+}
+
+// refMiss names a reference a pulled record carries that this client cannot
+// resolve: the column that referred, the table it pointed into, and the id.
+type refMiss struct {
+	Field string
+	Table string
+	ID    string
+}
+
+// missingReference reports the first reference in a pulled record that this
+// client cannot resolve, or nil when every one of them is present.
+//
+// The lookups run inside the pull transaction, so a record inserted earlier
+// in the same batch already counts as present — which is what lets a parent
+// and its child arrive together and both apply.
+//
+// A pulled document names its references by column name (`pull_request_id`,
+// `task_id`, …), which is what makes one check serve every record type;
+// TestPulledDocumentsNameTheirReferencesByColumn holds the structs to it.
+func missingReference(tx *sql.Tx, table string, data json.RawMessage, check *refCheck) (*refMiss, error) {
+	fks, err := foreignKeysOf(tx, table, check)
+	if err != nil {
+		return nil, err
+	}
+	if len(fks) == 0 {
+		return nil, nil
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		// A payload that will not decode is upsertServerRecord's error to
+		// report, in its own words. Saying nothing here leaves that intact.
+		return nil, nil
+	}
+	for _, fk := range fks {
+		id, _ := doc[fk.Column].(string)
+		if id == "" {
+			continue // a null reference is not a reference
+		}
+		key := fk.Table + "\x00" + id
+		if check.found[key] {
+			continue
+		}
+		var one int
+		err := tx.QueryRow(fmt.Sprintf(
+			`SELECT 1 FROM %s WHERE %s = ?`, fk.Table, fk.Target), id).Scan(&one)
+		if err == sql.ErrNoRows {
+			return &refMiss{Field: fk.Column, Table: fk.Table, ID: id}, nil
+		}
+		if err != nil {
+			return nil, records.DBErr("check reference", err)
+		}
+		check.found[key] = true
+	}
+	return nil, nil
+}
+
 // PullSkips counts pulled records this client could not represent, by record
 // type. A non-empty map means the server holds record types this build does
 // not know — normal during a version skew, and worth showing the operator
 // rather than dropping in silence.
+//
+// It deliberately does not count records held back for a referent that has
+// not arrived. The two look alike and mean opposite things: an unknown type
+// is a client older than its service and the answer is to upgrade, while a
+// missing referent is a record still in flight and the answer is to wait —
+// and the line `ark sync` prints for this map says "this build does not know
+// that type", which would be a false diagnosis for the second. A held record
+// is also the durable kind of fact, like a rejection rather than like a
+// version skew, so it is kept in a table and read back with DeferredRecords.
 type PullSkips map[string]int
 
 // ApplyPull applies a pull response — records, tombstones, and the new
 // cursor — in one transaction (docs/v1-spec.md §9.2).
 //
-// Records of an unknown type are skipped, not rejected: a client must
-// tolerate a server that knows more record types than it does, or a single
-// unrecognized record would wedge every future pull. The skips are returned
-// so the caller can report them.
+// Two kinds of record are set aside rather than applied, for one reason: a
+// client that fails a whole pull over a single record it cannot write stops
+// syncing altogether, because the cursor does not advance and the next pull
+// fetches the same batch.
+//
+//   - Records of an unknown type are skipped, not rejected: a client must
+//     tolerate a server that knows more record types than it does, or a
+//     single unrecognized record would wedge every future pull. The skips
+//     are returned so the caller can report them.
+//   - Records naming a referent this client does not hold are held back.
+//     Every typed pointer between records is a declared foreign key, and
+//     `PRAGMA defer_foreign_keys` moves that check to COMMIT rather than
+//     removing it, so applying one used to fail the entire transaction —
+//     discarding every good record in the batch and leaving the cursor
+//     where it was, permanently, since the offending record lives on the
+//     service and nothing local can remove it (elk-work/ark#75).
+//
+// A held record is retried within this same batch, to a fixpoint, and stored
+// and retried on every later pull. Both halves are load-bearing: revision
+// order is not dependency order, so a parent can arrive after its own child
+// in one response; and the cursor moves past the held record's revision, so
+// the service will never send it again and a client that kept no copy would
+// trade a wedge for the quiet loss of a record both sides hold.
 func (s *Store) ApplyPull(ctx context.Context, resp *api.PullResponse) (PullSkips, error) {
 	skips := PullSkips{}
 	err := db.InTx(ctx, s.DB, func(tx *sql.Tx) error {
@@ -336,28 +503,93 @@ func (s *Store) ApplyPull(ctx context.Context, resp *api.PullResponse) (PullSkip
 		clear(skips)
 		// Revision order is not dependency order (an updated PR can outrank
 		// its reviews), so FK checks wait for the end of the transaction.
+		// They are the backstop now rather than the only line: an unresolvable
+		// reference is caught before its insert, where it can still be
+		// attributed to the one record that carries it.
 		if _, err := tx.Exec(`PRAGMA defer_foreign_keys = ON`); err != nil {
 			return records.DBErr("defer foreign keys", err)
 		}
+		// Records held by earlier pulls ride along with this batch: the
+		// referent one of them waits for may be arriving in it, and no later
+		// response will carry the held record itself.
+		carried, carriedKeys, err := s.deferredForRetry(tx)
+		if err != nil {
+			return err
+		}
+		pending := make([]api.Record, 0, len(resp.Records)+len(carried))
+		pending = append(pending, resp.Records...)
+		inBatch := make(map[string]bool, len(resp.Records))
 		for _, rec := range resp.Records {
-			handled, err := upsertServerRecord(tx, rec)
-			if err != nil {
-				return err
+			inBatch[recordKey(rec.RecordType, rec.RecordID)] = true
+		}
+		for _, rec := range carried {
+			// The service re-sending a held record supersedes our copy of it.
+			if !inBatch[recordKey(rec.RecordType, rec.RecordID)] {
+				pending = append(pending, rec)
 			}
-			if !handled {
-				skips[rec.RecordType]++
-				continue
+		}
+
+		check := newRefCheck()
+		misses := map[string]refMiss{}
+		// Each pass applies what it can and holds the rest, so a pass that
+		// applies a parent lets the next one apply its child. It ends when a
+		// pass applies nothing, which bounds it by the depth of the deepest
+		// reference chain in the batch (task → pull request → review).
+		for {
+			progress := false
+			var held []api.Record
+			for _, rec := range pending {
+				key := recordKey(rec.RecordType, rec.RecordID)
+				if table, known := pulledTable(rec.RecordType); known {
+					miss, err := missingReference(tx, table, rec.Data, check)
+					if err != nil {
+						return err
+					}
+					if miss != nil {
+						misses[key] = *miss
+						held = append(held, rec)
+						continue
+					}
+				}
+				handled, err := upsertServerRecord(tx, rec)
+				if err != nil {
+					return err
+				}
+				if !handled {
+					skips[rec.RecordType]++
+					continue
+				}
+				progress = true
+				if carriedKeys[key] {
+					if err := clearDeferred(tx, rec.RecordType, rec.RecordID); err != nil {
+						return err
+					}
+				}
+				// The server's copy of this record has just landed locally, so
+				// the two agree again and any rejection standing against it is
+				// spent. Note that this is how a divergence ends in the direction
+				// the server wins: the local change stays rejected history, and
+				// the record now reads as the server has it.
+				if err := resolveRejections(tx, rec.RecordType, rec.RecordID); err != nil {
+					return err
+				}
 			}
-			// The server's copy of this record has just landed locally, so
-			// the two agree again and any rejection standing against it is
-			// spent. Note that this is how a divergence ends in the direction
-			// the server wins: the local change stays rejected history, and
-			// the record now reads as the server has it.
-			if err := resolveRejections(tx, rec.RecordType, rec.RecordID); err != nil {
+			pending = held
+			if !progress || len(pending) == 0 {
+				break
+			}
+		}
+		for _, rec := range pending {
+			if err := s.holdDeferred(tx, rec, misses[recordKey(rec.RecordType, rec.RecordID)]); err != nil {
 				return err
 			}
 		}
 		for _, tomb := range resp.Tombstones {
+			// A held record the server says is deleted is one nothing is
+			// waiting for any more, whether or not this client ever wrote it.
+			if err := clearDeferred(tx, tomb.RecordType, tomb.RecordID); err != nil {
+				return err
+			}
 			table, ok := tableForType(tomb.RecordType)
 			if !ok {
 				continue
@@ -395,6 +627,133 @@ func (s *Store) ApplyPull(ctx context.Context, resp *api.PullResponse) (PullSkip
 		return nil, nil
 	}
 	return skips, nil
+}
+
+// DeferredRecord is one pulled record this client is holding rather than
+// applying, because a record it points at has not arrived.
+type DeferredRecord struct {
+	RecordType     string `json:"record_type"`
+	RecordID       string `json:"record_id"`
+	ServerRevision int64  `json:"server_revision"`
+	// Field, MissingTable and MissingID are the reference that did not
+	// resolve, so a reader is told which record is missing rather than only
+	// that one is.
+	Field        string `json:"field"`
+	MissingTable string `json:"missing_table"`
+	MissingID    string `json:"missing_id"`
+	FirstSeenAt  string `json:"first_seen_at"`
+	LastSeenAt   string `json:"last_seen_at"`
+}
+
+// DeferredRecords returns the records this client is holding until the
+// records they name arrive, oldest revision first.
+//
+// It is the pull-side counterpart of UnresolvedRejections, and durable for
+// the same reason: a count reported once at the end of a sync is a fact the
+// next command cannot see, and this is exactly the fact a client needs in
+// order not to describe itself as holding everything the service holds.
+//
+// Unlike a rejection it needs no resolved_at. A held record and its referent
+// are one lookup apart, so the set is a comparison the client can always make
+// afresh: the row is deleted the moment the record applies, which happens on
+// the first pull after its referent lands.
+func (s *Store) DeferredRecords(ctx context.Context) ([]DeferredRecord, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT record_type, record_id, server_revision,
+		field, missing_table, missing_id, first_seen_at, last_seen_at
+		FROM deferred_records WHERE repository_id = ? ORDER BY server_revision`, s.RepoID)
+	if err != nil {
+		return nil, records.DBErr("load deferred records", err)
+	}
+	defer rows.Close()
+	var out []DeferredRecord
+	for rows.Next() {
+		var d DeferredRecord
+		if err := rows.Scan(&d.RecordType, &d.RecordID, &d.ServerRevision, &d.Field,
+			&d.MissingTable, &d.MissingID, &d.FirstSeenAt, &d.LastSeenAt); err != nil {
+			return nil, records.DBErr("scan deferred record", err)
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// DeferredRecordCount counts records held for a referent that has not
+// arrived, for callers that only need to know whether there are any.
+func (s *Store) DeferredRecordCount(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM deferred_records
+		WHERE repository_id = ?`, s.RepoID).Scan(&n)
+	if err != nil {
+		return 0, records.DBErr("count deferred records", err)
+	}
+	return n, nil
+}
+
+// recordKey identifies a record across a pull. Record ids are ULIDs and
+// unique on their own, but the pair is what the ledger is keyed by.
+func recordKey(recordType, recordID string) string {
+	return recordType + "\x00" + recordID
+}
+
+// deferredForRetry loads the held records so this pull can try them again,
+// in the order the service minted them.
+func (s *Store) deferredForRetry(tx *sql.Tx) ([]api.Record, map[string]bool, error) {
+	rows, err := tx.Query(`SELECT record_type, record_id, data_json, server_revision
+		FROM deferred_records WHERE repository_id = ? ORDER BY server_revision`, s.RepoID)
+	if err != nil {
+		return nil, nil, records.DBErr("load deferred records", err)
+	}
+	defer rows.Close()
+	var out []api.Record
+	keys := map[string]bool{}
+	for rows.Next() {
+		var rec api.Record
+		var data string
+		if err := rows.Scan(&rec.RecordType, &rec.RecordID, &data, &rec.ServerRevision); err != nil {
+			return nil, nil, records.DBErr("scan deferred record", err)
+		}
+		rec.Data = json.RawMessage(data)
+		out = append(out, rec)
+		keys[recordKey(rec.RecordType, rec.RecordID)] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, records.DBErr("load deferred records", err)
+	}
+	return out, keys, nil
+}
+
+// holdDeferred stores a record whose referent has not arrived, with the
+// reference that did not resolve.
+//
+// first_seen_at is not overwritten on a repeat, the way history_reset_at is
+// not: how long a record has been waiting is the fact worth having, and a
+// timestamp walked forward by every pull would only ever say "recently".
+func (s *Store) holdDeferred(tx *sql.Tx, rec api.Record, miss refMiss) error {
+	now := records.Now()
+	_, err := tx.Exec(`INSERT INTO deferred_records
+		(record_type, record_id, repository_id, data_json, server_revision,
+		 field, missing_table, missing_id, first_seen_at, last_seen_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (record_type, record_id) DO UPDATE SET
+			data_json = excluded.data_json, server_revision = excluded.server_revision,
+			field = excluded.field, missing_table = excluded.missing_table,
+			missing_id = excluded.missing_id, last_seen_at = excluded.last_seen_at`,
+		rec.RecordType, rec.RecordID, s.RepoID, string(rec.Data), rec.ServerRevision,
+		miss.Field, miss.Table, miss.ID, now, now)
+	if err != nil {
+		return records.DBErr("hold deferred record", err)
+	}
+	return nil
+}
+
+// clearDeferred forgets a held record, because it has applied or because the
+// server says it is deleted.
+func clearDeferred(tx *sql.Tx, recordType, recordID string) error {
+	if _, err := tx.Exec(`DELETE FROM deferred_records
+		WHERE record_type = ? AND record_id = ?`, recordType, recordID); err != nil {
+		return records.DBErr("clear deferred record", err)
+	}
+	return nil
 }
 
 // ApplyServerRecord upserts one authoritative record (e.g. the response of
