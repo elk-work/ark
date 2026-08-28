@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 
@@ -95,18 +96,39 @@ func Open(ctx context.Context, dir string, opts Options) (*Context, error) {
 // resolveActor picks the acting identity: an explicit actor ID, a named
 // agent (created on first use, delegated by the default human), or the
 // repository's default actor.
+//
+// A named agent's identity is per (agent name, delegating human) — see
+// store.FindAgentActor — so which human this invocation delegates from is
+// what decides which actor it writes as, and no longer a detail that only
+// matters the first time a name is used. Two settings supply it.
 func resolveActor(ctx context.Context, d *sql.DB, cfg *config.Config, opts Options) (*store.Actor, error) {
 	if opts.ActorID != "" {
 		return store.GetActor(ctx, d, opts.ActorID)
 	}
 	if opts.AgentName != "" {
-		delegatedBy := opts.DelegatedBy
+		delegatedBy, source := opts.DelegatedBy, "ARK_DELEGATED_BY"
 		if delegatedBy == "" {
-			delegatedBy = cfg.DefaultActorID
+			delegatedBy, source = cfg.DefaultActorID, "default_actor_id in .ark/config.toml"
 		}
-		return store.FindAgentActor(ctx, d, opts.AgentName, opts.AgentVersion, delegatedBy)
+		actor, err := store.FindAgentActor(ctx, d, opts.AgentName, opts.AgentVersion, delegatedBy)
+		if err != nil {
+			return nil, delegationSource(err, source)
+		}
+		return actor, nil
 	}
 	return store.GetActor(ctx, d, cfg.DefaultActorID)
+}
+
+// delegationSource names the setting that supplied a delegation the store
+// refused. The store validates the value; only this layer knows where it came
+// from, and which of the two knobs to turn is the whole of what the reader
+// needs. Anything that is not a rejected delegation passes through untouched.
+func delegationSource(err error, source string) error {
+	var e *records.Error
+	if errors.As(err, &e) && e.Kind == records.KindValidation {
+		return records.Validationf("%s (from %s)", e.Message, source)
+	}
+	return err
 }
 
 // InitResult reports what `ark init` created.

@@ -385,8 +385,11 @@ func TestAgentActorIdentity(t *testing.T) {
 	if a1.Type != records.ActorAgent || a1.DelegatedBy != s.Actor.ID {
 		t.Errorf("agent actor: %+v", a1)
 	}
-	// Same name returns the same identity.
-	a2, _ := FindAgentActor(ctx, s.DB, "claude-code", "", "")
+	// Same name under the same human returns the same identity.
+	a2, err := FindAgentActor(ctx, s.DB, "claude-code", "", s.Actor.ID)
+	if err != nil {
+		t.Fatalf("find agent again: %v", err)
+	}
 	if a2.ID != a1.ID {
 		t.Errorf("agent identity not stable: %s vs %s", a1.ID, a2.ID)
 	}
