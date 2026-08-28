@@ -45,6 +45,10 @@ func TestExitCodes(t *testing.T) {
 		KindPartial:    7,
 		KindGit:        1,
 		KindDatabase:   1,
+		// 8 is the service's stored copy of this repository being unusable: a
+		// 5xx that is permanent, kept off 6 because 6 is the code a retry loop
+		// keys on (elk-work/ark#65).
+		KindRemoteCorrupt: 8,
 	}
 	for kind, want := range cases {
 		if got := kind.ExitCode(); got != want {

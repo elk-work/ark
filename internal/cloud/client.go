@@ -111,6 +111,17 @@ func statusError(status int, e api.Error) error {
 	if msg == "" {
 		msg = http.StatusText(status)
 	}
+	// The service's code outranks its status for the one condition the status
+	// cannot express. A 500 normally means "the service is having a moment",
+	// which is what offline (exit 6) tells a caller: wait and try again. A
+	// repository whose stored database will not open is a 500 that is going to
+	// keep being a 500 until a person restores it, and a scripted caller
+	// treating exit 6 as retryable retries forever (elk-work/ark#65). Exit 8
+	// says so instead; the two must not share a code, because 6 is the one
+	// retry loops key on.
+	if e.Code == api.ErrorCodeRepositoryCorrupt {
+		return records.RemoteCorruptf("%s", msg)
+	}
 	switch status {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		// The server's own wording is "invalid or missing token", which cannot

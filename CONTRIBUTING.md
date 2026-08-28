@@ -53,7 +53,8 @@ Typical shape of a new command:
    `internal/output`.
 3. Typed errors from `internal/records` so exit codes stay correct
    (0 ok, 1 general, 2 invalid input, 3 not found, 4 conflict, 5 permission,
-   6 offline, 7 partial).
+   6 offline, 7 partial, 8 the service's stored copy of this repository is
+   unusable).
 4. Tests beside the code you touched.
 
 Adding a migration: drop `000N_name.sql` in `migrations/` (embedded

@@ -566,11 +566,15 @@ func recordMerge(ctx context.Context, a *app.Context, cloudClient *cloud.Client,
 		} else if records.ExitCode(err) == 3 {
 			// Server has never seen this PR (created offline and push was
 			// skipped); the local mark queues it for the next sync.
-		} else if records.ExitCode(err) != 6 {
+		} else if code := records.ExitCode(err); code != 6 && code != 8 {
 			return err // e.g. merged by someone else: surface the conflict
 		}
 		// Offline (exit 6) also falls through: Git merge already happened,
 		// so record locally and repair via the mutation log on next sync.
+		// So does 8, the service's stored copy of this repository being
+		// unusable — a worse state to be in and the same thing to do about it
+		// here, since the Git merge has happened either way and the mutation
+		// log is what carries it across the repair.
 	}
 	return a.Store.MarkPRMerged(ctx, pr, mergeSHA, headSHA)
 }

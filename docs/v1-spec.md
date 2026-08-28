@@ -1621,6 +1621,7 @@ offline
 Git failure
 database failure
 partial success
+remote data corrupt
 ```
 
 CLI exit codes:
@@ -1634,6 +1635,7 @@ CLI exit codes:
 5 permission denied
 6 offline or remote unavailable
 7 partial success requiring repair
+8 the service's stored copy of this repository is unusable
 ```
 
 Exit code 7 is for a command that did what it was asked and left the
@@ -1644,6 +1646,46 @@ back below one this checkout had already synced past, so its history for this
 repository was reset or lost (§9.2). A caller that scripts against exit codes
 learns nothing from a 0 there, which is the whole complaint — the divergence
 has to be legible to a program, not only in the prose the command printed.
+
+Exit code 8 is for a service that answered and cannot serve this repository:
+its stored database will not open. It is a 5xx, and the reason it is not 6 is
+that 6 means *try again*. A corrupt stored database is permanent until an
+operator restores it, so a caller looping on 6 loops forever, and the fleet's
+automation is exactly such a caller. 1 was the
+alternative and says nothing a program can act on, which is the same complaint
+that earned 7 its own code: the state has to be legible to a program, not only
+in the prose the command printed. The three states a sync can now report about
+the service are distinct — 6 could not reach it, 7 reached it and this
+checkout needs repair, 8 reached it and **it** needs repair — and only the
+last of them is somebody else's to fix.
+
+The client tells 8 from an ordinary 5xx by the **error code**, not the status:
+both are `500`, because both are the service failing to serve a valid request.
+The cloud API's error body (§19) carries a code beside its message, and these
+are the values:
+
+```text
+validation          400
+not_found           404
+conflict            409
+permission          401, 403
+internal            500 — the service failed; try again
+repository_corrupt  500 — the service's stored copy of this repository is
+                    unusable and will be until it is restored
+```
+
+A stored database that opens and holds no repository row is **not**
+`repository_corrupt`. SQLite reads a zero-length object as a valid empty
+database, so what is missing there is the repository rather than the bytes;
+that is the same loss as an absent object, and registration answers it with
+the `404 not_found` §19 already specifies for one. Two kinds of damage, two
+answers, and the difference is whether anything can still be read.
+
+`repository_corrupt` names the repository and what is wrong with its stored
+copy rather than the verb that was running when it was noticed. That is the
+operator's own storage and not sensitive; withholding it left the diagnosis in
+the service's logs, which is the one place nobody looking at a failing client
+can see (elk-work/ark#65).
 
 Exit code 2 covers **every** way the command line can be wrong, not only the
 checks Ark performs itself: an unknown command or subcommand, an unknown flag,

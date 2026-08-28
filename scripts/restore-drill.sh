@@ -145,6 +145,12 @@ assert_eq() { # label expected actual
 assert_ne() { # label unexpected actual
 	if [ "$2" != "$3" ]; then ok "$1 ($3 ≠ $2)"; else bad "$1" "expected anything but [$2]"; fi
 }
+assert_contains() { # label needle haystack
+	case "$3" in
+	*"$2"*) ok "$1" ;;
+	*) bad "$1" "expected [$3] to contain [$2]" ;;
+	esac
+}
 assert_ge() { # label floor actual
 	if [ "$3" -ge "$2" ] 2>/dev/null; then ok "$1 ($3 ≥ $2)"; else bad "$1" "expected ≥ $2 got $3"; fi
 }
@@ -715,13 +721,21 @@ st_upload "$WORK/truncated.db"
 step "uploaded a ${HALF}-byte truncation of a $(file_size "$SNAP/baseline-R$R1.db")-byte database"
 
 code="$(api_pull 0)"
-assert_ne "pull against a truncated database does not report success" 200 "$code"
+assert_eq "pull against a truncated database is 500" 500 "$code"
 step "  server answered $code: $(api_last | jq -c . 2>/dev/null || api_last)"
+# Not `internal`. A 500 that will still be a 500 after any number of retries is
+# a different state from a service having a moment, and until elk-work/ark#65
+# the two were the same body — so the only place the truth existed was the
+# service's own log line, "apply schema: database disk image is malformed".
+assert_eq "  and says repository_corrupt, not internal" repository_corrupt "$(api_last | jq -r .code)"
+assert_contains "  and names the repository rather than the verb that failed" \
+	"$REPO_ID" "$(api_last | jq -r .message)"
 
 client_from_snapshot alpha_trunc "$SNAP/alpha-R$R1.tar"
 client_sync alpha_trunc
-assert_ne "a client sync against a truncated database fails rather than converging" 0 "$SYNC_RC"
-step "  client exited $SYNC_RC"
+# 8, not 6. Exit 6 is offline — the code a retry loop keys on — and this
+# condition is permanent until an operator restores the object.
+assert_eq "a client sync against a truncated database exits 8, not 6 (offline)" 8 "$SYNC_RC"
 assert_eq "  the corrupted object was not overwritten by the failed sync" \
 	"$(sha_short <"$WORK/truncated.db")" \
 	"$(st_download "$WORK/inspect.db" && sha_short <"$WORK/inspect.db")"
@@ -741,23 +755,30 @@ client_sync alpha_post_trunc
 assert_eq "pre-corruption client converges without re-pushing" 0 "$SYNC_RC"
 assert_eq "  pushed nothing" 0 "$(sync_field .pushed)"
 
-step "the nastier corruption: a zero-length object"
+step "the other corruption, which is not corruption: a zero-length object"
 : >"$WORK/empty.db"
 st_upload "$WORK/empty.db"
+# SQLite is happy with an empty file — it is a valid empty database, so it
+# opens and the schema applies over it. What is missing is the repository row,
+# not the bytes, which makes this a repository the service no longer holds
+# rather than one it cannot read. Registration answers it as such
+# (elk-work/ark#66), and that is where a sync meets it first.
 code="$(api_pull 0)"
 assert_ne "pull against a zero-length object does not report success" 200 "$code"
 step "  server answered $code: $(api_last | jq -c . 2>/dev/null || api_last)"
+note "the raw pull route still answers 500 internal here — the client never"
+note "reaches it, because registration refuses first (elk-work/ark#65)."
 
 client_from_snapshot alpha_zero "$SNAP/alpha-R$R1.tar"
 client_sync alpha_zero
-step "  a client sync against a zero-length object exited $SYNC_RC"
-ZERO_F="$(object_fingerprint)"
-step "  object after that sync: $ZERO_F, revision $(db_revision "$WORK/inspect.db")"
-if [ "$(sqlite3 "$WORK/inspect.db" "SELECT count(*) FROM records WHERE record_type <> 'actor'" 2>/dev/null || echo 0)" = 0 ]; then
-	note "a zero-length object behaves like a deletion: SQLite reads it as an empty"
-	note "database, the schema is applied over it, and a syncing client stands an"
-	note "empty repository back up at a new generation."
-fi
+# 7, not 8, and deliberately: the client turns registration's refusal into a
+# recorded history reset, which is a stronger signal than "the copy is
+# unreadable" and the one #59 built for exactly this.
+assert_eq "a client sync against a zero-length object exits 7 (history reset)" 7 "$SYNC_RC"
+assert_ne "  history-loss detection fired" null "$(sync_field '.history_reset')"
+rm -f "$WORK/inspect.db"
+st_download "$WORK/inspect.db"
+assert_eq "  and the zero-length object was not adopted and rewritten" 0 "$(file_size "$WORK/inspect.db")"
 
 st_upload "$SNAP/baseline-R$R1.db"
 assert_eq "restored again after the zero-length corruption" "$BASE_F" "$(object_fingerprint)"

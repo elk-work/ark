@@ -32,6 +32,53 @@ var ErrConcurrentWrite = errors.New("repository changed concurrently")
 // ErrNotFound reports a repository with no stored database.
 var ErrNotFound = errors.New("repository not found")
 
+// ErrCorrupt reports a stored database the service has but cannot use: the
+// object is there and the bytes in it will not open as a SQLite database.
+//
+// It is the third kind this package distinguishes, and it exists for the same
+// reason as the other two: the API contract has to be able to say which of
+// them happened. Without it the condition arrived at the handler as an
+// anonymous error, became `500 {"code":"internal","message":"pull failed"}`,
+// and reached the client as exit 6 — offline, retry later — for a state that
+// is permanent until an operator restores `repos/<id>.db` from a copy. The
+// truth existed in exactly one place, the service's own logs
+// (elk-work/ark#65).
+//
+// A *zero-length* object is deliberately not this. SQLite reads it as a valid
+// empty database, so it opens, the schema applies, and what is missing is the
+// repository row rather than the bytes — which is a repository the service no
+// longer holds, and `handleRegisterRepo` already answers that with the 404 it
+// answers for an absent object (elk-work/ark#66). Two kinds of damage, two
+// answers, and the difference is whether anything can still be read.
+var ErrCorrupt = errors.New("stored repository database is unusable")
+
+// CorruptError names the repository whose stored database is unusable. The
+// repository is the part worth reporting: the verb that happened to be running
+// when it was noticed ("pull failed") is the same for every caller and tells
+// nobody anything. None of this is sensitive — it is the operator's own
+// storage — so it travels to the client rather than staying in the logs.
+type CorruptError struct {
+	RepoID string
+	// Reason reads as the predicate of a sentence about the repository.
+	Reason string
+	// Err is SQLite's own complaint, which is the part naming the damage.
+	Err error
+}
+
+func (e *CorruptError) Error() string {
+	msg := fmt.Sprintf("repository %s: %s", e.RepoID, e.Reason)
+	if e.Err != nil {
+		msg += ": " + e.Err.Error()
+	}
+	return msg
+}
+
+func (e *CorruptError) Unwrap() error { return e.Err }
+
+// Is makes every CorruptError match ErrCorrupt, so callers that only need the
+// kind can ask for it the way they ask about ErrNotFound.
+func (e *CorruptError) Is(target error) bool { return target == ErrCorrupt }
+
 // Backend stores repository database files by ID.
 type Backend interface {
 	// Fetch downloads the repository database to destPath, returning its
@@ -134,7 +181,9 @@ func (m *Manager) View(ctx context.Context, repoID string, fn func(db *sql.DB) e
 	}
 	db, err := openAt(m.dbPath(repoID))
 	if err != nil {
-		return err
+		// refresh has already established the object exists, so a file that
+		// will not open is stored damage rather than a missing repository.
+		return &CorruptError{RepoID: repoID, Reason: "its stored database will not open", Err: err}
 	}
 	defer db.Close()
 	return fn(db)
@@ -192,7 +241,12 @@ func (m *Manager) applyAndStore(ctx context.Context, repoID string, st *repoStat
 
 	db, err := openAt(work)
 	if err != nil {
-		return err
+		if gen == 0 {
+			// Nothing was fetched; this file is one we just created in the
+			// cache directory, so a failure here is local and ordinary.
+			return err
+		}
+		return &CorruptError{RepoID: repoID, Reason: "its stored database will not open", Err: err}
 	}
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
