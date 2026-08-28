@@ -5,6 +5,7 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -91,6 +92,16 @@ func Run(ctx context.Context, a *app.Context) (*Result, error) {
 		return nil, err
 	}
 
+	// The cursor rides along so the service can tell a repository being
+	// created from one being resurrected: above zero, this checkout is
+	// asserting it holds history the service issued, and a service with no
+	// database for it will refuse to create one rather than quietly stand an
+	// empty one back up (elk-work/ark#66, spec §19).
+	_, synced, err := a.Store.SyncCursor(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	// Registration is idempotent and cheap; it also validates the token.
 	if err := client.RegisterRepo(ctx, api.RegisterRepositoryRequest{
 		ID:            a.Config.RepositoryID,
@@ -98,7 +109,27 @@ func Run(ctx context.Context, a *app.Context) (*Result, error) {
 		DefaultBranch: a.Git.DefaultBranch(ctx),
 		GitRemoteURL:  a.Git.RemoteURL(ctx, "origin"),
 		Actors:        actors,
+		LastRevision:  synced,
 	}); err != nil {
+		// A refusal to register a repository this checkout has already synced
+		// is the same finding the pull below makes, arriving one call earlier:
+		// the service is not serving the history this client was tracking. It
+		// has to be recorded here, because refusing means there is nothing
+		// left to push to or pull from — and a sync that ended with a bare
+		// error would leave `ark status` reporting a clean repository, which
+		// is the silence #59 exists to break.
+		var arkErr *records.Error
+		if synced > 0 && errors.As(err, &arkErr) && arkErr.Kind == records.KindNotFound {
+			if err := a.Store.RecordHistoryReset(ctx, synced, 0); err != nil {
+				return nil, err
+			}
+			reset, err := a.Store.HistoryReset(ctx)
+			if err != nil {
+				return nil, err
+			}
+			res.HistoryReset = reset
+			return res, nil
+		}
 		return nil, err
 	}
 

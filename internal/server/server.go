@@ -158,7 +158,39 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 		req.DefaultBranch = "main"
 	}
 	ctx := r.Context()
-	err := s.Repos.Update(ctx, req.ID, true, func(tx *sql.Tx) error {
+	// Registration is how a repository comes into existence, and it is also
+	// the one call every sync makes unconditionally — so it is the call that
+	// can stand a lost repository back up empty, and until it learned the
+	// client's cursor it could not tell the two apart. A client above
+	// revision 0 is asserting it holds history this service issued; if the
+	// database is missing, it was lost rather than never created, and making
+	// a fresh one destroys the only clean signal of that. Pull and push both
+	// answer 404 while a repository is absent, and both answer normally the
+	// moment a client re-creates it, which is how a repository sat missing
+	// for six weeks with every client reporting itself in sync
+	// (elk-work/ark#66, elk-work/ark#58). So create only for a client at 0.
+	//
+	// errUnheldRepository is the second shape of the same condition, and it
+	// never escapes this handler: a stored database with no repository row in
+	// it. A zero-length object reads as a perfectly valid empty SQLite
+	// database, so a loss can arrive wearing a live object
+	// (docs/self-hosting.md), and the rule is about the repository, not about
+	// whether some file exists.
+	errUnheldRepository := errors.New("the stored database holds no repository")
+	created := false
+	err := s.Repos.Update(ctx, req.ID, req.LastRevision == 0, func(tx *sql.Tx) error {
+		// The whole closure reruns on a lost CAS race; reset the accumulator
+		// so a replay cannot report a creation the first attempt made.
+		created = false
+		var registered int
+		if err := tx.QueryRow(`SELECT count(*) FROM meta WHERE id = 1`).Scan(&registered); err != nil {
+			return err
+		}
+		created = registered == 0
+		if created && req.LastRevision > 0 {
+			return errUnheldRepository
+		}
+
 		// Registration runs on every sync, and the name a client sends is just
 		// the basename of wherever it happens to be checked out. Overwriting on
 		// conflict therefore let any client silently rename the repository for
@@ -198,9 +230,35 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
+	if errors.Is(err, repodb.ErrNotFound) || errors.Is(err, errUnheldRepository) {
+		// not_found, and deliberately: it is the same answer pull and push
+		// already give for this exact condition, so all three routes now say
+		// the same thing about a repository that is gone, and the client
+		// lands on spec §22's exit 3 rather than on a validation fault about
+		// a field nobody typed. The message names what happened, because the
+		// operator reading it has a missing database, not a typo.
+		if s.Log != nil {
+			s.Log.Warn("refused to create a repository a client has already synced",
+				"repository_id", req.ID, "name", req.Name,
+				"client_last_revision", req.LastRevision)
+		}
+		writeErr(w, http.StatusNotFound, "not_found", fmt.Sprintf(
+			"this service has no database for repository %s, and this client has already synced it to revision %d — it is missing, not new. Registration will not stand an empty repository up in its place; restore it, or point this checkout at the service that holds it.",
+			req.ID, req.LastRevision))
+		return
+	}
 	if err != nil {
 		s.respond(w, "register repository", err)
 		return
+	}
+	if created && s.Log != nil {
+		// The rare and interesting half of this route. Every other
+		// registration is the idempotent no-op every sync of every repository
+		// makes, and while the two were indistinguishable in the log a
+		// repository could come back from the dead without leaving a trace of
+		// having done so (elk-work/ark#66).
+		s.Log.Info("registration created a repository",
+			"repository_id", req.ID, "name", req.Name, "actors", len(req.Actors))
 	}
 	writeJSON(w, map[string]string{"id": req.ID})
 }
