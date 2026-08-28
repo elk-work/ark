@@ -1343,6 +1343,7 @@ V1 cloud service may be a separate Go service.
 Minimum endpoints:
 
 ```text
+POST /v1/principals
 POST /v1/repositories
 POST /v1/sync/push
 POST /v1/sync/pull
@@ -1371,6 +1372,12 @@ Cloud Run
 Cloud SQL for PostgreSQL
 Google Cloud Storage
 ```
+
+`POST /v1/principals` is the one route not authenticated by a bearer the
+service issued or was configured with as `ARK_API_TOKEN`. It takes
+`ARK_BOOTSTRAP_TOKEN` and mints a principal and its first credential, so a
+deployment can reach a per-person credential without already holding one
+(§20). Unset, the route refuses everything.
 
 `POST /v1/repositories` registers a repository idempotently and carries this
 checkout's actors alongside its metadata. It is the only call every sync makes
@@ -1476,7 +1483,10 @@ overwrites these fields, since registration can only backfill:
 
 ## 20. Authentication
 
-V1 may begin with one user and one service token.
+V1 may begin with one user and one service token. It no longer ends there: the
+service also verifies per-principal credentials it issued itself
+(`docs/rfc-0003-elk-issued-credentials.md`, slices 1-2). Both mechanisms are
+live at once, and the order is fixed — see "Two kinds of bearer" below.
 
 The client stores credentials outside the repository.
 
@@ -1567,6 +1577,45 @@ and then reports that a token continues to resolve, for every remote, with
 exit code 7 (§22: the command did what it was asked and something still needs
 repairing). Reporting plain success there would describe a machine as logged
 out while every sync it runs still authenticates.
+
+### Two kinds of bearer
+
+The service accepts two things in `Authorization: Bearer`, and tries them in
+this order:
+
+1. **The service token**, `ARK_API_TOKEN`, compared in constant time exactly as
+   before. A match synthesizes a `legacy` principal carrying implicit write on
+   every repository, and is logged as such. This branch reads no credential
+   store, so it keeps working whether or not one exists and whatever state it
+   is in — the whole fleet holds this string, and it must not acquire a new
+   dependency.
+2. **A per-principal credential**, `arkc_` followed by 32 random bytes in
+   base64url, which the service minted and stores only as a SHA-256. It is
+   refused if the digest is unknown, the credential is revoked or past
+   `expires_at`, or its principal is disabled.
+
+A bearer without the `arkc_` prefix is not a credential this service issued, so
+nothing is looked up for it. Everything refused is `401` with a `permission`
+error code (§22), whichever mechanism refused it.
+
+Credentials live in one SQLite database, `auth.db`, held in the same backend as
+the repository databases and written with the same object-generation
+compare-and-swap. It holds `principals`, `credentials` and `grants`. It is
+cached in memory with a hard 60-second time-to-live, which is the bound on how
+long a revocation takes to land: revocation is eventually consistent, and that
+is the accepted price of not reading the store on every request. `last_used_on`
+is recorded at **day** granularity and flushed lazily, so observing who is
+still using which credential does not put a write on every request.
+
+`grants` is created but **not yet consulted**: a valid credential currently
+reaches every route the service token does. Per-repository enforcement,
+the `Mutation.CreatedBy` actor binding, and the device-authorization flow are
+specified in RFC-0003 and are not part of this text yet.
+
+`POST /v1/principals` mints a principal and its first credential, and is the
+only route that accepts `ARK_BOOTSTRAP_TOKEN`. The credential is returned in
+plaintext exactly once; nothing recovers it afterwards, and reissuing is the
+supported repair.
 
 The cloud service must identify:
 

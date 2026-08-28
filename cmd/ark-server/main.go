@@ -7,6 +7,9 @@
 //	ARK_API_TOKEN    bearer token clients must present (required)
 //	ARK_SIGNING_KEY  HMAC key signing local-mode /blobs/ URLs (default:
 //	                 ARK_API_TOKEN)
+//	ARK_BOOTSTRAP_TOKEN
+//	                 accepted on POST /v1/principals only, to mint the first
+//	                 per-principal credential; unset disables that route
 //	GCS_BUCKET       bucket for repo databases and artifact blobs (production)
 //	DATA_DIR         local directory for repo databases + blobs (used without
 //	                 GCS_BUCKET; default ./data)
@@ -89,9 +92,12 @@ func run() error {
 		// key falls back to the service token, which is what it has always
 		// been. Setting it is how a deployment stops depending on that.
 		SigningKey: os.Getenv("ARK_SIGNING_KEY"),
-		Blobs:      blobs,
-		Log:        log,
-		Version:    ver,
+		// Unset is also the supported configuration here, and the safer one:
+		// no bootstrap token means no route that mints principals at all.
+		BootstrapToken: os.Getenv("ARK_BOOTSTRAP_TOKEN"),
+		Blobs:          blobs,
+		Log:            log,
+		Version:        ver,
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
