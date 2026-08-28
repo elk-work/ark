@@ -158,6 +158,19 @@ Ark records that an agent acted **under a delegating human's authority**, and
 everything downstream — including Elk — resolves the agent back to that person.
 Skip this and the attribution chain breaks.
 
+The delegating human is the repository's default actor, or `ARK_DELEGATED_BY`
+if you set it. **It is part of the agent's identity, not a label on it**: an
+agent actor is per (agent name, delegating human), so `--agent claude` on a
+teammate's machine is a different actor from yours even in the same
+repository, and their work is never filed under your name. A repository two
+people work in therefore holds two `claude` actors, one per person — expected,
+not a duplicate.
+
+A run that cannot resolve a delegating human is refused rather than recorded
+as somebody. If you see `agent "claude" delegates from …, which is not an
+actor in this repository`, `ARK_DELEGATED_BY` is pointing at an id this
+repository does not hold — unset it and the repository's own human is used.
+
 ## Getting it into Elk
 
 Ark records reach the Elk workspace stream through the work-record adapter:

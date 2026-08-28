@@ -85,6 +85,9 @@ agent_version
 delegated_by
 ```
 
+§6.0 defines the actor record itself, including how a named agent resolves to
+one and why `delegated_by` is part of that identity rather than a note on it.
+
 V1 may use locally generated actor IDs.
 
 Cloud sync may later map those IDs to authenticated identities.
@@ -178,6 +181,69 @@ Corrections should create new records that reference the original.
 ---
 
 ## 6. Entity Definitions
+
+## 6.0 Actor
+
+An actor is the identity every other record's `created_by` names. It comes
+first because nothing in §6.1–§6.10 exists without one.
+
+Fields:
+
+```text
+id
+type
+name
+email
+agent_name
+agent_version
+delegated_by
+created_at
+```
+
+`type` is `human` or `agent`. `ark init` creates the repository's default
+human from the Git identity; a pull brings in the actors other clients
+introduced; an agent actor is registered on a named agent's first run.
+
+An agent also carries `agent_name` and a `delegated_by` naming the human whose
+authority it acted under. That field is what lets a consumer resolve an
+agent's work back to a person, which is the one thing Ark records that a Git
+host does not.
+
+**An agent identity is per (agent name, delegating human).** `--agent
+claude-code` resolves to the lowest-ULID agent actor whose `agent_name` is
+`claude-code` *and* whose `delegated_by` is the human this invocation acts for
+— `ARK_DELEGATED_BY`, or the repository's default actor. The first run for
+that pair registers it.
+
+The delegating human is part of the key because actors are shared. Every sync
+uploads every actor a client holds (§9.1) and a pull brings back the ones other
+people introduced, so a repository's actor table contains other developers'
+agents. Resolving on `agent_name` alone therefore converged two developers who
+both ran `--agent claude-code` onto a single actor — whichever registered
+first — and from then on one of them wrote records under an identity
+delegating from the other person.
+
+So a repository legitimately holds **several agent actors with the same
+`agent_name`**, one per delegating human. Two `claude-code` actors in one
+repository is the correct state, not a duplicate: they are two identities,
+distinguished by `delegated_by` rather than by name. Nothing that renders a
+name changes — `ark task list` and `ark run list` show `claude-code` either
+way — and `--json` carries the actor ULID that tells them apart.
+
+`delegated_by` must name a human actor the repository already holds. An
+invocation whose delegation is absent, dangling, or names an agent is refused
+before it writes anything, because an agent cannot invent the authority it
+claims to act under. The service makes the same check where it registers an
+agent remotely (§19).
+
+**Changing that key re-attributes nothing.** Records already written name the
+actor they named. A client that upgrades finds no actor for its (name, human)
+pair and registers one, which is how a shared repository comes to hold two
+actors of one name; everything written under the shared actor keeps pointing
+at it. Who actually did that work is not something Ark can decide afterwards,
+and guessing would be a worse error than the one being fixed.
+
+---
 
 ## 6.1 Repository
 

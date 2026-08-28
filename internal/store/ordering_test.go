@@ -474,17 +474,22 @@ func TestFindAgentActorPicksTheFirstRegistration(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()
 
-	first := &Actor{Type: records.ActorAgent, Name: "claude-code", AgentName: "claude-code"}
+	// Both delegate from the same human: the tie the ULID has to break is
+	// between two registrations of one identity, which is what a repaired or
+	// twice-synced database can hold.
+	first := &Actor{Type: records.ActorAgent, Name: "claude-code",
+		AgentName: "claude-code", DelegatedBy: s.Actor.ID}
 	if err := CreateActor(ctx, s.DB, first); err != nil {
 		t.Fatal(err)
 	}
-	second := &Actor{Type: records.ActorAgent, Name: "claude-code", AgentName: "claude-code"}
+	second := &Actor{Type: records.ActorAgent, Name: "claude-code",
+		AgentName: "claude-code", DelegatedBy: s.Actor.ID}
 	if err := CreateActor(ctx, s.DB, second); err != nil {
 		t.Fatal(err)
 	}
 	setTrap(t, s, "actors", "created_at", []string{first.ID, second.ID})
 
-	got, err := FindAgentActor(ctx, s.DB, "claude-code", "", "")
+	got, err := FindAgentActor(ctx, s.DB, "claude-code", "", s.Actor.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
