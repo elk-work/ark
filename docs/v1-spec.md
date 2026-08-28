@@ -992,11 +992,40 @@ GitHub issue -> Ark task
 GitHub PR    -> Ark pull request
 ```
 
-A separate `gh` shim may later forward supported commands to `ark gh`.
-
 Do not attempt full `gh` compatibility in V1.
 
 The goal is to preserve common agent workflows.
+
+### No separate `gh` shim
+
+Earlier drafts of this section said a separate `gh` shim might later forward
+supported commands to `ark gh`. It will not. The idea was evaluated in
+elk-work/ark#44 and declined; this note replaces it so the spec stops implying
+a plan.
+
+Three findings settled it.
+
+**Nothing pays the cost it would remove.** A shim earns its keep only if
+something already reaches for `gh` when it means Ark records. Nothing does.
+`gh` in this fleet means GitHub — code, pull requests, CI — in all ten
+repositories, including the six whose *work record* is Ark. The two vocabularies
+are kept deliberately distinct, down to the reference syntax (`ark:scout#13`
+versus `elk-work/scout#124`). Principle 005 applies directly: do not add the
+primitive.
+
+**A drop-in would fail on contact.** Real `gh` takes `--json <fields>` and
+`-R [HOST/]OWNER/REPO`. Here `--json` is a boolean and the repository is chosen
+with `-C <dir>`, so the flags on essentially every real `gh` invocation are
+rejected outright.
+
+**Shadowing `gh` on `PATH` is the dangerous part.** `gh pr merge` merges on
+GitHub and can trigger a deployment; `ark gh pr merge` merges a local branch.
+Silently redirecting that is far worse than asking for two vocabularies. And in
+a repository with no `.ark/` — where GitHub issues *are* the work record — a
+shimmed `gh issue list` would exit 3, `no .ark directory found`, instead of
+listing the issues.
+
+`ark gh` remains as specified above. Reach it by typing `ark`.
 
 ---
 
