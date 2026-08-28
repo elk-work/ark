@@ -171,6 +171,58 @@ func (s *Store) SyncCursor(ctx context.Context) (clientID string, lastRevision i
 	return clientID, lastRevision, nil
 }
 
+// HistoryReset reports that the service's revision for this repository was
+// seen below a revision this checkout had already synced past — the service is
+// not serving the history the client was tracking.
+type HistoryReset struct {
+	// DetectedAt is the first time this was observed, not the most recent.
+	// The event is what matters; every sync after it sees the same thing.
+	DetectedAt string `json:"detected_at"`
+	// ServerRevision is where the service was when last seen behind, and
+	// LocalRevision is how far this checkout had synced. The gap between
+	// them is the number of revisions the service no longer accounts for.
+	ServerRevision int64 `json:"server_revision"`
+	LocalRevision  int64 `json:"local_revision"`
+}
+
+// RecordHistoryReset stores a detected reset. It is called once per sync that
+// observes the condition, but only the first detection's timestamp is kept:
+// the client keeps syncing afterwards, so a later run would otherwise walk the
+// timestamp forward and lose the one fact worth knowing — when the history it
+// was tracking stopped being served.
+func (s *Store) RecordHistoryReset(ctx context.Context, localRevision, serverRevision int64) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE sync_state SET
+		history_reset_at = COALESCE(history_reset_at, ?),
+		history_reset_server_revision = ?,
+		history_reset_local_revision = ?
+		WHERE repository_id = ?`,
+		records.Now(), serverRevision, localRevision, s.RepoID)
+	if err != nil {
+		return records.DBErr("record history reset", err)
+	}
+	return nil
+}
+
+// HistoryReset returns the recorded reset for this repository, or nil.
+func (s *Store) HistoryReset(ctx context.Context) (*HistoryReset, error) {
+	var at sql.NullString
+	var serverRev, localRev sql.NullInt64
+	err := s.DB.QueryRowContext(ctx, `SELECT history_reset_at,
+		history_reset_server_revision, history_reset_local_revision
+		FROM sync_state WHERE repository_id = ?`, s.RepoID).Scan(&at, &serverRev, &localRev)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, records.DBErr("load history reset", err)
+	}
+	if !at.Valid {
+		return nil, nil
+	}
+	return &HistoryReset{DetectedAt: at.String,
+		ServerRevision: serverRev.Int64, LocalRevision: localRev.Int64}, nil
+}
+
 // SetRecordRevision stamps a record row after the server accepts a mutation,
 // and closes out any earlier rejection against the same record: the server
 // has just accepted a change to it, so whatever it disagreed about before is
@@ -321,8 +373,17 @@ func (s *Store) ApplyPull(ctx context.Context, resp *api.PullResponse) (PullSkip
 				return err
 			}
 		}
-		if _, err := tx.Exec(`UPDATE sync_state SET last_revision = ?, last_synced_at = ?
-			WHERE repository_id = ?`, resp.ServerRevision, records.Now(), s.RepoID); err != nil {
+		// MAX, not assignment: the cursor is a high-water mark and a server
+		// revision counter only ever increases, so a response carrying a
+		// lower one cannot be a reason to rewind. Assigning it is what erased
+		// the evidence in elk-work/ark#58 — a checkout that had synced to
+		// revision 18 quietly adopted a service sitting at 4, and after that
+		// nothing on either side remembered there had ever been an 18.
+		// Pull records the event before this runs; this makes sure the
+		// number it recorded is still here to compare against tomorrow.
+		if _, err := tx.Exec(`UPDATE sync_state SET last_revision = MAX(last_revision, ?),
+			last_synced_at = ? WHERE repository_id = ?`,
+			resp.ServerRevision, records.Now(), s.RepoID); err != nil {
 			return records.DBErr("advance sync cursor", err)
 		}
 		return nil

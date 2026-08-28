@@ -56,6 +56,18 @@ func newSyncCmd(g *globals) *cobra.Command {
 				if res.Conflicts > 0 {
 					p.Line("Run `ark conflict list` to inspect conflicts.")
 				}
+				// Loudest thing this command can say, and it goes last so it
+				// is the line left on the screen.
+				if hr := res.HistoryReset; hr != nil {
+					p.Line("")
+					p.Line("WARNING: the sync service is at revision %d for this repository,", hr.ServerRevision)
+					p.Line("below revision %d, which this checkout had already synced past.", hr.LocalRevision)
+					p.Line("A revision counter only ever increases, so the service is not serving")
+					p.Line("the history this checkout was tracking — its database was reset, lost,")
+					p.Line("or restored from an earlier point. Records it acknowledged may be gone.")
+					p.Line("Ark has not tried to reconcile this: which side is authoritative is not")
+					p.Line("a decision it can make. First detected %s.", hr.DetectedAt)
+				}
 			}); err != nil {
 				return err
 			}
@@ -72,6 +84,17 @@ func newSyncCmd(g *globals) *cobra.Command {
 			// has always named, so a conflicting sync was never claiming to
 			// be in sync. Rejections were the silent half, and they are what
 			// changes here.
+			//
+			// A history reset is partial success for the same reason and more
+			// urgently: the transfer worked and the repository needs repair by
+			// a person. It is reported ahead of a rejection because a service
+			// that lost the repository explains any number of rejections, and
+			// the rejection is the smaller fact.
+			if hr := res.HistoryReset; hr != nil {
+				return records.Partialf(
+					"the sync service is at revision %d, below this checkout's %d — its history for this repository was reset or lost; see `ark status`",
+					hr.ServerRevision, hr.LocalRevision)
+			}
 			if res.Rejected > 0 {
 				return records.Partialf(
 					"%d mutation(s) rejected; the local records still carry changes the server refused — see `ark status`",
