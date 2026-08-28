@@ -90,9 +90,10 @@ type LocalBlobStore struct {
 	Dir     string
 	BaseURL string // externally reachable base, e.g. http://host:port
 
-	// Secret signs URLs. Server.Handler sets it from the service token, so
-	// there is no separate key to configure or forget. Empty means unsigned,
-	// which Handler refuses to serve.
+	// Secret signs URLs. Server.Handler sets it from ARK_SIGNING_KEY, which
+	// defaults to the service token, so there is still no separate key to
+	// configure or forget. Empty means unsigned, which the store refuses to
+	// mint URLs for and the handler refuses to serve.
 	Secret string
 }
 
