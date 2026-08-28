@@ -53,11 +53,20 @@ func withPrincipal(ctx context.Context, who *authenticated) context.Context {
 }
 
 // principalFrom returns the identity behind a request. Every handler wrapped
-// in s.auth has one; nothing yet makes a decision on it, which is
-// elk-work/ark#52's job.
+// in s.auth has one, and grants.go is what decides with it.
 func principalFrom(ctx context.Context) (*authenticated, bool) {
 	who, ok := ctx.Value(principalCtxKey{}).(*authenticated)
 	return who, ok
+}
+
+// principalOf is principalFrom for the handlers that have already been
+// through s.allow, which refuses a request carrying no principal. It can
+// still answer nil — for a route registered without s.auth, which would be a
+// bug — and every caller treats nil as "bind nothing, own nothing" rather
+// than as authority.
+func principalOf(r *http.Request) *authenticated {
+	who, _ := principalFrom(r.Context())
+	return who
 }
 
 // authStore returns the credential store, opening it on first use. Server is

@@ -1623,16 +1623,28 @@ Minimum endpoints:
 
 ```text
 POST /v1/principals
+POST /v1/device/code
+POST /v1/device/token
+POST /v1/device/approve
 POST /v1/repositories
 POST /v1/sync/push
 POST /v1/sync/pull
 GET  /v1/repositories/{id}
 POST /v1/repositories/{id}/metadata
+GET  /v1/repositories/{id}/grants
+POST /v1/repositories/{id}/grants
 GET  /v1/repositories/{id}/records/{type}/{id}
 POST /v1/artifacts/upload-url
 POST /v1/artifacts/download-url
 POST /v1/pull-requests/{id}/merge
 ```
+
+The three `/v1/device/` routes are the device-authorization flow — how a
+person reaches a credential without already holding one — and are the only
+`/v1` routes besides `POST /v1/principals` that no bearer authenticates.
+Possession of the `device_code` a caller was handed is the authentication on
+two of them, and `ARK_IDP_KEY` on the third. They are absent from a service
+with no `ARK_IDP_APPROVAL_URL`; §20.1 is the contract.
 
 Plus the authenticated work-record write routes, so a program can write a
 record without being a copy of Ark — see
@@ -1764,11 +1776,98 @@ overwrites these fields, since registration can only backfill:
   synced — registration carries actors (§9.1). It used to say "once the
   repository has *pushed*", which was true and was the bug: a checkout that
   had synced but never pushed could not make this call at all.
-- **Authorization is the single service token** (§20). Renaming a repository
-  is an `admin`-level act under RFC-0003, and when its per-repository grants
-  land the check belongs beside the writer resolution in the handler. V1 has
-  one token and no level to check against, so there is nothing to enforce
-  yet.
+- **Authorization is `admin` on the repository** (§19.2). Renaming a
+  repository changes what it is called for everyone and nothing about it is
+  recoverable from a client, which makes it the clearest `admin`-level act
+  this service has. The check runs before the handler touches storage, so a
+  caller with no authority costs no fetch, and it is separate from the writer
+  resolution above: one is about the caller, the other about the identity the
+  write is recorded under.
+
+## 19.2 Grants
+
+Authorization is **per repository, three levels, and nothing else**: `read`
+pulls, `write` pulls and pushes, `admin` also grants, revokes, and corrects
+metadata. There are no groups, teams, roles, or per-record permissions — a
+principal with `read` on a repository reads all of it
+(`docs/rfc-0003-elk-issued-credentials.md`, Decision 4; principle 005).
+
+Every route names a repository, and every route consults the caller's level
+for it before doing anything:
+
+| Level | Routes |
+|---|---|
+| `read` | `POST /v1/sync/pull`, `GET /v1/repositories/{id}`, `GET …/records/…`, `POST /v1/artifacts/download-url` |
+| `write` | `POST /v1/sync/push`, the §19 write routes, `POST /v1/pull-requests/{id}/merge`, `POST /v1/artifacts/upload-url`, `POST /v1/artifacts/confirm` |
+| `admin` | `POST /v1/repositories/{id}/metadata`, `GET` and `POST /v1/repositories/{id}/grants` |
+
+A refusal is `403` with the `permission` code, which is exit 5 (§22) — the
+code the client has always mapped, so **nothing on the wire changed** for
+grants to become enforceable. `POST /v1/repositories` is the exception in
+both directions, below.
+
+- **First-writer-registers.** The principal whose `POST /v1/repositories`
+  creates a repository receives `admin` on it. Everyone else has no access
+  until granted. Registering against a repository that already exists needs
+  `read`, because registration is the call every sync makes before it pulls
+  (§19) — refusing it to a reader would be refusing the pull.
+- **A repository the service does not hold answers `not_found`, not
+  `permission`.** An absent repository is not an authorization question, and
+  making it one would break the two things that read that 404: `ark login`
+  verifies a credential by pulling an id that cannot exist, and a repository
+  the service has *lost* is detected the same way (§19).
+- **Grants are keyed on email.** `POST /v1/repositories/{id}/grants` takes
+  `{email, level}` or `{email, revoke: true}`. An address nobody holds yet is
+  stored as a pending grant and resolves to a principal the first time that
+  address logs in, so a grant can be issued before its grantee has ever
+  authenticated and no credential is passed person-to-person. Re-granting
+  corrects the level; revoking what nobody holds is a success.
+- **`ARK_DEFAULT_GRANT`** is `none`, `read`, or `seeded`, and defaults to
+  `seeded`. `read` makes every authenticated principal a reader of every
+  repository and never confers `write`. `seeded` means grants arrive from the
+  identity provider at login; with no identity provider nothing seeds
+  anything, so a self-hosted deployment gets deny-by-default without knowing
+  the setting exists.
+- **The legacy service token carries implicit `admin` everywhere** and is
+  checked against no grant at all (§20, "Two kinds of bearer"). It is the
+  string the whole fleet holds and it identifies nobody, so there is nothing
+  to check it against; it is also the break-glass that issues the first
+  grants on repositories that predate them. Retiring it is elk-work/ark#54,
+  which has to replace that break-glass rather than only remove it.
+
+### The actor binding
+
+`grants` says which repositories a principal may write to. **The actor
+binding says which identity it may write as**, and it is what makes the
+`created_by` on every record (§5) checkable rather than asserted.
+
+- **First-writer-binds.** An actor is bound to the principal that first
+  introduced it, and — for an actor introduced before any of this existed —
+  to the first principal that writes as it.
+- **A push is refused if any mutation's `created_by` names a human actor
+  bound to a different principal.** The whole push, not the one mutation:
+  half-applying a batch whose identity the service does not accept would
+  leave the client a rejection it cannot act on.
+- **Carrying somebody's actor record is not writing as them.** A client
+  uploads every actor it knows on every push, including ones it pulled from
+  other people (§9.1), so re-sending another principal's actor is the normal
+  case and stays a no-op.
+- **The binding is enforced on human actors.** An agent actor was shared
+  between people until `store.FindAgentActor` learned to key on
+  (`agent_name`, `delegated_by`), so a client that has not upgraded still
+  resolves to somebody else's agent and must not be refused for it. Writing as
+  an agent is therefore governed by the delegation rule below until the fleet
+  has moved; `internal/server/grantsactors.go` records what that leaves open.
+- **Delegation is enforced on new agent actors.** A newly introduced actor of
+  type `agent` must carry a `delegated_by` naming a human actor in this
+  repository that does not belong to another principal; absent or dangling is
+  `permission`. On later writes `delegated_by` is read from the stored actor
+  record and never from the request, so nothing can re-point an existing
+  agent at a different human.
+- **The legacy service token binds nothing and is bound by nothing.** An
+  actor "introduced by" a string the whole fleet shares is introduced by
+  everybody, and binding under it would hand every existing actor to a
+  principal that is not a person.
 
 ---
 
@@ -1898,11 +1997,13 @@ is the accepted price of not reading the store on every request. `last_used_on`
 is recorded at **day** granularity and flushed lazily, so observing who is
 still using which credential does not put a write on every request.
 
-`grants` is created but **not yet consulted**: a valid credential currently
-reaches every route the service token does. Per-repository enforcement and the
-`Mutation.CreatedBy` actor binding are specified in RFC-0003 and are not part
-of this text yet. The device-authorization flow, which is how a person gets a
-credential without already holding one, is §20.1.
+`grants` **is consulted on every route**, and the `Mutation.CreatedBy` actor
+binding with it — see §19.2 for both. A credential reaches only the
+repositories it has been granted, at the level it was granted; the service
+token reaches everything, which is the difference between the two bearers and
+the reason the order above is fixed. The device-authorization flow, which is
+how a person gets a credential without already holding one, is §20.1, and the
+`read` grants its approval may seed are ordinary rows in the same table.
 
 `POST /v1/principals` mints a principal and its first credential, and is the
 only route that accepts `ARK_BOOTSTRAP_TOKEN`. The credential is returned in
@@ -1917,7 +2018,10 @@ actor
 repository permission
 ```
 
-Agent actions should record both the agent identity and the delegating principal.
+Agent actions should record both the agent identity and the delegating
+principal. All three are now identified and all three are enforced: the
+principal by the bearer above, the repository permission by `grants`, and the
+actor by the binding — §19.2.
 
 ---
 

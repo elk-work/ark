@@ -508,6 +508,19 @@ func (d *deviceStore) redeem(ctx context.Context, hash string) (*deviceRedemptio
 			return err
 		}
 
+		// This is the login RFC-0003 Decision 4 means when it says a grant
+		// keyed on an email "resolves to a principal id at that person's
+		// first login": every grant an admin issued to this address before
+		// anybody held it becomes a grant this principal holds.
+		//
+		// It runs **before** seeding, and the order is load-bearing. Seeding
+		// adds `read` and leaves an existing row alone, so claiming second
+		// would let a seeded `read` sit where an admin had written `write`
+		// and silently keep it there.
+		if err := claimPendingGrants(ctx, tx, p.ID, p.Email); err != nil {
+			return err
+		}
+
 		var seeded []string
 		if repoIDs != "" {
 			if err := json.Unmarshal([]byte(repoIDs), &seeded); err != nil {
@@ -515,15 +528,13 @@ func (d *deviceStore) redeem(ctx context.Context, hash string) (*deviceRedemptio
 			}
 		}
 		for _, repoID := range seeded {
-			// ON CONFLICT DO NOTHING is the whole of "only ever adds read":
-			// an existing grant — `read`, `write` or `admin` — is left
-			// exactly as it stands, so seeding can neither downgrade someone
-			// nor resurrect a level an admin took away.
-			if _, err := tx.ExecContext(ctx, `INSERT INTO grants
-				(repository_id, principal_id, level, granted_by, granted_at)
-				VALUES (?, ?, ?, ?, ?)
-				ON CONFLICT (repository_id, principal_id) DO NOTHING`,
-				repoID, p.ID, seededGrantLevel, seededGrantGrantedBy, createdAt); err != nil {
+			// addGrant writes only where nothing exists, which is the whole
+			// of "only ever adds read": an existing grant — `read`, `write`
+			// or `admin` — is left exactly as it stands, so seeding can
+			// neither downgrade someone nor resurrect a level an admin took
+			// away. See grants.go, which is where that rule now lives.
+			if err := addGrant(ctx, tx, repoID, p.ID,
+				seededGrantLevel, seededGrantGrantedBy, createdAt); err != nil {
 				return err
 			}
 		}

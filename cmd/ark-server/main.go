@@ -15,6 +15,10 @@
 //	                 code; unset means this service offers no device login
 //	ARK_IDP_KEY      shared secret the identity provider presents on
 //	                 POST /v1/device/approve (required with the above)
+//	ARK_DEFAULT_GRANT
+//	                 what a principal holds on a repository nobody granted it:
+//	                 none | read | seeded (default seeded, which grants
+//	                 nothing without an identity provider to seed from)
 //	GCS_BUCKET       bucket for repo databases and artifact blobs (production)
 //	DATA_DIR         local directory for repo databases + blobs (used without
 //	                 GCS_BUCKET; default ./data)
@@ -30,6 +34,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -68,6 +74,15 @@ func run() error {
 	idpKey := os.Getenv("ARK_IDP_KEY")
 	if approvalURL != "" && idpKey == "" {
 		return fmt.Errorf("ARK_IDP_KEY is required when ARK_IDP_APPROVAL_URL is set")
+	}
+	// Validated at startup for the same reason, and not at the first refused
+	// request: a typo in an authorization default is the kind of mistake that
+	// reads as an outage hours later, and it costs one comparison to refuse
+	// to start instead.
+	defaultGrant := os.Getenv("ARK_DEFAULT_GRANT")
+	if defaultGrant != "" && !slices.Contains(server.DefaultGrantValues, defaultGrant) {
+		return fmt.Errorf("ARK_DEFAULT_GRANT is %q; it takes %s",
+			defaultGrant, strings.Join(server.DefaultGrantValues, ", "))
 	}
 	cacheDir := os.Getenv("CACHE_DIR")
 	if cacheDir == "" {
@@ -114,9 +129,11 @@ func run() error {
 		// are unaffected; see internal/server/device.go.
 		IDPApprovalURL: approvalURL,
 		IDPKey:         idpKey,
-		Blobs:          blobs,
-		Log:            log,
-		Version:        ver,
+		// Unset means `seeded`, which is deny until something seeds a grant.
+		DefaultGrant: defaultGrant,
+		Blobs:        blobs,
+		Log:          log,
+		Version:      ver,
 	}
 	port := os.Getenv("PORT")
 	if port == "" {

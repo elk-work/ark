@@ -179,7 +179,15 @@ func rememberResponse(ctx context.Context, tx *sql.Tx, key string, resp any, rev
 // LIMIT 1 that decides which identity a remote write is attributed to. Not
 // server_revision either — every update rewrites it, so it is last-touched
 // order rather than registration order.
-func resolveWriter(ctx context.Context, tx *sql.Tx, wr api.Writer) (string, error) {
+//
+// who is the principal making the call, and is used for one thing: an agent
+// actor these routes register is bound to it (grantsactors.go), so the record
+// of who introduced an identity is complete however the identity arrived.
+// The binding is not *checked* here — a named agent is shared by everyone who
+// writes under that name in a repository, which is the whole point of
+// resolving by agent_name — so the authority this route enforces is the
+// `write` grant its handler checked and the delegation rule below.
+func resolveWriter(ctx context.Context, tx *sql.Tx, wr api.Writer, who *authenticated) (string, error) {
 	name := strings.TrimSpace(wr.AgentName)
 	if name == "" {
 		return "", faultValidation("writer.agent_name is required")
@@ -224,7 +232,10 @@ func resolveWriter(ctx context.Context, tx *sql.Tx, wr api.Writer) (string, erro
 		DelegatedBy:  delegatedBy,
 		CreatedAt:    records.Now(),
 	}
-	if err := upsertActor(ctx, tx, actor); err != nil {
+	if _, err := upsertActor(ctx, tx, actor); err != nil {
+		return "", err
+	}
+	if err := bindActor(ctx, tx, actor.ID, binderOf(who)); err != nil {
 		return "", err
 	}
 	return actor.ID, nil
@@ -304,6 +315,9 @@ func oneOf(field, value string, allowed []string) *writeFault {
 // handleCreateTask creates a task and mints its display number.
 func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 	repoID := r.PathValue("repo")
+	if !s.allow(w, r, repoID, api.GrantWrite) {
+		return
+	}
 	req, ok := decode[api.CreateTaskRequest](w, r)
 	if !ok {
 		return
@@ -336,7 +350,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		if err := replayedResponse(ctx, tx, key, http.StatusCreated, &api.RecordResponse{}); err != nil {
 			return err
 		}
-		actorID, err := resolveWriter(ctx, tx, req.Writer)
+		actorID, err := resolveWriter(ctx, tx, req.Writer, principalOf(r))
 		if err != nil {
 			return err
 		}
@@ -374,6 +388,9 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 // handleCreateComment appends a comment to a record in this repository.
 func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 	repoID := r.PathValue("repo")
+	if !s.allow(w, r, repoID, api.GrantWrite) {
+		return
+	}
 	req, ok := decode[api.CreateCommentRequest](w, r)
 	if !ok {
 		return
@@ -410,7 +427,7 @@ func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 		if !present {
 			return faultNotFound(req.ParentType + " " + req.ParentID + " not found")
 		}
-		actorID, err := resolveWriter(ctx, tx, req.Writer)
+		actorID, err := resolveWriter(ctx, tx, req.Writer, principalOf(r))
 		if err != nil {
 			return err
 		}
@@ -448,6 +465,9 @@ func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 // there is no general record editor here.
 func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	repoID, taskID := r.PathValue("repo"), r.PathValue("id")
+	if !s.allow(w, r, repoID, api.GrantWrite) {
+		return
+	}
 	req, ok := decode[api.TaskStatusRequest](w, r)
 	if !ok {
 		return
@@ -501,9 +521,11 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		// Resolved for the authorization rule, not for attribution: a task
 		// record has no updated_by field (§6.2), so who moved a status is
 		// not representable on it today. Running the same writer check on
-		// every route keeps the rule in one place, and is where RFC-0003's
-		// principal binding will go.
-		if _, err := resolveWriter(ctx, tx, req.Writer); err != nil {
+		// every route keeps the rule in one place. RFC-0003's principal
+		// binding is the `write` grant checked at the top of this handler
+		// and the actor binding resolveWriter now records; both are in
+		// grants.go and grantsactors.go.
+		if _, err := resolveWriter(ctx, tx, req.Writer, principalOf(r)); err != nil {
 			return err
 		}
 

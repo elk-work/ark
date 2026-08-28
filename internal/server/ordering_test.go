@@ -52,7 +52,7 @@ func TestResolveWriterPicksTheFirstAgentRegistration(t *testing.T) {
 		t.Fatalf("second actor id %s does not follow %s", secondActor, firstActor)
 	}
 	err := s.Repos.Update(ctx, repoID, false, func(tx *sql.Tx) error {
-		if err := upsertActor(ctx, tx, api.Actor{
+		if _, err := upsertActor(ctx, tx, api.Actor{
 			ID: secondActor, Type: string(records.ActorAgent), Name: agent,
 			AgentName: agent, DelegatedBy: humanID, CreatedAt: records.Now(),
 		}); err != nil {
