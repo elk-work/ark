@@ -218,7 +218,7 @@ func TestLiveLoginThenResolveUsesTheKeyring(t *testing.T) {
 	// If the keyring refuses the write, StoreToken's contract is to fall back
 	// to the credentials file — the real one, since HOME is deliberately left
 	// alone here. Take this host's entry back out either way.
-	t.Cleanup(func() { _ = clearFileToken(host) })
+	t.Cleanup(func() { _, _ = clearFileToken(host) })
 
 	warnings := captureWarnings(t)
 
@@ -243,5 +243,76 @@ func TestLiveLoginThenResolveUsesTheKeyring(t *testing.T) {
 	}
 	if got := cred.Source.Description(); got != keyringName() {
 		t.Errorf("`ark status` would name %q, want %q", got, keyringName())
+	}
+}
+
+// TestLiveLogoutRemovesTheCredentialFromTheKeyring is `ark login` followed by
+// `ark logout`, against the platform's real credential store. It belongs here
+// and not only beside the fake because Delete is the one operation of the
+// three that had no production caller before this command existed, and a fake
+// that returns nil cannot show the OS actually letting go of a secret — it can
+// only show Ark asking. So the check is made of the store directly, not of
+// what Delete returned.
+func TestLiveLogoutRemovesTheCredentialFromTheKeyring(t *testing.T) {
+	requireLiveKeyring(t)
+
+	service := liveKeyringService()
+	remote := "https://" + strings.ToLower(rand.Text()) + ".invalid"
+	host := RemoteHost(remote)
+	token := "ark-live-token-" + rand.Text()
+
+	t.Setenv("ARK_TOKEN", "")
+	t.Setenv("ARK_NO_KEYRING", "")
+	previous := credentialKeyring
+	credentialKeyring = liveScopedKeyring{service: service}
+	t.Cleanup(func() { credentialKeyring = previous })
+	t.Cleanup(func() {
+		if err := (osKeyring{}).Delete(service, host); err != nil && !errors.Is(err, errNoKeyringEntry) {
+			t.Errorf("cleanup: %s still holds %s:%s: %v", keyringName(), service, host, err)
+		}
+	})
+	// HOME is deliberately left alone here, so a keyring that refused the write
+	// would put this token in the real credentials file. Take it back out.
+	t.Cleanup(func() { _, _ = clearFileToken(host) })
+
+	warnings := captureWarnings(t)
+
+	source, err := StoreToken(remote, token)
+	if err != nil {
+		t.Fatalf("`ark login`: %v", err)
+	}
+	if source != SourceKeyring {
+		t.Fatalf("`ark login` stored the token in %q, want %q — %s refused the write: %s",
+			source, SourceKeyring, keyringName(), warnings)
+	}
+
+	rem, err := RemoveToken(remote)
+	if err != nil {
+		t.Fatalf("`ark logout`: %v", err)
+	}
+	if len(rem.From) != 1 || rem.From[0] != SourceKeyring {
+		t.Fatalf("`ark logout` reported removing from %v, want %q alone", rem.From, SourceKeyring)
+	}
+
+	if _, err := (osKeyring{}).Get(service, host); !errors.Is(err, errNoKeyringEntry) {
+		t.Fatalf("Get after logout = %v, want errNoKeyringEntry; %s still holds the token", err, keyringName())
+	}
+	if _, err := ResolveCredential(remote); err == nil {
+		t.Fatal("a token still resolves after logout")
+	}
+
+	// Idempotent against a real store too, which is where it matters: all three
+	// backends report a delete of an absent account as ErrNotFound, and logout
+	// has to read that as "already gone" rather than as a failure.
+	again, err := RemoveToken(remote)
+	if err != nil {
+		t.Fatalf("second `ark logout`: %v", err)
+	}
+	if len(again.From) != 0 {
+		t.Fatalf("second `ark logout` removed %v, want nothing left to remove", again.From)
+	}
+
+	if got := warnings.String(); got != "" {
+		t.Errorf("warnings = %q, want none when the keyring works", got)
 	}
 }

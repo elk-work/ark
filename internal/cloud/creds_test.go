@@ -377,3 +377,211 @@ func TestRemoteHostNormalization(t *testing.T) {
 		}
 	}
 }
+
+// TestRemoveTokenClearsBothStores is the central claim of `ark logout`: the
+// keyring entry and the plaintext copy both go, and no other host's does.
+// Removing only the store that currently answers would leave the file copy
+// behind on every machine that logged in before the keyring worked there —
+// unread, because the keyring outranks it, and therefore invisible.
+func TestRemoveTokenClearsBothStores(t *testing.T) {
+	isolateHome(t)
+	fake := testKeyring(t)
+	host := RemoteHost(credsTestRemote)
+
+	if err := fake.Set(keychainService, host, "in-the-keyring"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileToken(host, "in-the-file"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileToken("other.example.com", "someone-elses"); err != nil {
+		t.Fatal(err)
+	}
+
+	rem, err := RemoveToken(credsTestRemote)
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if rem.Host != host {
+		t.Errorf("host = %q, want %q", rem.Host, host)
+	}
+	assertRemovedFrom(t, rem, SourceKeyring, SourceFile)
+	if _, ok := fake.entries[fake.key(keychainService, host)]; ok {
+		t.Error("the keyring still holds the token")
+	}
+	if got := fileToken(host); got != "" {
+		t.Errorf("the credentials file still holds %q for %s", got, host)
+	}
+	if got := fileToken("other.example.com"); got != "someone-elses" {
+		t.Errorf("other.example.com = %q, want someone-elses; logout is host-scoped", got)
+	}
+	if _, err := ResolveCredential(credsTestRemote); err == nil {
+		t.Error("a token still resolves after logout")
+	}
+}
+
+// TestRemoveTokenTakesTheCredentialsFileWithTheLastEntry: an empty
+// credentials.toml is litter that reads, to anyone auditing the machine later,
+// like a credential store still in use. Login already cleans it up; logout has
+// the same duty and more reason.
+func TestRemoveTokenTakesTheCredentialsFileWithTheLastEntry(t *testing.T) {
+	isolateHome(t)
+	if err := writeFileToken(RemoteHost(credsTestRemote), "in-the-file"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := RemoveToken(credsTestRemote); err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Errorf("credentials file survives with nothing in it (%v)", err)
+	}
+}
+
+// TestRemoveTokenOnAHostWithNothingStoredSucceeds: logout is idempotent, and
+// the postcondition a caller wants — this machine holds no credential for that
+// host — already holds. Exit 3 would make a teardown script fail on a machine
+// that was never logged in, and the fix people reach for is `|| true`, which
+// also swallows the keyring genuinely refusing to give a token up.
+func TestRemoveTokenOnAHostWithNothingStoredSucceeds(t *testing.T) {
+	isolateHome(t)
+
+	rem, err := RemoveToken(credsTestRemote)
+	if err != nil {
+		t.Fatalf("logging out of a host with nothing stored failed: %v", err)
+	}
+	assertRemovedFrom(t, rem)
+	if rem.KeyringSkipped {
+		t.Error("KeyringSkipped is set without ARK_NO_KEYRING")
+	}
+}
+
+// TestRemoveTokenClearsTheFileEvenWhenTheKeyringRefuses: the two stores are
+// independent, and the one reached second is the plaintext one. Stopping at
+// the first error would leave exactly the copy this command exists to remove,
+// on the run where the user is most likely to assume it worked.
+func TestRemoveTokenClearsTheFileEvenWhenTheKeyringRefuses(t *testing.T) {
+	isolateHome(t)
+	host := RemoteHost(credsTestRemote)
+	testKeyring(t).delErr = errors.New("keyring is locked")
+	if err := writeFileToken(host, "in-the-file"); err != nil {
+		t.Fatal(err)
+	}
+
+	rem, err := RemoveToken(credsTestRemote)
+	if err == nil {
+		t.Fatal("a keyring that refused the delete must not report a clean logout")
+	}
+	if code := records.ExitCode(err); code != 5 {
+		t.Errorf("exit code = %d, want 5 (permission): %v", code, err)
+	}
+	// Named precisely enough that a person can finish the removal by hand,
+	// which is the state this command exists to spare them.
+	for _, want := range []string{keyringName(), keychainService, host} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+	assertRemovedFrom(t, rem, SourceFile)
+	if got := fileToken(host); got != "" {
+		t.Errorf("the plaintext copy survived the keyring failure: %q", got)
+	}
+}
+
+// TestRemoveTokenReportsAnUnreadableCredentialsFile: a credentials.toml that
+// will not parse may hold this host's token in bytes nothing here can read, so
+// the one thing logout must not do is call it "nothing to remove".
+func TestRemoveTokenReportsAnUnreadableCredentialsFile(t *testing.T) {
+	isolateHome(t)
+	path := credentialsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("this is not TOML = = =\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rem, err := RemoveToken(credsTestRemote)
+	if err == nil {
+		t.Fatal("an unparseable credentials file must not report a clean logout")
+	}
+	if code := records.ExitCode(err); code != 5 {
+		t.Errorf("exit code = %d, want 5 (permission): %v", code, err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name %q", err, path)
+	}
+	assertRemovedFrom(t, rem)
+}
+
+// TestRemoveTokenSaysWhenARKNoKeyringKeptItOutOfTheKeyring: storage honours the
+// opt-out in silence because the operator asked for it. Removal cannot — an
+// empty result would otherwise be a claim about a store nobody looked in, and a
+// token stored before the variable was set would sit there through a logout
+// that reported success.
+func TestRemoveTokenSaysWhenARKNoKeyringKeptItOutOfTheKeyring(t *testing.T) {
+	isolateHome(t)
+	fake := testKeyring(t)
+	host := RemoteHost(credsTestRemote)
+	if err := fake.Set(keychainService, host, "in-the-keyring"); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeFileToken(host, "in-the-file"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARK_NO_KEYRING", "1")
+
+	rem, err := RemoveToken(credsTestRemote)
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if !rem.KeyringSkipped {
+		t.Error("KeyringSkipped is false; the caller cannot tell the keyring went unexamined")
+	}
+	assertRemovedFrom(t, rem, SourceFile)
+	if got := fake.entries[fake.key(keychainService, host)]; got != "in-the-keyring" {
+		t.Errorf("keyring entry is now %q; ARK_NO_KEYRING must keep the keyring untouched", got)
+	}
+}
+
+// TestRemoveTokenReportsThatARKTokenStillResolves: no process can unset a
+// variable in the shell that started it, so the stores can be empty while every
+// remote still authenticates. Reporting a clean logout there is the divergence
+// shape of #46 and #58 — a command describing a state it has not got — so the
+// fact travels in the result, and `ark logout` turns it into exit 7.
+func TestRemoveTokenReportsThatARKTokenStillResolves(t *testing.T) {
+	isolateHome(t)
+	if err := writeFileToken(RemoteHost(credsTestRemote), "in-the-file"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ARK_TOKEN", "from-env")
+
+	rem, err := RemoveToken(credsTestRemote)
+	if err != nil {
+		t.Fatalf("remove: %v", err)
+	}
+	if !rem.EnvToken {
+		t.Fatal("EnvToken is false while ARK_TOKEN is set")
+	}
+	assertRemovedFrom(t, rem, SourceFile)
+	// The stores are empty and resolution still succeeds. That is the whole
+	// point: removal did everything it could and the machine is not logged out.
+	cred, err := ResolveCredential(credsTestRemote)
+	if err != nil || cred.Source != SourceEnv {
+		t.Fatalf("resolved %q from %q (%v), want the env token to still answer", cred.Token, cred.Source, err)
+	}
+}
+
+// assertRemovedFrom checks the stores a removal reports, in order. The order is
+// resolution order, which is what makes the sentence `ark logout` prints read
+// the way the lookup works.
+func assertRemovedFrom(t *testing.T, rem Removal, want ...TokenSource) {
+	t.Helper()
+	if len(rem.From) != len(want) {
+		t.Fatalf("removed from %v, want %v", rem.From, want)
+	}
+	for i := range want {
+		if rem.From[i] != want[i] {
+			t.Fatalf("removed from %v, want %v", rem.From, want)
+		}
+	}
+}

@@ -14,6 +14,7 @@ type fakeKeyring struct {
 	entries map[string]string
 	getErr  error // returned by Get instead of an entry
 	setErr  error // returned by Set instead of storing
+	delErr  error // returned by Delete instead of removing
 }
 
 func (k *fakeKeyring) key(service, account string) string { return service + "\x00" + account }
@@ -37,8 +38,21 @@ func (k *fakeKeyring) Set(service, account, secret string) error {
 	return nil
 }
 
+// Delete mirrors what all three real backends do, including the part that is
+// easy to get wrong: removing an account that is not there is ErrNotFound, not
+// success. `ark logout` leans on that distinction — a miss is the ordinary
+// state of a machine that never logged in, and a failure means the OS still
+// holds the credential — so a fake that answered nil to everything would let
+// the two cases be conflated and never say a word.
 func (k *fakeKeyring) Delete(service, account string) error {
-	delete(k.entries, k.key(service, account))
+	if k.delErr != nil {
+		return k.delErr
+	}
+	key := k.key(service, account)
+	if _, ok := k.entries[key]; !ok {
+		return errNoKeyringEntry
+	}
+	delete(k.entries, key)
 	return nil
 }
 

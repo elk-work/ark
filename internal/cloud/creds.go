@@ -103,7 +103,7 @@ func StoreToken(remote, token string) (TokenSource, error) {
 			// a token still sitting in the fallback file is a plaintext copy
 			// nothing will ever read again. That is the whole upgrade path for
 			// anyone who logged in before the keyring worked on their platform.
-			if err := clearFileToken(host); err != nil {
+			if _, err := clearFileToken(host); err != nil {
 				fmt.Fprintf(warnTo, "ark: stored the token in %s, but could not remove the older copy in %s: %v\n",
 					keyringName(), credentialsPath(), err)
 			}
@@ -115,6 +115,87 @@ func StoreToken(remote, token string) (TokenSource, error) {
 		return SourceNone, err
 	}
 	return SourceFile, nil
+}
+
+// Removal is what `ark logout` took out of this machine, and what it could
+// not. It is a record rather than a bare error because the interesting cases
+// are all successes: nothing was stored, or something was — and the caller has
+// to be able to say which store, since "signed out of the keychain" and
+// "signed out of a plaintext file" are the two states §20 keeps apart
+// everywhere else.
+type Removal struct {
+	Host string
+	// From lists the stores that actually held a token, in resolution order.
+	// Empty means there was nothing to remove.
+	From []TokenSource
+	// KeyringSkipped means ARK_NO_KEYRING kept the keyring out of this, so an
+	// empty From is a statement about the file alone. Storage honours the
+	// opt-out silently because the operator asked for it; removal cannot, or
+	// "nothing to remove" would be a claim about a store nobody looked in.
+	KeyringSkipped bool
+	// EnvToken means ARK_TOKEN is set, so a token still resolves — for every
+	// remote, not just this one — no matter what came out of the stores. No
+	// process can unset it in the shell that started it.
+	EnvToken bool
+}
+
+// RemoveToken deletes a host's credential from both stores: the OS keyring and
+// the fallback file. It is host-scoped for the same reason `ark login` is —
+// one credential covers every repository pointing at one service — and it is
+// idempotent: a host with nothing stored is a Removal with an empty From and
+// no error, because the postcondition a caller wants ("this machine holds no
+// credential for that host") already held.
+func RemoveToken(remote string) (Removal, error) {
+	host := RemoteHost(remote)
+	rem := Removal{Host: host, EnvToken: os.Getenv("ARK_TOKEN") != ""}
+
+	// Clear both stores before reporting either failure, and clear the file
+	// even when the keyring refuses. A logout that gives up at the first error
+	// leaves whichever copy it had not reached yet — and the one it reaches
+	// second is the plaintext one, which is the copy the user cannot see and
+	// often does not know is there.
+	var keyringErr error
+	if keyringDisabled() {
+		rem.KeyringSkipped = true
+	} else {
+		switch err := credentialKeyring.Delete(keychainService, host); {
+		case err == nil:
+			rem.From = append(rem.From, SourceKeyring)
+		case errors.Is(err, errNoKeyringEntry):
+			// A miss, exactly as on the read path: the keyring answered and
+			// holds nothing for this host. Ordinary, and not worth a word.
+		default:
+			keyringErr = err
+		}
+	}
+
+	removedFile, fileErr := clearFileToken(host)
+	if removedFile {
+		rem.From = append(rem.From, SourceFile)
+	}
+
+	// Permission (exit 5) for a store that would not give the credential up.
+	// The precise cause varies — a locked keychain, a denied prompt, no Secret
+	// Service on the bus — and telling them apart means matching on error
+	// strings from three platforms, which would be wrong more often than it
+	// was right. What a caller can act on is the same either way: the OS still
+	// holds the token and Ark could not make it stop. The message names the
+	// service and account so a person can finish the job by hand, which is the
+	// state this command exists to spare them.
+	if keyringErr != nil {
+		msg := fmt.Sprintf("could not remove the token for %s from %s: it is still stored there, as service %q account %q",
+			host, keyringName(), keychainService, host)
+		if fileErr != nil {
+			msg += fmt.Sprintf("; %s would not give it up either: %v", credentialsPath(), fileErr)
+		}
+		return rem, &records.Error{Kind: records.KindPermission, Message: msg, Err: keyringErr}
+	}
+	if fileErr != nil {
+		return rem, &records.Error{Kind: records.KindPermission,
+			Message: fmt.Sprintf("the token for %s is still in %s", host, credentialsPath()),
+			Err:     fileErr}
+	}
+	return rem, nil
 }
 
 func credentialsPath() string {
@@ -162,25 +243,35 @@ func writeFileToken(host, token string) error {
 }
 
 // clearFileToken drops one host's entry from the fallback file, and the file
-// itself once nothing is left in it. Best effort by design: an unreadable or
-// absent file means there is no plaintext copy to worry about.
-func clearFileToken(host string) error {
+// itself once nothing is left in it. It reports whether an entry was there to
+// drop, because `ark logout` names the stores it emptied and "removed" is a
+// different sentence from "there was nothing stored".
+//
+// No file is the ordinary case and not an error. A file that will not parse
+// is: it may hold this host's token in bytes neither this function nor
+// resolution can read, so reporting it lets `ark logout` refuse to claim the
+// credential is gone — and lets `ark login` say the copy it supersedes is
+// still on disk.
+func clearFileToken(host string) (bool, error) {
 	path := credentialsPath()
 	if path == "" {
-		return nil
+		return false, nil
 	}
 	var c credentialsFile
 	if _, err := toml.DecodeFile(path, &c); err != nil {
-		return nil
+		if errors.Is(err, os.ErrNotExist) {
+			return false, nil
+		}
+		return false, err
 	}
 	if _, ok := c.Remotes[host]; !ok {
-		return nil
+		return false, nil
 	}
 	delete(c.Remotes, host)
 	if len(c.Remotes) == 0 {
-		return os.Remove(path)
+		return true, os.Remove(path)
 	}
-	return writeCredentials(path, c)
+	return true, writeCredentials(path, c)
 }
 
 // writeCredentials replaces the credentials file with c, restricted to this

@@ -35,6 +35,7 @@ ark login                                # token -> OS keyring, else credentials
 ark sync                                 # push mutations, upload blobs, pull records
 ark repo show                            # the repository record the service holds
 ark repo set --name scout                # correct it; registration can only backfill
+ark logout                               # take that token back out of both stores
 ```
 
 A second machine joins with `ark init --repository <id>`, then remote/login/

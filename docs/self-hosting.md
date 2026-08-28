@@ -256,6 +256,12 @@ plaintext silently. `ark status` reports which of the three answered.
 Set `ARK_NO_KEYRING=1` to skip the keyring and use the file deliberately;
 that path is quiet, because you asked for it.
 
+`ark logout` removes a host's credential again — the keyring entry and any
+fallback-file copy, because a plaintext copy left behind is the one nobody
+would notice. It succeeds whether or not there was anything to remove, and it
+cannot touch `ARK_TOKEN`: if that is set it says so and exits 7, since a token
+still resolves.
+
 ### Operational warnings
 
 - **Trailing newlines break the comparison.** The comparison is exact
