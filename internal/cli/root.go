@@ -23,6 +23,10 @@ type globals struct {
 	actorID string
 	agent   string
 	debug   bool
+	// version is this binary's version string. It travels as the agent
+	// version of a write this CLI makes against the sync service, so the
+	// service can say which build asserted a change.
+	version string
 }
 
 func (g *globals) printer(cmd *cobra.Command) *output.Printer {
@@ -67,7 +71,7 @@ func firstNonEmpty(vals ...string) string {
 
 // New builds the root ark command.
 func New(version string) *cobra.Command {
-	g := &globals{}
+	g := &globals{version: version}
 	root := &cobra.Command{
 		Use:   "ark",
 		Short: "Ark keeps the history of the work around your code",
@@ -91,6 +95,7 @@ live in .ark/ next to .git/ and sync to a shared service when configured.`,
 		newStatusCmd(g),
 		newSyncCmd(g),
 		newRemoteCmd(g),
+		newRepoCmd(g),
 		newLoginCmd(g),
 		newTaskCmd(g),
 		newThreadCmd(g),

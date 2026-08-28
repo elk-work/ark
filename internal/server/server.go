@@ -52,6 +52,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/sync/push", s.auth(s.handlePush))
 	mux.HandleFunc("POST /v1/sync/pull", s.auth(s.handlePull))
 	mux.HandleFunc("GET /v1/repositories/{repo}/records/{type}/{id}", s.auth(s.handleGetRecord))
+	// Repository metadata: readable, and correctable after registration —
+	// which registration itself deliberately cannot do. See repometa.go.
+	mux.HandleFunc("GET /v1/repositories/{repo}", s.auth(s.handleGetRepository))
+	mux.HandleFunc("POST /v1/repositories/{repo}/metadata", s.auth(s.handleSetRepositoryMetadata))
 	// Work-record write routes (docs/rfc-0004-work-record-write-api.md):
 	// what a program uses instead of speaking the mutation protocol.
 	mux.HandleFunc("POST /v1/repositories/{repo}/tasks", s.auth(s.handleCreateTask))
@@ -139,8 +143,9 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 		//
 		// So registration only ever *backfills*: a value already on the server
 		// wins, and a client can fill a field the server is missing. Renaming
-		// is not something a sync should do; if it is ever wanted it needs an
-		// explicit command, not a side effect of where someone cloned.
+		// is not something a sync should do — it is a deliberate act, and it
+		// has its own route: POST /v1/repositories/{repo}/metadata, in
+		// repometa.go, which is the only path that overwrites these fields.
 		_, err := tx.Exec(`INSERT INTO meta (id, repository_id, name, default_branch, git_remote_url, created_at)
 			VALUES (1, ?, ?, ?, ?, ?)
 			ON CONFLICT (id) DO UPDATE SET

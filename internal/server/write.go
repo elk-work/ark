@@ -48,8 +48,12 @@ func faultNotFound(msg string) *writeFault {
 // status a task already has are both correct answers that must not mint a
 // revision. Rolling back rather than committing a no-op is also what keeps
 // them from re-uploading the repository database to the backend.
+//
+// resp is `any` because not every write route answers with a record —
+// repository metadata is not one (repometa.go) — and the fault, replay and
+// no-op machinery has no reason to know the difference.
 type unchanged struct {
-	resp     api.RecordResponse
+	resp     any
 	status   int
 	replayed bool
 }
@@ -59,7 +63,7 @@ func (unchanged) Error() string { return "no change" }
 // finish renders the outcome of a write closure. Faults and no-op successes
 // travel as errors so their transactions roll back; everything else follows
 // the existing repodb error contract.
-func (s *Server) finish(w http.ResponseWriter, what string, err error, resp api.RecordResponse, status int) {
+func (s *Server) finish(w http.ResponseWriter, what string, err error, resp any, status int) {
 	var u unchanged
 	if errors.As(err, &u) {
 		if u.replayed {
@@ -117,7 +121,9 @@ func requireKey(r *http.Request) (string, *writeFault) {
 }
 
 // replayed returns a stored response for key, if this key has been served.
-func replayedResponse(ctx context.Context, tx *sql.Tx, key string, status int) error {
+// into is a pointer to the response shape this route answers with; on a hit
+// the stored document is decoded into it and travels back as unchanged.
+func replayedResponse(ctx context.Context, tx *sql.Tx, key string, status int, into any) error {
 	if key == "" {
 		return nil
 	}
@@ -130,17 +136,17 @@ func replayedResponse(ctx context.Context, tx *sql.Tx, key string, status int) e
 	if err != nil {
 		return err
 	}
-	var resp api.RecordResponse
-	if !stored.Valid || json.Unmarshal([]byte(stored.String), &resp) != nil {
+	if !stored.Valid || json.Unmarshal([]byte(stored.String), into) != nil {
 		// A key recorded without a readable response cannot be replayed
 		// faithfully; refusing beats inventing an answer.
 		return &writeFault{http.StatusConflict, "conflict", "idempotency key was used for a different request"}
 	}
-	return unchanged{resp: resp, status: status, replayed: true}
+	return unchanged{resp: into, status: status, replayed: true}
 }
 
-// rememberResponse stores the outcome so a retry returns it verbatim.
-func rememberResponse(ctx context.Context, tx *sql.Tx, key string, resp api.RecordResponse) error {
+// rememberResponse stores the outcome so a retry returns it verbatim. rev is
+// passed rather than read off resp so the store works for any response shape.
+func rememberResponse(ctx context.Context, tx *sql.Tx, key string, resp any, rev int64) error {
 	if key == "" {
 		return nil
 	}
@@ -151,7 +157,7 @@ func rememberResponse(ctx context.Context, tx *sql.Tx, key string, resp api.Reco
 	_, err = tx.ExecContext(ctx, `INSERT INTO applied_mutations
 		(mutation_id, status, error, remote, server_revision, applied_at)
 		VALUES (?, 'applied', '', ?, ?, ?)`,
-		key, string(body), resp.ServerRevision, records.Now())
+		key, string(body), rev, records.Now())
 	return err
 }
 
@@ -327,7 +333,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		// The closure reruns on a lost CAS; reset the accumulator so a
 		// retry cannot report a revision the committed database never had.
 		resp = api.RecordResponse{}
-		if err := replayedResponse(ctx, tx, key, http.StatusCreated); err != nil {
+		if err := replayedResponse(ctx, tx, key, http.StatusCreated, &api.RecordResponse{}); err != nil {
 			return err
 		}
 		actorID, err := resolveWriter(ctx, tx, req.Writer)
@@ -360,7 +366,7 @@ func (s *Server) handleCreateTask(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		return rememberResponse(ctx, tx, key, resp)
+		return rememberResponse(ctx, tx, key, resp, resp.ServerRevision)
 	})
 	s.finish(w, "create task", err, resp, http.StatusCreated)
 }
@@ -394,7 +400,7 @@ func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 	var resp api.RecordResponse
 	err := s.Repos.Update(ctx, repoID, false, func(tx *sql.Tx) error {
 		resp = api.RecordResponse{}
-		if err := replayedResponse(ctx, tx, key, http.StatusCreated); err != nil {
+		if err := replayedResponse(ctx, tx, key, http.StatusCreated, &api.RecordResponse{}); err != nil {
 			return err
 		}
 		present, err := recordExists(ctx, tx, req.ParentType, req.ParentID)
@@ -428,7 +434,7 @@ func (s *Server) handleCreateComment(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return err
 		}
-		return rememberResponse(ctx, tx, key, resp)
+		return rememberResponse(ctx, tx, key, resp, resp.ServerRevision)
 	})
 	s.finish(w, "create comment", err, resp, http.StatusCreated)
 }
@@ -462,7 +468,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 	var resp api.RecordResponse
 	err := s.Repos.Update(ctx, repoID, false, func(tx *sql.Tx) error {
 		resp = api.RecordResponse{}
-		if err := replayedResponse(ctx, tx, key, http.StatusOK); err != nil {
+		if err := replayedResponse(ctx, tx, key, http.StatusOK, &api.RecordResponse{}); err != nil {
 			return err
 		}
 		var data string
@@ -531,7 +537,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 				Data: json.RawMessage(updated), ServerRevision: rev},
 			ServerRevision: rev,
 		}
-		return rememberResponse(ctx, tx, key, resp)
+		return rememberResponse(ctx, tx, key, resp, resp.ServerRevision)
 	})
 	s.finish(w, "set task status", err, resp, http.StatusOK)
 }

@@ -36,6 +36,7 @@ func TestInputErrorsExitTwo(t *testing.T) {
 		{"unknown subcommand", []string{"task", "lst"}},
 		{"unknown subcommand on pr", []string{"pr", "lst"}},
 		{"unknown subcommand on remote", []string{"remote", "lst"}},
+		{"unknown subcommand on repo", []string{"repo", "lst"}},
 		// Ark's own validation, which already agreed — here so a refactor
 		// cannot fix one half by breaking the other.
 		{"nothing to change", []string{"task", "edit", "1"}},
@@ -59,7 +60,7 @@ func TestInputErrorsExitTwo(t *testing.T) {
 // an error. It prints help and succeeds, as it always did.
 func TestGroupWithoutSubcommandStillPrintsHelp(t *testing.T) {
 	dir := gitRepo(t)
-	for _, group := range []string{"task", "pr", "thread", "run", "artifact", "conflict", "promotion", "remote", "skill"} {
+	for _, group := range []string{"task", "pr", "thread", "run", "artifact", "conflict", "promotion", "remote", "repo", "skill"} {
 		out, err := arkErr(t, dir, group)
 		if err != nil {
 			t.Errorf("ark %s: %v", group, err)
