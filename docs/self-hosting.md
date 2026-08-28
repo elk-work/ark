@@ -785,10 +785,20 @@ two must not share an exit code, because 6 is the one retry loops key on.
 **A zero-length object is the neighbouring case, and it lands somewhere
 else.** SQLite reads it as a perfectly valid empty database, so nothing fails
 to open and `repository_corrupt` never fires. What is absent is the repository
-row — which registration treats exactly as it treats no database at all, so
+row — which the service treats exactly as it treats no database at all, so
 this one is a `404`, exit 7, and a history reset. The damaged object stays
 where it is for you to restore over; nothing adopts it and nothing empties it
 further.
+
+That `404` is the answer on **every** route, which matters here rather than in
+the client: your client meets the refusal at registration and never gets
+further, but the verification step below has you `curl` the pull route
+directly, and that is the one place a zeroed object looks different from a
+deleted one. It used to answer `500 internal` / "pull failed" there, with the
+real reason only in the service's log (elk-work/ark#85). Now it says the
+object is present and holds no repository, which is the sentence that tells
+you to go looking for what wrote zero bytes over it rather than for what
+deleted it.
 
 #### Two things that are not restored with it
 

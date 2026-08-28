@@ -763,11 +763,17 @@ st_upload "$WORK/empty.db"
 # not the bytes, which makes this a repository the service no longer holds
 # rather than one it cannot read. Registration answers it as such
 # (elk-work/ark#66), and that is where a sync meets it first.
+#
+# The raw route is what an operator meets, because this runbook has them curl
+# the pull route to check the service's copy. It used to answer 500 internal
+# here — the one shape of the loss the three routes did not agree on — until
+# the check moved into the storage layer (elk-work/ark#85).
 code="$(api_pull 0)"
-assert_ne "pull against a zero-length object does not report success" 200 "$code"
+assert_eq "pull against a zero-length object is 404, the same as an absent one" 404 "$code"
 step "  server answered $code: $(api_last | jq -c . 2>/dev/null || api_last)"
-note "the raw pull route still answers 500 internal here — the client never"
-note "reaches it, because registration refuses first (elk-work/ark#65)."
+assert_eq "  and says not_found, not internal" not_found "$(api_last | jq -r .code)"
+assert_contains "  and says the object is there and holds nothing" \
+	"holds no repository" "$(api_last | jq -r .message)"
 
 client_from_snapshot alpha_zero "$SNAP/alpha-R$R1.tar"
 client_sync alpha_zero

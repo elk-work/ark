@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -33,21 +34,51 @@ func registerBody(t *testing.T, s *Server, body string) *httptest.ResponseRecord
 	return doRequest(t, s, "POST", "/v1/repositories", body)
 }
 
-// stored reports whether the service holds a database for the repository.
+// stored reports whether the service holds an *object* for the repository.
+//
 // Deliberately not a pull: this asks the storage layer, which is where the
-// resurrected object actually appeared.
+// resurrected object actually appeared. And deliberately not repodb.View
+// either, which is what it used to ask — "an object is there" stopped being
+// the same question as "a repository is registered" when View began answering
+// ErrNotFound for a stored database holding no repository row
+// (elk-work/ark#85). #66 is about whether an object came back from the dead,
+// so the probe has to be about the object.
 func stored(t *testing.T, s *Server) bool {
 	t.Helper()
-	err := s.Repos.View(context.Background(), repoID, func(*sql.DB) error { return nil })
+	_, err := s.Repos.Backend.Fetch(context.Background(), repoID,
+		filepath.Join(t.TempDir(), "probe.db"))
 	switch {
 	case err == nil:
 		return true
 	case errors.Is(err, repodb.ErrNotFound):
 		return false
 	default:
-		t.Fatalf("view repository: %v", err)
+		t.Fatalf("fetch repository object: %v", err)
 		return false
 	}
+}
+
+// storedRepositoryRows counts the repository rows in the service's stored copy,
+// read out of the object itself rather than through repodb. The assertion it
+// serves is about what a registration wrote into storage, and repodb's answer
+// for a database with no repository row is now the behaviour under test — read
+// through there, the test would only be agreeing with itself.
+func storedRepositoryRows(t *testing.T, s *Server) int {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "rows.db")
+	if _, err := s.Repos.Backend.Fetch(context.Background(), repoID, path); err != nil {
+		t.Fatalf("fetch repository object: %v", err)
+	}
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		t.Fatalf("open the stored database: %v", err)
+	}
+	defer db.Close()
+	var n int
+	if err := db.QueryRow(`SELECT count(*) FROM meta WHERE id = 1`).Scan(&n); err != nil {
+		t.Fatalf("count repository rows in the stored database: %v", err)
+	}
+	return n
 }
 
 func decodeErr(t *testing.T, rec *httptest.ResponseRecorder) api.Error {
@@ -160,14 +191,14 @@ func TestRegistrationWillNotAdoptAStoredDatabaseHoldingNoRepository(t *testing.T
 	if rec.Code != 404 {
 		t.Fatalf("register against an empty database: %d %s, want 404", rec.Code, rec.Body.String())
 	}
-	var registered int
-	if err := s.Repos.View(context.Background(), repoID, func(db *sql.DB) error {
-		return db.QueryRow(`SELECT count(*) FROM meta WHERE id = 1`).Scan(&registered)
-	}); err != nil {
-		t.Fatalf("read metadata: %v", err)
+	if n := storedRepositoryRows(t, s); n != 0 {
+		t.Errorf("the stored database holds %d repository rows — the refused registration wrote one into it anyway", n)
 	}
-	if registered != 0 {
-		t.Error("the refused registration wrote a repository row into the empty database anyway")
+	// And it left the object alone. An operator restores over this file; a
+	// refusal that removed it would have taken away the thing they are about
+	// to overwrite, and the evidence of what happened with it.
+	if !stored(t, s) {
+		t.Error("the refused registration removed the stored object")
 	}
 }
 

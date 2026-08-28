@@ -1495,6 +1495,18 @@ it back up. A client that meets the refusal reports it as a history reset and
 exits 7, exactly as it would have reported the same loss on the pull (§9.2,
 §22).
 
+**Missing covers two shapes, and they are one answer.** The object may be
+absent, or it may be present and hold no repository row — which is what a
+zero-length `repos/<id>.db` reads as, since SQLite opens one as a valid empty
+database (§22). Every route a repository is reachable through answers both
+with the same `404 not_found`, because it is the same loss and the client's
+move is the same. The service names which shape in the message and in its log,
+because the *operator's* move is not the same: one object was removed, the
+other had zero bytes written over it. This is a property of the storage layer
+rather than of any handler, and has to be — while the check lived in the
+registration handler alone, pull and push answered `500 internal` for a
+repository this route was already calling missing (elk-work/ark#85).
+
 The API service owns:
 
 - authentication
@@ -1799,8 +1811,8 @@ repository_corrupt  500 — the service's stored copy of this repository is
 A stored database that opens and holds no repository row is **not**
 `repository_corrupt`. SQLite reads a zero-length object as a valid empty
 database, so what is missing there is the repository rather than the bytes;
-that is the same loss as an absent object, and registration answers it with
-the `404 not_found` §19 already specifies for one. Two kinds of damage, two
+that is the same loss as an absent object, and every route answers it with
+the `404 not_found` §19 specifies for one. Two kinds of damage, two
 answers, and the difference is whether anything can still be read.
 
 `repository_corrupt` names the repository and what is wrong with its stored
