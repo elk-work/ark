@@ -508,6 +508,76 @@ service disposable. Each client holds its complete record set in
 write, not just the resulting rows. So the service can be rebuilt from
 nothing and repopulated by replay from any client.
 
+### Choosing a retention posture
+
+Restoring from a stored copy is only worth as much as the oldest copy you
+still have. So the question your storage configuration has to answer is not
+*how do I restore* — that part takes seconds — but **how long can you fail
+to notice and still recover.**
+
+Nothing picks that number for you, and the default is not an answer. A GCS
+bucket created with no retention configuration keeps exactly one copy of
+each repository, plus whatever the soft-delete window happens to be: seven
+days, which is a Google default rather than a decision anyone made about
+Ark.
+
+Seven days is short against the failure this exists for. In the incident
+that prompted this section, a repository's history was lost and **nobody
+noticed for six weeks** — the bucket-side copy had expired more than a month
+before anyone went looking. Client-side detection has since improved: a
+checkout that syncs against a service holding a revision below its own now
+says so and exits 7. But detection and retention have to overlap, and
+"somebody syncs this repository within seven days" is not a property a fleet
+has. A repository nobody is currently syncing is precisely the case that
+produces the incident.
+
+Three postures, and they are not exclusive:
+
+| | What it buys | What it does not cover |
+|---|---|---|
+| **Lengthen the soft-delete duration** | One flag. Retains deleted and overwritten generations for longer. | Caps at 90 days, and it leans harder on the one mechanism you already depend on rather than adding a second. |
+| **Object versioning, with a lifecycle rule** | Keeps every generation for as long as your rule says, with no cap. | Losing the bucket itself. |
+| **Periodic export elsewhere** | The only one that survives losing the bucket, the project, or the account. | More moving parts, and the only one that is not a single configuration change. |
+
+Versioning plus a lifecycle rule is the sensible default, and it matches how
+this storage is already used — whole-object writes of a small file. Cost is
+not the constraint at these sizes: the reference deployment's entire store
+is under 7 MiB across eight repositories.
+
+**What the reference deployment runs**, offered as a worked example rather
+than a prescription:
+
+```sh
+gcloud storage buckets update gs://<bucket> --versioning
+gcloud storage buckets update gs://<bucket> --lifecycle-file=lifecycle.json
+```
+
+```json
+{
+  "rule": [
+    {
+      "action": { "type": "Delete" },
+      "condition": {
+        "daysSinceNoncurrentTime": 90,
+        "numNewerVersions": 10,
+        "isLive": false
+      }
+    }
+  ]
+}
+```
+
+Conditions within a lifecycle rule are **and**-ed, which is the whole point
+of writing two of them: a superseded generation is deleted only once it is
+*both* older than 90 days *and* has at least ten newer generations behind
+it. A busy repository therefore cannot bury a good copy under a burst of
+writes, and a repository nobody has touched in a year still keeps its last
+ten. Ninety days is chosen to sit comfortably past the six weeks that
+incident went unnoticed.
+
+Soft-delete stays at its default underneath this, where it is now a backstop
+against deleting *versions* rather than the only line of defence.
+
 ### Restore from a stored copy
 
 The whole procedure is: put the right bytes back at `repos/<id>.db`. The
@@ -516,26 +586,30 @@ restart, and nothing to tell the clients.
 
 **Find a copy.** In order of what you are likeliest to have:
 
-1. **The soft-delete window.** GCS buckets retain deleted *and overwritten*
+1. **Noncurrent versions**, if you turned versioning on — see *Choosing a
+   retention posture* above. Every overwrite leaves the previous generation
+   behind, and it stays until your lifecycle rule removes it, so this is the
+   copy you are likeliest to still have and the first place to look.
+
+   ```sh
+   gcloud storage ls --all-versions gs://<bucket>/repos/<repository-id>.db
+   ```
+
+2. **The soft-delete window.** GCS buckets retain deleted *and overwritten*
    object generations for the bucket's soft-delete duration — seven days by
-   default, and that default is what the reference deployment runs on.
+   default. This is the fallback when versioning is off, or when the
+   generation you want has already aged out of your lifecycle rule.
 
    ```sh
    gcloud storage ls --soft-deleted gs://<bucket>/repos/<repository-id>.db
    ```
 
-   Each line ends in `#<generation>`. Generations increase, so the last one
-   from before the loss is the one you want.
-
-   **Seven days is a default, not a decision.** It is how long you can fail
-   to notice and still have a copy, and nothing else in this design gives you
-   longer. Pick it deliberately — lengthen the duration, turn on object
-   versioning, or export the objects somewhere — rather than inheriting it.
-
-2. **Object versioning**, if you enabled it. Same idea, no expiry.
 3. **Any out-of-band copy** — a `gcloud storage cp` of the object, a copy of
    the `DATA_DIR`, or a file somebody kept. It is an ordinary SQLite file, so
    any copy of it is a complete backup.
+
+In each case the listing ends every line in `#<generation>`. Generations
+increase, so the last one from before the loss is the one you want.
 
 **Check it before you put it back.** It is a SQLite file; read it:
 

@@ -582,9 +582,14 @@ phase "Phase 4 — restore from the stored copy, with no client involved"
 RESTORE_METHOD="out-of-band copy"
 RESTORE_START=$(date +%s)
 if [ "$MODE" = gcs ]; then
-	# Production's only bucket-side restore source is the soft-delete window
-	# (7 days by default; object versioning is off). Use it here, because
-	# that is the path an operator would actually have.
+	# Restore from the soft-delete window. Production now also has object
+	# versioning with a lifecycle rule (see "Choosing a retention posture"
+	# in docs/self-hosting.md), so this is no longer its *only* bucket-side
+	# source — but it is the weaker of the two, it is what a self-hoster on
+	# the defaults has, and it is the one that has to keep working, so it
+	# is the path this drill exercises. Point --bucket at an unversioned
+	# scratch bucket to test it as written; restoring a noncurrent version
+	# is not covered here.
 	SD_GENS="$(st_soft_deleted_generations)"
 	step "soft-deleted generations available: $(echo "$SD_GENS" | tr '\n' ' ')"
 	if echo "$SD_GENS" | grep -qx "$G1"; then
