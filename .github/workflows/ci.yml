@@ -73,3 +73,61 @@ jobs:
         run: go build ./...
       - name: test
         run: go test ./...
+      # The suite above substitutes a fake keyring, deliberately —
+      # internal/cloud/keyring_test.go says why. That proves the resolution
+      # order and nothing whatever about wincred, which is how v0.6.0 came to
+      # ship a Windows credential path verified only to compile, vet and pass
+      # (elk-work/ark#38). The hosted runner signs in as an ordinary
+      # interactive user, so Credential Manager is reachable here and the
+      # round-trip is a real one.
+      - name: live Credential Manager round-trip
+        env:
+          ARK_KEYRING_LIVE: "1"
+        run: go test -run TestLive -v ./internal/cloud
+
+  # A hosted Linux runner has no Secret Service and no session bus at all, so
+  # this job brings both up: gnome-keyring holding an unlocked login keyring on
+  # a bus of its own. Without them the live tests do not degrade quietly, they
+  # fail at the first Set — go-keyring's Linux backend speaks D-Bus and there
+  # would be nothing on the other end. The recipe is go-keyring's own CI.
+  keyring-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: install gnome-keyring
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gnome-keyring
+      - name: live Secret Service round-trip
+        # dbus-run-session wraps the whole step in a private session bus, which
+        # the daemon then claims as org.freedesktop.secrets. The unlock
+        # password is in the clear because it guards a keyring created seconds
+        # earlier on a machine destroyed at the end of the job: it protects
+        # nothing, and pulling it from a secret would only imply otherwise.
+        shell: dbus-run-session -- bash --noprofile --norc -eo pipefail {0}
+        env:
+          ARK_KEYRING_LIVE: "1"
+        run: |
+          mkdir -p "$HOME/.local/share/keyrings"
+          chmod 700 "$HOME/.local/share/keyrings"
+          echo 'ark-ci-keyring' | gnome-keyring-daemon --unlock
+          go test -run TestLive -v ./internal/cloud
+
+  # macOS is the one platform anybody ever drove live by hand, which is exactly
+  # why it is here: a verification nobody repeats stops being one the next time
+  # the code moves. Nothing has to be arranged first — the runner's login
+  # keychain is already the default and already unlocked, no-timeout.
+  keyring-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: live Keychain round-trip
+        env:
+          ARK_KEYRING_LIVE: "1"
+        run: go test -run TestLive -v ./internal/cloud
