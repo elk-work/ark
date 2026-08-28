@@ -21,6 +21,16 @@ jobs:
         run: go build ./...
       - name: test
         run: go test -race ./...
+      # The CLA gate is a shell script rather than Go, and it is the one thing
+      # in this repository whose failures would otherwise surface on an
+      # outside contributor's pull request instead of on ours.
+      # `--severity=warning` because the runner's ShellCheck is a version or
+      # two behind a developer's and its style advice moves between them; its
+      # warnings do not.
+      - name: cla script
+        run: |
+          shellcheck --severity=warning --shell=bash scripts/cla.sh scripts/cla-test.sh
+          bash scripts/cla-test.sh
 
   windows:
     runs-on: windows-latest

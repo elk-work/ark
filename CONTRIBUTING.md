@@ -66,8 +66,13 @@ automatically); mirror any server-side schema need in
 - Commit messages use area prefixes as in history: `records:`, `store:`,
   `cli:`, `server:`, `sync:`, `docs:`, `chore:`.
 - Keep PRs one-topic. Spec edit rides along when behavior changes.
-- First-time contributors: the CLA bot will ask you to sign the
-  [CLA](CLA.md) with a single PR comment.
+- First-time contributors: a check named `cla-assistant` will ask you to sign
+  the [CLA](CLA.md). Post one comment on the pull request whose entire body is
+  `I have read the CLA Document and I hereby sign the CLA`, and the check goes
+  green by itself; comment `recheck` to run it again. It is
+  [`scripts/cla.sh`](scripts/cla.sh) reading
+  [`signatures/cla.json`](signatures/cla.json), not a third-party service —
+  everyone whose commits are in the pull request has to appear there.
 
 ## Questions
 
