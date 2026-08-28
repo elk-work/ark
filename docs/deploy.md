@@ -18,8 +18,8 @@ Two ways to run it, chosen by whether `GCS_BUCKET` is set:
 
 **→ [self-hosting.md](self-hosting.md)** is the guide: exact environment
 variables, both modes end to end, auth and its trailing-newline trap,
-health checks, client setup, backup/replay recovery, and why the
-reference deployment runs a single instance.
+health checks, client setup, restore-from-a-copy and replay recovery,
+and why the reference deployment runs a single instance.
 
 The maintainers' own environment (GCP project, bucket, Cloud Run service,
 service account, secret name, deploy command) is documented privately in
