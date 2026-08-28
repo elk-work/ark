@@ -757,6 +757,68 @@ succeed by repeating it. What follows from it is the part that binds.
   — they are a designed state with a resolution path that `ark status` has
   always named, so a conflicting sync was never claiming to be in sync.
 
+### Referential integrity
+
+**The service does not enforce it on push, and stores what it accepts either
+way.** A create is applied whether or not the service holds the record its
+payload points at. The asymmetry with an update is deliberate: an update has
+to find the record to have something to merge into, so `record not found` is
+the only answer available to it, while a create carries a whole document and
+needs nothing already present.
+
+What makes the strict rule wrong here is ordering. Mutations are ordered by
+ULID *within* a push, but nothing orders two clients' pushes against each
+other, so the record a new child names can legitimately still be sitting in
+another client's queue. Refusing the child would convert that skew — which
+ends on its own, usually within a sync interval — into a rejection, and a
+rejection is permanent, terminal and loud (above). The service would be
+destroying a real write to enforce an invariant that was about to hold.
+
+**What it guarantees instead is that it says so.** Every accepted create is
+checked against each reference its record type carries (§6), and one the
+service cannot resolve is written to `dangling_references` in the same
+transaction: the child, the field that referred, the record it named, the
+mutation that carried it, and when it was first seen. The service can no
+longer do what it did in elk-work/ark#56 — reject three tasks as `record not
+found` and store three comments on those same tasks, in one transaction,
+leaving orphans that no client can render and saying nothing about them.
+
+The set that matters is the outstanding one, and it is a comparison rather
+than a stored state:
+
+```sql
+SELECT d.* FROM dangling_references d WHERE NOT EXISTS (
+  SELECT 1 FROM records r
+  WHERE r.record_type = d.parent_type AND r.record_id = d.parent_id);
+```
+
+**It self-clears, and needs no `resolved_at` to do it.** A client-side
+rejection carries that column because the client cannot see the service's copy
+and so cannot tell on its own when the two agree again. Here both sides of the
+question are one table away and records are never hard-deleted, so the
+comparison is monotone and true whenever it is made. It is also the only form
+that stays true: a record can be created by the mutation engine or by a write
+route (§19), and a stamp written by one path and forgotten by the other would
+leave the ledger naming an orphan that no longer exists. The entry survives
+after the reference resolves, because that a repository sees this skew — and
+how often — is worth knowing.
+
+**An outstanding entry is a defect, not a statistic.** `comment.parent_id` and
+`artifact.parent_id` are polymorphic and therefore carry no foreign key, so
+those render as orphans and nothing worse. Every other reference is a
+declared foreign key on the client, checked when the pull transaction commits
+(`PRAGMA defer_foreign_keys` defers that check; it does not remove it), so a
+client that pulls such a record without the record it names fails the entire
+pull — not that record, the pull — and its cursor does not advance, so the
+next pull fetches the same batch and fails again (elk-work/ark#75).
+
+Two things this deliberately is not. It is not **quarantine** — holding the
+child back until its referent lands and releasing it on pull — which is the
+eventual answer and more work than V1 has spent here. And the ledger is not
+yet **surfaced**: it lives in the repository database, so today an operator
+reads it there and no push response, route or `ark status` line reports it
+(elk-work/ark#74).
+
 ## 9.2 Pull
 
 The client requests all accepted changes after its last known server revision.

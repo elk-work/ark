@@ -36,6 +36,56 @@ var (
 	numberedTypes = map[string]bool{"task": true, "pull_request": true}
 )
 
+// reference is one pointer from a record to another record. parentType names
+// the type it must resolve to; typeField instead names the field that carries
+// the type, for the two polymorphic references (comment and artifact both
+// hang off a task, pull request, run, or review).
+type reference struct {
+	field      string
+	parentType string
+	typeField  string
+}
+
+// recordReferences is every pointer between two record types, as the client's
+// schema models it (§7). It is what applyCreate checks a new record against.
+//
+// Wider than the six types elk-work/ark#56 listed, because the schema is the
+// authority and the schema says more: agent_thread and pull_request carry
+// task_id, and comment and thread_message carry supersedes_id. All four are
+// declared REFERENCES in migrations/0001_initial.sql, and the failure they
+// produce is the worse one — comment.parent_id and artifact.parent_id are
+// polymorphic and therefore unconstrained, so those merely render as orphans,
+// while every typed reference here is a real foreign key on the client, and a
+// client that pulls such a record without the record it names fails its whole
+// pull transaction on the deferred check (internal/store/sync.go). A pointer
+// that can wedge a pull belongs in the ledger whether or not the word
+// "parent" fits it.
+//
+// repository_id is absent deliberately: the repository is not a row in
+// records — the database file is the repository (RFC-0001) — so it cannot
+// dangle. created_by is absent for the opposite reason: it names an actor,
+// but no schema declares it a foreign key, and actors arrive by their own
+// carrier outside the mutation stream (§9.1).
+var recordReferences = map[string][]reference{
+	"comment": {
+		{field: "parent_id", typeField: "parent_type"},
+		{field: "supersedes_id", parentType: "comment"},
+	},
+	"agent_thread": {{field: "task_id", parentType: "task"}},
+	"thread_message": {
+		{field: "thread_id", parentType: "agent_thread"},
+		{field: "supersedes_id", parentType: "thread_message"},
+	},
+	"agent_run": {
+		{field: "task_id", parentType: "task"},
+		{field: "thread_id", parentType: "agent_thread"},
+	},
+	"pull_request": {{field: "task_id", parentType: "task"}},
+	"review":       {{field: "pull_request_id", parentType: "pull_request"}},
+	"artifact":     {{field: "parent_id", typeField: "parent_type"}},
+	"promotion":    {{field: "pull_request_id", parentType: "pull_request"}},
+}
+
 // outcomeStatus classifies a processed mutation.
 type outcomeStatus string
 
@@ -194,7 +244,70 @@ func applyCreate(ctx context.Context, tx *sql.Tx, m api.Mutation) outcome {
 	if err := setFieldRevisions(ctx, tx, m.RecordType, m.RecordID, keys(fields), rev); err != nil {
 		return outcome{status: statusRejected, err: err.Error()}
 	}
+	if err := recordDangling(ctx, tx, m, fields); err != nil {
+		return outcome{status: statusRejected, err: err.Error()}
+	}
 	return outcome{status: statusApplied, revision: rev}
+}
+
+// recordDangling notes every pointer in a newly created record that resolves
+// to nothing here.
+//
+// The record is stored either way — see §9.1 — because the service cannot
+// tell an ordering skew it will get over from a reference that is genuinely
+// wrong: nothing orders one client's push against another's, so the record
+// being named may be sitting in somebody else's queue. What it can do is stop
+// being silent about it. Before this, the service would reject a task as
+// `record not found` and store a comment on that same task in one
+// transaction, leaving an orphan that no client can render and that pulls
+// down to all of them (elk-work/ark#56).
+//
+// Existence, not liveness: a soft-deleted record still satisfies the client's
+// foreign key, because a tombstone updates the row rather than removing it
+// (internal/store/sync.go), so a deleted parent is not a dangling one.
+func recordDangling(ctx context.Context, tx *sql.Tx, m api.Mutation, fields map[string]json.RawMessage) error {
+	for _, ref := range recordReferences[m.RecordType] {
+		parentID := stringField(fields, ref.field)
+		if parentID == "" {
+			continue // absent, null, or empty: a nullable reference is normal
+		}
+		parentType := ref.parentType
+		if ref.typeField != "" {
+			parentType = stringField(fields, ref.typeField)
+		}
+		var held bool
+		err := tx.QueryRowContext(ctx, `SELECT true FROM records
+			WHERE record_type = ? AND record_id = ?`, parentType, parentID).Scan(&held)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		// DO NOTHING, not a plain insert: bookkeeping about a record must
+		// never become the reason the service refuses to store it.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO dangling_references
+			(record_type, record_id, field, parent_type, parent_id, mutation_id, first_seen_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (record_type, record_id, field) DO NOTHING`,
+			m.RecordType, m.RecordID, ref.field, parentType, parentID, m.ID, records.Now()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// stringField reads one string field out of a record payload. A missing
+// field, a null, or a non-string reads as empty, which every caller treats as
+// "not set" — the payload is client data and must not be able to fail a push.
+func stringField(fields map[string]json.RawMessage, name string) string {
+	raw, ok := fields[name]
+	if !ok {
+		return ""
+	}
+	var s string
+	json.Unmarshal(raw, &s)
+	return s
 }
 
 // reconcileNumber returns a rewritten payload when the incoming display
@@ -226,18 +339,12 @@ func reconcileNumber(ctx context.Context, tx *sql.Tx, recordType string, fields 
 // stampStoredBlob fills storage_key on a new artifact when its blob is
 // already in object storage.
 func stampStoredBlob(ctx context.Context, tx *sql.Tx, fields map[string]json.RawMessage) (json.RawMessage, error) {
-	var sha string
-	if raw, ok := fields["sha256"]; ok {
-		json.Unmarshal(raw, &sha)
-	}
+	sha := stringField(fields, "sha256")
 	if sha == "" {
 		return nil, nil
 	}
-	if raw, ok := fields["storage_key"]; ok {
-		var existing string
-		if json.Unmarshal(raw, &existing) == nil && existing != "" {
-			return nil, nil
-		}
+	if stringField(fields, "storage_key") != "" {
+		return nil, nil
 	}
 	var key string
 	err := tx.QueryRowContext(ctx, `SELECT storage_key FROM blobs WHERE sha256 = ? AND stored`, sha).Scan(&key)
