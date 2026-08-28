@@ -83,11 +83,20 @@ Workspaces, projects, milestones, a web UI, hosted Git, a custom merge
 engine, full `gh` parity. Do not add primitives without a demonstrated
 need (principle 005).
 
-**Multi-user authorization is absent, but not deliberate.** V1 authorizes
-with one bearer token, and `docs/rfc-0003-elk-issued-credentials.md` —
-accepted 2026-07-28, unimplemented — replaces it with per-principal
-credentials and per-repository `read`/`write`/`admin` grants. Scoped as
-elk-work/ark#43, #52, #53 and #54. `internal/server/repometa.go` and
-`internal/server/write.go` already carry comments naming where that check
-goes; put it there when it lands rather than inventing a grant system
-beside them.
+**Multi-user authorization is arriving in slices, and half of it is still
+absent.** `docs/rfc-0003-elk-issued-credentials.md` (accepted 2026-07-28)
+replaces the single bearer token with per-principal credentials and
+per-repository `read`/`write`/`admin` grants. Scoped as elk-work/ark#43, #52,
+#53 and #54.
+
+- **Landed (#43).** `auth.db` holds `principals`, `credentials` and `grants`;
+  `s.auth` is dual-path (`internal/server/auth.go`), so the legacy
+  `ARK_API_TOKEN` and an `arkc_…` credential both authenticate; `POST
+  /v1/principals` plus `ark principal create` mint credentials from
+  `ARK_BOOTSTRAP_TOKEN`, with no identity provider.
+- **Not yet.** `grants` is created and never read — a credential currently
+  reaches every route the service token does. Grant enforcement and the actor
+  binding are #52, the device flow is #53, retiring the legacy token is #54.
+  `internal/server/repometa.go` and `internal/server/write.go` carry comments
+  naming where the grant check goes; put it there when it lands rather than
+  inventing a grant system beside them.

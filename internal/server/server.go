@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"crypto/sha256"
-	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +12,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/elk-work/ark/internal/records"
 	"github.com/elk-work/ark/internal/server/repodb"
@@ -27,9 +27,17 @@ type Server struct {
 	// which is what every deployment configured before ARK_SIGNING_KEY
 	// existed relies on. See signingKey.
 	SigningKey string
-	Blobs      BlobStore
-	Log        *slog.Logger
-	Version    string // build stamp, reported unauthenticated on GET /
+	// BootstrapToken mints the first principal on POST /v1/principals and is
+	// accepted on no other route (RFC-0003 Decision 6). Empty disables that
+	// route entirely, which is every deployment that has not opted in.
+	BootstrapToken string
+	Blobs          BlobStore
+	Log            *slog.Logger
+	Version        string // build stamp, reported unauthenticated on GET /
+
+	// auths is the credential store, opened on first use. See authStore.
+	authOnce sync.Once
+	auths    *authStore
 }
 
 // signingKey is the HMAC key for local-mode blob URLs: ARK_SIGNING_KEY when
@@ -70,6 +78,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
 	})
+	// Bootstrap: the one route authenticated by ARK_BOOTSTRAP_TOKEN rather
+	// than by a bearer, so a deployment can mint its first credential without
+	// already holding one. See auth.go.
+	mux.HandleFunc("POST /v1/principals", s.handleCreatePrincipal)
 	mux.HandleFunc("POST /v1/repositories", s.auth(s.handleRegisterRepo))
 	mux.HandleFunc("POST /v1/sync/push", s.auth(s.handlePush))
 	mux.HandleFunc("POST /v1/sync/pull", s.auth(s.handlePull))
@@ -99,17 +111,6 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("PUT /blobs/", local.Handler())
 	}
 	return mux
-}
-
-func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if s.Token == "" || subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) != 1 {
-			writeErr(w, http.StatusUnauthorized, "permission", "invalid or missing token")
-			return
-		}
-		next(w, r)
-	}
 }
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {

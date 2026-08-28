@@ -43,10 +43,11 @@ The server takes **no command-line flags**. Everything is environment:
 |---|---|---|---|
 | `ARK_API_TOKEN` | always | — | Bearer token clients must present. Startup fails without it. |
 | `ARK_SIGNING_KEY` | no | `ARK_API_TOKEN` | HMAC key for local-mode `/blobs/` URLs. Unset it is the service token, which is what it has always been; set it, the two are independent. Ignored in object-storage mode, where GCS signs. |
+| `ARK_BOOTSTRAP_TOKEN` | no | — | Accepted on `POST /v1/principals` and no other route, to mint the first per-principal credential. Unset, that route refuses everything and the service token is the only way in. See [Per-principal credentials](#per-principal-credentials). |
 | `GCS_BUCKET` | object-storage mode | — | Google Cloud Storage bucket for repository databases and blobs. Set → object-storage mode; unset → local mode. |
 | `BASE_URL` | local mode | — | Externally reachable base URL of this service. Required when `GCS_BUCKET` is unset; used to build blob URLs. Startup fails without it. |
 | `DATA_DIR` | no | `data` | Local mode only. Repository databases go in `<DATA_DIR>/repos`, blobs in `<DATA_DIR>/blobs`. Relative paths resolve against the working directory. |
-| `CACHE_DIR` | no | `<os temp dir>/ark-repos` | Scratch space for working copies of repository databases. Created at startup. Safe to lose — it is a cache, refetched on demand. |
+| `CACHE_DIR` | no | `<os temp dir>/ark-repos` | Scratch space for working copies of repository databases and of `auth.db`. Created at startup. Safe to lose — it is a cache, refetched on demand. |
 | `PORT` | no | `8080` | Listen port. |
 
 The mode is chosen solely by whether `GCS_BUCKET` is non-empty. There is
@@ -227,20 +228,27 @@ V1 is deliberately one token for everything (spec §20). There are no
 users, no per-repository permissions, and no scopes. Anyone holding the
 token can read and write every repository the service knows about.
 
-That is a stage rather than the end state, which matters most to you if
-you are self-hosting: `docs/rfc-0003-elk-issued-credentials.md` (accepted
-2026-07-28, unimplemented) replaces it with per-principal credentials,
-per-repository grants and individual revocation, and its bootstrap path
-needs no identity provider at all — so a self-hosted deployment gets
-per-person credentials without adopting anything else. Until it ships,
-the paragraph above is the whole authorization model.
+That is a stage rather than the end state, and the first part of the end
+state has landed:
+[rfc-0003-elk-issued-credentials.md](rfc-0003-elk-issued-credentials.md)
+replaces one shared token with per-principal credentials, per-repository
+grants and individual revocation, and its bootstrap path needs no
+identity provider at all. **Per-principal credentials work today** — see
+[Per-principal credentials](#per-principal-credentials) below — and
+per-repository grants do not yet: a valid credential currently reaches
+everything the service token reaches. So the paragraph above is still the
+whole authorization model, and the reason to mint credentials now is
+attribution and individual revocation, not confinement.
 
 **Server side.** `ARK_API_TOKEN` is read once at startup; empty or
 missing is a startup failure. Every `/v1` route strips a leading
 `Bearer ` from the `Authorization` header and compares the remainder
-against the token in constant time. A mismatch is `401` with a
-`permission` error code. The only routes without a bearer check are
-`GET /` (a service banner) and `GET /health`. In local mode `/blobs/`
+against the token in constant time — and, failing that, against the
+credential store, if the bearer looks like a credential this service
+issued. A mismatch either way is `401` with a `permission` error code.
+The only routes without a bearer check are
+`GET /` (a service banner), `GET /health`, and `POST /v1/principals`,
+which has its own token. In local mode `/blobs/`
 also skips the bearer check, but is not unauthenticated: it requires an
 HMAC signature derived from `ARK_SIGNING_KEY` — which defaults to that
 same token — bound to the method and carrying a one-hour expiry.
@@ -275,6 +283,67 @@ would notice. It succeeds whether or not there was anything to remove, and it
 cannot touch `ARK_TOKEN`: if that is set it says so and exits 7, since a token
 still resolves.
 
+### Per-principal credentials
+
+The service can issue a credential per person or per agent instead of
+handing everybody a copy of `ARK_API_TOKEN`. It needs no identity
+provider, no account anywhere, and nothing outside this binary.
+
+Set one more random string on the server:
+
+```sh
+ARK_API_TOKEN=... ARK_BOOTSTRAP_TOKEN=$(head -c 32 /dev/urandom | base64) ./ark-server
+```
+
+Then, from any machine that can reach the service:
+
+```sh
+ARK_BOOTSTRAP_TOKEN=... ark principal create --remote https://ark.example.com --email me@example.com
+ark login --remote https://ark.example.com      # paste the credential it printed
+```
+
+`ark principal create` prints an `arkc_…` credential **once**. The service
+stores only its SHA-256, so a lost credential is reissued, never
+recovered — run the command again and you get a new one against the same
+principal. Pass the bootstrap token in the environment or on stdin rather
+than as `--bootstrap`: an argument lands in the process table and in shell
+history.
+
+From the client's side nothing is different. A credential is a token like
+any other: same `ark login`, same keyring entry keyed by remote host, same
+`ARK_TOKEN` for CI. Credentials expire after 365 days, and recovery from
+expiry is logging in again.
+
+What you get for it, today:
+
+- **Individual revocation.** Retiring one person's credential does not
+  disturb anybody else, where rotating `ARK_API_TOKEN` is an outage for
+  every client of every repository.
+- **Attribution that is checked rather than asserted.** The service logs
+  a principal id on every request and records `last_used_on` per
+  credential, at day granularity.
+
+What you do not get yet: per-repository permissions. A credential reaches
+everything the service token reaches, which is why `ARK_API_TOKEN` is
+still what the paragraph at the top of this section describes.
+
+**Where the credentials live.** One SQLite database, beside the
+repository databases and written the same way:
+
+```text
+repos/ark.auth.db     principals, credentials, grants
+```
+
+It is a file, like everything else here: back it up with the rest, and
+recover it the same way (see [Backup and recovery](#backup-and-recovery)).
+If it is lost, the service token still works and
+`ARK_BOOTSTRAP_TOKEN` still mints — neither depends on it being readable,
+which is the point of both.
+
+Revocation is cached for up to **60 seconds** across instances, so a
+revoked credential can keep working for that long. On a single-instance
+deployment it is effectively immediate.
+
 ### Operational warnings
 
 - **Trailing newlines break the comparison.** The comparison is exact
@@ -298,8 +367,9 @@ still resolves.
   The client side is more forgiving: `ark login` trims whitespace from
   what you pipe or type. The server does not trim what it is given.
 
-- **Generate the token with a real random source** — it is the only
-  credential in the system. 32 bytes of `/dev/urandom`, base64, is fine.
+- **Generate the token with a real random source** — it is the credential
+  every client shares, and `ARK_BOOTSTRAP_TOKEN` mints more of them. 32
+  bytes of `/dev/urandom`, base64, is fine for either.
 
 - **Rotation is a restart.** Write the new value, restart the service,
   then `ark login` again on each client. There is no overlap window: the
