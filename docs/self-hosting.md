@@ -5,9 +5,12 @@ Go binary with no always-on database and no external dependencies beyond
 the storage you point it at. This document is the general guide: run your
 own instance, on your own machine or your own cloud account.
 
-For the maintainers' concrete environment, see
-[ops/elkproject-deployment.md](ops/elkproject-deployment.md) — you do not
-need it, and nothing here depends on it.
+The maintainers' concrete environment — project, bucket, Cloud Run
+service, service account, deploy command — is documented privately in the
+`elk-work/elk` meta-repo as `docs/ark/elkproject-deployment.md`. You do
+not need it, and nothing here depends on it. (`docs/ops/` used to hold
+that file and no longer exists here; the RFCs still cite it by its old
+path.)
 
 ## What the service stores
 
@@ -475,6 +478,13 @@ not contain `/`, `\`, or `.`; the server rejects them.
 The recovery path is deliberately boring, and none of it depends on Ark
 being available or even working.
 
+There are two recoveries, and they answer different questions:
+
+| | |
+|---|---|
+| **Restore from a stored copy** | The repository's `repos/<id>.db` is gone, corrupted, or rolled back, and you still have the storage. Put the object back; the service is whole again. Seconds, and no client involved. **Reach for this first.** |
+| **Replay from a client** | You have no usable copy of the object at all — the bucket is gone, or every copy predates something that matters. Rebuild the service from a client's replica and mutation log. Minutes, and it renumbers. |
+
 **What to back up.** The bucket, or the `DATA_DIR`. That is all the
 server-side state there is. `CACHE_DIR` is disposable.
 
@@ -497,6 +507,140 @@ service disposable. Each client holds its complete record set in
 `.ark/ark.db` plus its own mutation log — the intent behind every local
 write, not just the resulting rows. So the service can be rebuilt from
 nothing and repopulated by replay from any client.
+
+### Restore from a stored copy
+
+The whole procedure is: put the right bytes back at `repos/<id>.db`. The
+service picks them up on its next request. There is no import step, no
+restart, and nothing to tell the clients.
+
+**Find a copy.** In order of what you are likeliest to have:
+
+1. **The soft-delete window.** GCS buckets retain deleted *and overwritten*
+   object generations for the bucket's soft-delete duration — seven days by
+   default, and that default is what the reference deployment runs on.
+
+   ```sh
+   gcloud storage ls --soft-deleted gs://<bucket>/repos/<repository-id>.db
+   ```
+
+   Each line ends in `#<generation>`. Generations increase, so the last one
+   from before the loss is the one you want.
+
+   **Seven days is a default, not a decision.** It is how long you can fail
+   to notice and still have a copy, and nothing else in this design gives you
+   longer. Pick it deliberately — lengthen the duration, turn on object
+   versioning, or export the objects somewhere — rather than inheriting it.
+
+2. **Object versioning**, if you enabled it. Same idea, no expiry.
+3. **Any out-of-band copy** — a `gcloud storage cp` of the object, a copy of
+   the `DATA_DIR`, or a file somebody kept. It is an ordinary SQLite file, so
+   any copy of it is a complete backup.
+
+**Check it before you put it back.** It is a SQLite file; read it:
+
+```sh
+gcloud storage cp gs://<bucket>/repos/<id>.db#<generation> ./candidate.db
+sqlite3 ./candidate.db 'SELECT revision FROM meta WHERE id = 1'
+sqlite3 ./candidate.db 'SELECT record_type, count(*) FROM records GROUP BY 1'
+```
+
+**Put it back.** From the soft-delete window:
+
+```sh
+gcloud storage rm gs://<bucket>/repos/<id>.db          # if a live object is in the way
+gcloud storage restore gs://<bucket>/repos/<id>.db#<generation>
+```
+
+`gcloud storage restore` will not overwrite a live object synchronously —
+`--allow-overwrite` is an `--async`-only flag — so clear the live object
+first. Deleting it soft-deletes it too, so the thing you are replacing
+stays recoverable for the rest of the window. From an out-of-band copy it
+is just a copy:
+
+```sh
+gcloud storage cp ./candidate.db gs://<bucket>/repos/<id>.db
+```
+
+**Verify without a client.** The point of verifying is to learn about the
+object, not about somebody's replica, so ask the service directly:
+
+```sh
+curl -sS -X POST "$BASE_URL/v1/sync/pull" -H "Authorization: Bearer $ARK_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"repository_id":"<id>","after_revision":0}' | jq '.server_revision, (.records | length)'
+```
+
+**Then leave the clients alone.** A client that had synced before the loss
+converges on its next sync with nothing to push and nothing to pull. A
+client that has never seen the repository pulls the whole restored set.
+Neither needs to be told anything happened.
+
+#### What the restore does to the generation compare-and-swap
+
+Nothing that needs handling. A restored object carries a **new, higher**
+generation than the one it replaces, and the service does not depend on
+the old one:
+
+- **A running instance does not need restarting.** Every request refetches
+  the object and compares generations before using its cached copy, so the
+  restore is picked up on the next request. `CACHE_DIR` never has to be
+  cleared by hand.
+- **A write through an instance whose cache is stale lands on the restored
+  file, not on the stale one.** The refetch happens inside the same update
+  that does the compare-and-swap, so the write is applied to what the
+  storage actually holds. Drilled: a client pushed through an instance
+  holding a generation from before the loss, and the result kept every
+  restored record and added the new one.
+- **A restore does not race with a lost CAS.** A lost race refetches and
+  reruns the request, which is what a restore looks like from the inside.
+
+#### The two failure modes look different, and one of them is quiet
+
+**A deleted object** answers `404 not_found` on pull and on push — until a
+client syncs. Registration runs on every sync and creates the repository
+if it is missing, so **the first client to sync at an absent repository
+stands an empty one back up** at a new generation. The `404` is the clean
+signal and it does not survive contact. If you are diagnosing a missing
+repository, restore before you let anything sync at it — or accept that
+you are restoring over an empty object rather than into a gap. Nothing is
+lost either way, because the good generation is still in the window.
+
+**A corrupted object** answers `500` with `{"code":"internal","message":"pull
+failed"}`, and clients report exit 6 with `server error: pull failed`,
+which reads like a transient outage. The real error is only in the
+service's own logs — `apply schema: database disk image is malformed` for a
+truncated object, `sql: no rows in result set` for a zero-length one. **A
+repository that is "offline" for one client and fine for others is a
+corrupt object until proven otherwise; read the service's logs.** A
+zero-length object is the nastier case: SQLite reads it as a valid empty
+database, so it behaves exactly like a deletion, including the empty
+resurrection.
+
+#### Two things that are not restored with it
+
+- **Artifact blobs are separate objects** under `sha256/<xx>/<hash>` and are
+  untouched by anything you do to `repos/<id>.db`. They survive a
+  repository restore on their own — and a repository restored to a point
+  before an artifact was recorded leaves that blob orphaned but harmless.
+- **A locally-run server cannot sign artifact URLs under your own
+  credentials.** Running `ark-server` against a bucket with `GCS_BUCKET` and
+  a person's Application Default Credentials — the obvious thing to do while
+  recovering — works for repository databases and fails for every artifact
+  transfer, with `sign upload url failed` and, in the logs, `unable to
+  detect default GoogleAccessID`. V4 signing needs service-account,
+  external-account or impersonated credentials. The deployed service runs as
+  a service account and is unaffected; a laptop is not. Do not work around
+  it by downloading a service-account key.
+
+#### How long it takes
+
+Seconds. The drill below restored a 100 KiB repository database from the
+soft-delete window in **3–4 seconds** and from an out-of-band copy in
+**2**, and both times the service served the restored history on the next
+request. It is one object copy, so the cost is a round trip rather than
+the byte count — a repository with two thousand revisions restores in the
+same breath as one with thirty.
 
 ### Replay procedure
 
@@ -538,6 +682,36 @@ Notes:
 **Drill it.** A recovery path you have never run is a guess. Rebuilding
 into a throwaway `DATA_DIR` instance takes minutes and is the only way
 to know your clients still hold what you think they do.
+
+### The drill
+
+[`scripts/restore-drill.sh`](../scripts/restore-drill.sh) runs the whole
+of the restore path against a scratch repository and asserts on every
+step, so the recovery is something you re-run rather than something you
+read. It populates a repository, deletes the object, truncates it,
+zeroes it, rolls it back to an earlier revision, restores from each, and
+checks what a pre-loss client, a fresh client and the raw API each see.
+
+```sh
+scripts/restore-drill.sh --mode local
+scripts/restore-drill.sh --mode gcs --bucket <a scratch bucket, never production>
+```
+
+`--mode local` rehearses every step against a `DATA_DIR` instance and
+needs nothing but a Go toolchain and `git`, `jq`, `curl`, `sqlite3`; it
+validates the script and exercises no object storage. `--mode gcs` is the
+drill: it also needs `gcloud`, Application Default Credentials, and a
+bucket you are willing to have objects deleted and overwritten in. The
+script refuses a bucket name that looks like the reference deployment's,
+and leaves its objects behind when an assertion fails.
+
+Run it after any change under `internal/server/repodb`, before a change to
+how storage is configured, and on whatever schedule makes the answer
+current. It exits non-zero and names the assertion when something has
+stopped being true.
+
+Last run 2026-08-28 against a scratch GCS bucket: 80 assertions, all
+passing, 52 seconds end to end (elk-work/ark#41).
 
 ---
 
