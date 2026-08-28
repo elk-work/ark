@@ -18,6 +18,12 @@ const (
 	KindPartial
 	KindGit
 	KindDatabase
+	// KindRemoteCorrupt is the service answering that its own stored copy of
+	// this repository is unusable. It is a 5xx and it is deliberately not
+	// KindOffline: offline means try again, and this will still be true on
+	// every later attempt until an operator restores the stored database, so a
+	// retry loop keyed on 6 would run forever (elk-work/ark#65).
+	KindRemoteCorrupt
 )
 
 // ExitCode maps an error kind to the CLI exit code contract.
@@ -35,6 +41,8 @@ func (k Kind) ExitCode() int {
 		return 6
 	case KindPartial:
 		return 7
+	case KindRemoteCorrupt:
+		return 8
 	default: // general, git, database
 		return 1
 	}
@@ -83,6 +91,10 @@ func Permissionf(format string, args ...any) error {
 
 func Partialf(format string, args ...any) error {
 	return &Error{Kind: KindPartial, Message: fmt.Sprintf(format, args...)}
+}
+
+func RemoteCorruptf(format string, args ...any) error {
+	return &Error{Kind: KindRemoteCorrupt, Message: fmt.Sprintf(format, args...)}
 }
 
 func GitErr(msg string, err error) error {

@@ -34,7 +34,8 @@ with machine-readable flags — never reimplement Git. Schema lives in
   GitHub issue — and always name the repository, including the one you are in.
   See README "Writing about tasks".
 - Errors use `records.Error` kinds; CLI exit codes follow spec §22
-  (2 validation, 3 not found, 4 conflict, 5 permission, 6 offline, 7 partial).
+  (2 validation, 3 not found, 4 conflict, 5 permission, 6 offline, 7 partial,
+  8 the service's stored copy of this repository is unusable).
 - `--json` output is a stable interface for agents; treat field renames as
   breaking changes.
 - Pure-Go SQLite driver (modernc.org/sqlite); do not introduce CGO.

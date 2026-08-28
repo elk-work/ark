@@ -195,9 +195,18 @@ type DownloadURLResponse struct {
 
 // Error is the JSON error body for non-2xx responses.
 type Error struct {
-	Code    string `json:"code"` // validation|not_found|conflict|permission|internal
+	Code    string `json:"code"` // validation|not_found|conflict|permission|internal|repository_corrupt
 	Message string `json:"message"`
 }
+
+// ErrorCodeRepositoryCorrupt is the one error code the client reads rather
+// than inferring from the status. The service's stored copy of a repository
+// will not open, or holds no repository row; that is a 500 like any other
+// server-side fault, and unlike any other it will still be true on the next
+// attempt. The status cannot express the difference, so the code has to, and
+// both sides name it from here rather than from two string literals that can
+// drift apart in silence (elk-work/ark#65).
+const ErrorCodeRepositoryCorrupt = "repository_corrupt"
 
 // Writer names the agent identity a server-side write is attributed to.
 // The service resolves it to a repository-local actor: first use creates

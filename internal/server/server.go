@@ -135,12 +135,27 @@ func decode[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 
 // respond maps repodb errors onto the API error contract.
 func (s *Server) respond(w http.ResponseWriter, what string, err error) {
+	var corrupt *repodb.CorruptError
 	switch {
 	case err == nil:
 	case errors.Is(err, repodb.ErrNotFound):
 		writeErr(w, http.StatusNotFound, "not_found", "repository not registered")
 	case errors.Is(err, repodb.ErrConcurrentWrite):
 		writeErr(w, http.StatusConflict, "conflict", "repository is being updated concurrently; retry")
+	case errors.As(err, &corrupt):
+		// Still a 500 — the request was fine and the service cannot serve it —
+		// but not an anonymous one. Every other 5xx here is a reason to try
+		// again; this one will hold until an operator restores the stored
+		// database, and saying "pull failed" left that fact in the service's
+		// logs and nowhere else (elk-work/ark#65). The message names the
+		// repository and what is wrong with its stored copy, which is the
+		// operator's own storage and not a secret; the client keys on the code
+		// beside it, because the status cannot carry the distinction.
+		if s.Log != nil {
+			s.Log.Error(what, "error", err)
+		}
+		writeErr(w, http.StatusInternalServerError, api.ErrorCodeRepositoryCorrupt,
+			corrupt.Error()+" — restore this repository's stored database from a copy; retrying will not clear it")
 	default:
 		s.internal(w, what, err)
 	}

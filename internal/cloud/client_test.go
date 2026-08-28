@@ -104,7 +104,9 @@ func TestRequestsCarrySpecPathsAndBearerToken(t *testing.T) {
 // TestNonOKStatusMapsToRecordsErrorKinds: each api.Error status the server
 // can return maps to the records.Error kind that drives the CLI exit-code
 // contract (spec §22): validation→2, not_found→3, conflict→4, permission→5;
-// 5xx is retryable and reads as offline→6. Non-JSON bodies still surface.
+// 5xx is retryable and reads as offline→6, unless its code says otherwise:
+// repository_corrupt→8, the one condition that will still be true on the next
+// attempt. Non-JSON bodies still surface.
 func TestNonOKStatusMapsToRecordsErrorKinds(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -126,6 +128,14 @@ func TestNonOKStatusMapsToRecordsErrorKinds(t *testing.T) {
 			records.KindConflict, "updated concurrently", 4},
 		{"internal", 500, `{"code":"internal","message":"push failed"}`,
 			records.KindOffline, "push failed", 6},
+		// The one 5xx that is read by its code rather than its status. A
+		// service whose stored copy of a repository will not open answers 500
+		// like any other server-side fault, and unlike any other it will
+		// answer 500 again on every retry — so it must not land on 6, which is
+		// the code a retry loop keys on (elk-work/ark#65).
+		{"repository corrupt", 500,
+			`{"code":"repository_corrupt","message":"repository 01R: its stored database will not open"}`,
+			records.KindRemoteCorrupt, "its stored database will not open", 8},
 		{"plain text body", 400, "malformed request",
 			records.KindValidation, "malformed request", 2},
 		{"empty body", 404, "",
