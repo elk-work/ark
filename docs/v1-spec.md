@@ -192,6 +192,21 @@ created_at
 
 The repository ID is generated when `ark init` runs.
 
+The sync service keeps its own copy of `name`, `default_branch` and
+`git_remote_url` — the values a human reads when a repository is listed or
+recovered. It is not a record: nothing pulls it, and it has no `created_by`.
+
+**Registration only ever backfills that copy.** The name a client sends is the
+basename of wherever it happens to be checked out, so overwriting on every
+sync let any client rename the repository for everyone, and blanked the remote
+of a scratch checkout that had none. A value already on the service therefore
+wins, and a client can only fill a field the service is missing.
+
+Correcting a wrong value is a separate, deliberate act:
+`ark repo set` over `POST /v1/repositories/{id}/metadata` (§19). It is
+addressed by repository ID and never inferred from the working directory,
+because that inference is what caused the overwriting bug.
+
 ---
 
 ## 6.2 Task
@@ -902,6 +917,9 @@ ark init
 ark status
 ark sync
 
+ark repo show
+ark repo set
+
 ark task create
 ark task list
 ark task view
@@ -1152,10 +1170,22 @@ Minimum endpoints:
 POST /v1/repositories
 POST /v1/sync/push
 POST /v1/sync/pull
+GET  /v1/repositories/{id}
+POST /v1/repositories/{id}/metadata
 GET  /v1/repositories/{id}/records/{type}/{id}
 POST /v1/artifacts/upload-url
 POST /v1/artifacts/download-url
 POST /v1/pull-requests/{id}/merge
+```
+
+Plus the authenticated work-record write routes, so a program can write a
+record without being a copy of Ark — see
+`docs/rfc-0004-work-record-write-api.md`:
+
+```text
+POST /v1/repositories/{id}/tasks
+POST /v1/repositories/{id}/comments
+POST /v1/repositories/{id}/tasks/{id}/status
 ```
 
 Cloud stack:
@@ -1174,6 +1204,52 @@ The API service owns:
 - mutation idempotency
 - conflict checks
 - signed GCS URLs
+
+## 19.1 Repository Metadata
+
+`GET /v1/repositories/{id}` returns the service's copy of the repository
+record (§6.1): `id`, `name`, `default_branch`, `git_remote_url`, `revision`,
+`created_at`. `ark status` reports what the local checkout knows; this is the
+only way to see what the service holds.
+
+`POST /v1/repositories/{id}/metadata` corrects it — the one path that
+overwrites these fields, since registration can only backfill:
+
+```json
+{
+  "writer":         { "agent_name": "ark-cli", "delegated_by": "01J8Z..." },
+  "name":           "optional",
+  "default_branch": "optional",
+  "git_remote_url": "optional"
+}
+```
+
+- **Only the fields present are asserted.** Each is nullable, so omitting one
+  and clearing one are different requests; a partial update never sends back
+  values the caller did not mean.
+- **`git_remote_url` is the one field an explicit `""` clears.** A repository
+  can genuinely have no remote, and refusing would leave a wrong non-empty
+  URL uncorrectable. `name` and `default_branch` cannot be emptied.
+- **Validation** is `400 validation`: a blank name, a branch name
+  `git check-ref-format` would refuse, or a remote that is not a URL,
+  `[user@]host:path`, or an absolute path. Values are trimmed.
+- **A change mints a revision**, in the same transaction, so the repository's
+  counter orders it as it orders any other write. Setting a field to the
+  value it already holds does not: the response carries `changed: false` and
+  the current revision, the reasoning the task-status route uses for a
+  transition that asks for the status a task already has.
+- **`Idempotency-Key` is honoured but not required**, for the same reason —
+  this is an assertion about state, not an increment.
+- **The writer** is resolved exactly as the RFC-0004 write routes resolve it,
+  and for the same purpose: the authorization rule, not attribution, since
+  the record carries no `created_by`. It follows that the acting identity
+  must already be known to the service, which it is once the repository has
+  pushed.
+- **Authorization is the single service token** (§20). Renaming a repository
+  is an `admin`-level act under RFC-0003, and when its per-repository grants
+  land the check belongs beside the writer resolution in the handler. V1 has
+  one token and no level to check against, so there is nothing to enforce
+  yet.
 
 ---
 

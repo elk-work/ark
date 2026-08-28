@@ -36,6 +36,51 @@ type RegisterRepositoryRequest struct {
 	GitRemoteURL  string `json:"git_remote_url,omitempty"`
 }
 
+// RepositoryMetadata is the service's copy of a repository's identity: the
+// name, default branch, and Git remote a human reads when a repository is
+// listed or recovered. It is not a record — nothing pulls it, and it has no
+// created_by — which is why it lives in the service's meta row rather than
+// in `records`, and why correcting it needs its own route.
+type RepositoryMetadata struct {
+	ID            string `json:"id"`
+	Name          string `json:"name"`
+	DefaultBranch string `json:"default_branch"`
+	GitRemoteURL  string `json:"git_remote_url"`
+	// Revision is the repository's revision counter, which a metadata
+	// change advances like any other write.
+	Revision  int64  `json:"revision"`
+	CreatedAt string `json:"created_at,omitempty"`
+}
+
+// SetRepositoryMetadataRequest is the body of
+// POST /v1/repositories/{repo}/metadata.
+//
+// Every field is a pointer because omitting one and clearing one are
+// different requests. Registration can only ever backfill an empty field
+// (server.go), so a plain string here would make every partial update send
+// back values the caller never meant to assert — which is the shape of the
+// bug that closed this path in the first place.
+type SetRepositoryMetadataRequest struct {
+	Writer        Writer  `json:"writer"`
+	Name          *string `json:"name,omitempty"`
+	DefaultBranch *string `json:"default_branch,omitempty"`
+	// GitRemoteURL is the one field an explicit empty string clears: a
+	// repository can genuinely have no remote, and refusing would leave a
+	// wrong non-empty value uncorrectable.
+	GitRemoteURL *string `json:"git_remote_url,omitempty"`
+}
+
+// RepositoryResponse carries the repository metadata as it now stands and
+// the revision that ordered the change.
+type RepositoryResponse struct {
+	Repository RepositoryMetadata `json:"repository"`
+	// Changed is false when every field asserted already held that value.
+	// The request succeeded and no revision was minted; a caller that
+	// reports what it corrected needs to know which of the two happened.
+	Changed        bool  `json:"changed"`
+	ServerRevision int64 `json:"server_revision"`
+}
+
 // PushRequest sends pending mutations in creation order.
 type PushRequest struct {
 	RepositoryID string     `json:"repository_id"`

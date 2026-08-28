@@ -33,6 +33,8 @@ See [docs/v1-spec.md](docs/v1-spec.md) for the full specification and
 ark remote set https://ark.example.com   # per repository
 ark login                                # token -> OS keyring, else credentials file
 ark sync                                 # push mutations, upload blobs, pull records
+ark repo show                            # the repository record the service holds
+ark repo set --name scout                # correct it; registration can only backfill
 ```
 
 A second machine joins with `ark init --repository <id>`, then remote/login/
