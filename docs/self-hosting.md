@@ -214,6 +214,14 @@ V1 is deliberately one token for everything (spec §20). There are no
 users, no per-repository permissions, and no scopes. Anyone holding the
 token can read and write every repository the service knows about.
 
+That is a stage rather than the end state, which matters most to you if
+you are self-hosting: `docs/rfc-0003-elk-issued-credentials.md` (accepted
+2026-07-28, unimplemented) replaces it with per-principal credentials,
+per-repository grants and individual revocation, and its bootstrap path
+needs no identity provider at all — so a self-hosted deployment gets
+per-person credentials without adopting anything else. Until it ships,
+the paragraph above is the whole authorization model.
+
 **Server side.** `ARK_API_TOKEN` is read once at startup; empty or
 missing is a startup failure. Every `/v1` route strips a leading
 `Bearer ` from the `Authorization` header and compares the remainder
