@@ -4,13 +4,15 @@
 //
 // Configuration (environment):
 //
-//	ARK_API_TOKEN  bearer token clients must present (required)
-//	GCS_BUCKET     bucket for repo databases and artifact blobs (production)
-//	DATA_DIR       local directory for repo databases + blobs (used without
-//	               GCS_BUCKET; default ./data)
-//	BASE_URL       externally reachable base URL (required without GCS_BUCKET)
-//	CACHE_DIR      scratch space for working copies (default os temp dir)
-//	PORT           listen port (default 8080)
+//	ARK_API_TOKEN    bearer token clients must present (required)
+//	ARK_SIGNING_KEY  HMAC key signing local-mode /blobs/ URLs (default:
+//	                 ARK_API_TOKEN)
+//	GCS_BUCKET       bucket for repo databases and artifact blobs (production)
+//	DATA_DIR         local directory for repo databases + blobs (used without
+//	                 GCS_BUCKET; default ./data)
+//	BASE_URL         externally reachable base URL (required without GCS_BUCKET)
+//	CACHE_DIR        scratch space for working copies (default os temp dir)
+//	PORT             listen port (default 8080)
 package main
 
 import (
@@ -81,11 +83,15 @@ func run() error {
 	}
 
 	s := &server.Server{
-		Repos:   repodb.NewManager(backend, cacheDir),
-		Token:   token,
-		Blobs:   blobs,
-		Log:     log,
-		Version: ver,
+		Repos: repodb.NewManager(backend, cacheDir),
+		Token: token,
+		// Unset is the supported configuration, not an oversight: the signing
+		// key falls back to the service token, which is what it has always
+		// been. Setting it is how a deployment stops depending on that.
+		SigningKey: os.Getenv("ARK_SIGNING_KEY"),
+		Blobs:      blobs,
+		Log:        log,
+		Version:    ver,
 	}
 	port := os.Getenv("PORT")
 	if port == "" {

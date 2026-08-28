@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/elk-work/ark/pkg/api"
 )
@@ -230,6 +231,102 @@ func TestUnconfiguredLocalStoreWillNotMintURLs(t *testing.T) {
 	if _, err := l.SignedPutURL(context.Background(), "sha256/aa/aaaa", ""); err == nil {
 		t.Error("an unsigned store should refuse to produce a PUT URL")
 	}
+}
+
+// getStatus fetches a signed blob URL and reports only the status, which is
+// all a signature check is being asked about.
+func getStatus(t *testing.T, url string) int {
+	t.Helper()
+	resp, err := http.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode
+}
+
+// signedGet builds a /blobs/ GET URL by hand under a chosen key, so a test can
+// ask which key the running service is actually verifying against.
+func signedGet(base, secret, key string) string {
+	exp := time.Now().Add(time.Minute).Unix()
+	return fmt.Sprintf("%s/blobs/%s?exp=%d&sig=%s", base, key, exp,
+		signBlob(secret, http.MethodGet, key, exp))
+}
+
+// The blob signing key has a name of its own, ARK_SIGNING_KEY, because the
+// service token is due to stop being a bearer (elk-work/ark#54) and a signing
+// key riding on ARK_API_TOKEN would take every local-mode artifact URL with
+// it — silently, since a signature that no longer verifies looks like a bad
+// URL rather than like a missing setting. Unset it must be exactly today's
+// behaviour; set it must really be the key.
+func TestBlobURLsAreSignedWithTheSigningKey(t *testing.T) {
+	// serve starts the real handler with the given signing key and returns the
+	// server plus its base URL, the way a deployment's blob URLs are built.
+	serve := func(t *testing.T, signingKey string) (*Server, string) {
+		t.Helper()
+		s := newTestServer(t)
+		s.SigningKey = signingKey
+		ts := httptest.NewServer(s.Handler())
+		t.Cleanup(ts.Close)
+		s.Blobs.(*LocalBlobStore).BaseURL = ts.URL
+		registerRepo(t, s)
+		return s, ts.URL
+	}
+	// roundTrip proves the service's own URLs work end to end, and returns the
+	// stored key so a test can then re-sign it under a different secret.
+	roundTrip := func(t *testing.T, s *Server) string {
+		t.Helper()
+		content := []byte("bench: 41ms p95")
+		digest := sha256Hex(content)
+		up := uploadURL(t, s, digest, int64(len(content)))
+		if code := putBlob(t, up.URL, content); code != http.StatusOK {
+			t.Fatalf("put: %d", code)
+		}
+		if rec := confirm(t, s, digest); rec.Code != 200 {
+			t.Fatalf("confirm: %d %s", rec.Code, rec.Body.String())
+		}
+		// Reading it back through the service's own signed GET closes the
+		// loop: the key that signed the upload is the key that verifies it.
+		getURL, err := s.Blobs.SignedGetURL(context.Background(), blobKey(digest))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if code := getStatus(t, getURL); code != http.StatusOK {
+			t.Fatalf("signed GET: %d", code)
+		}
+		return blobKey(digest)
+	}
+
+	t.Run("unset, the service token still signs", func(t *testing.T) {
+		s, base := serve(t, "")
+		if got := s.Blobs.(*LocalBlobStore).Secret; got != s.Token {
+			t.Fatalf("signing key = %q, want the service token %q", got, s.Token)
+		}
+		key := roundTrip(t, s)
+		// The behavioural half: a URL signed by hand with ARK_API_TOKEN still
+		// verifies, which is what every deployment configured before
+		// ARK_SIGNING_KEY existed depends on.
+		if code := getStatus(t, signedGet(base, s.Token, key)); code != http.StatusOK {
+			t.Errorf("a service-token signature was refused: %d", code)
+		}
+	})
+
+	t.Run("set, it is the key and the service token is not", func(t *testing.T) {
+		const signingKey = "a-signing-key-that-is-not-the-service-token"
+		s, base := serve(t, signingKey)
+		if got := s.Blobs.(*LocalBlobStore).Secret; got != signingKey {
+			t.Fatalf("signing key = %q, want ARK_SIGNING_KEY %q", got, signingKey)
+		}
+		key := roundTrip(t, s)
+		if code := getStatus(t, signedGet(base, signingKey, key)); code != http.StatusOK {
+			t.Errorf("an ARK_SIGNING_KEY signature was refused: %d", code)
+		}
+		// And the token it replaced no longer signs anything. Without this the
+		// test would pass on a server that ignored ARK_SIGNING_KEY entirely.
+		if code := getStatus(t, signedGet(base, s.Token, key)); code != http.StatusForbidden {
+			t.Errorf("the service token still signs valid URLs: %d, want 403", code)
+		}
+	})
 }
 
 // Deleting a record that is already gone is idempotent — a repair run may

@@ -42,6 +42,7 @@ The server takes **no command-line flags**. Everything is environment:
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
 | `ARK_API_TOKEN` | always | — | Bearer token clients must present. Startup fails without it. |
+| `ARK_SIGNING_KEY` | no | `ARK_API_TOKEN` | HMAC key for local-mode `/blobs/` URLs. Unset it is the service token, which is what it has always been; set it, the two are independent. Ignored in object-storage mode, where GCS signs. |
 | `GCS_BUCKET` | object-storage mode | — | Google Cloud Storage bucket for repository databases and blobs. Set → object-storage mode; unset → local mode. |
 | `BASE_URL` | local mode | — | Externally reachable base URL of this service. Required when `GCS_BUCKET` is unset; used to build blob URLs. Startup fails without it. |
 | `DATA_DIR` | no | `data` | Local mode only. Repository databases go in `<DATA_DIR>/repos`, blobs in `<DATA_DIR>/blobs`. Relative paths resolve against the working directory. |
@@ -124,9 +125,18 @@ Three things to understand before exposing this mode:
   cannot use the bearer middleware: a client treats them as pre-signed
   URLs and sends no `Authorization` header. So each URL is signed with
   HMAC-SHA256 over the method, the key, and an expiry, keyed by
-  `ARK_API_TOKEN`. Signatures last one hour and are method-bound, so a
-  download URL cannot be replayed as an upload. There is nothing extra to
-  configure; a service with no token cannot mint blob URLs at all.
+  `ARK_SIGNING_KEY` — which defaults to `ARK_API_TOKEN`, so there is still
+  nothing extra to configure and a service with no key at all cannot mint
+  blob URLs. Signatures last one hour and are method-bound, so a download
+  URL cannot be replayed as an upload.
+
+  Set `ARK_SIGNING_KEY` when you want the two to be independent — for
+  instance before rotating `ARK_API_TOKEN`, since changing the signing key
+  invalidates every outstanding blob URL. It matters more than that shortly:
+  per-principal credentials
+  ([RFC-0003](rfc-0003-elk-issued-credentials.md)) end with `ARK_API_TOKEN`
+  no longer being a bearer, and a signing key with no home of its own would
+  go with it.
 - **Uploads are verified against their hash.** `POST /v1/artifacts/confirm`
   streams the stored object, recomputes SHA-256, and refuses — deleting the
   object — if it does not match the key it was stored under. This is what
@@ -232,8 +242,8 @@ against the token in constant time. A mismatch is `401` with a
 `permission` error code. The only routes without a bearer check are
 `GET /` (a service banner) and `GET /health`. In local mode `/blobs/`
 also skips the bearer check, but is not unauthenticated: it requires an
-HMAC signature derived from the same token, bound to the method and
-carrying a one-hour expiry.
+HMAC signature derived from `ARK_SIGNING_KEY` — which defaults to that
+same token — bound to the method and carrying a one-hour expiry.
 
 **Client side.** The token resolves in this order:
 

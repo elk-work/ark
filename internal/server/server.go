@@ -21,11 +21,33 @@ import (
 
 // Server is the Ark sync service.
 type Server struct {
-	Repos   *repodb.Manager
-	Token   string // single service token (spec §20: V1 begins with one)
-	Blobs   BlobStore
-	Log     *slog.Logger
-	Version string // build stamp, reported unauthenticated on GET /
+	Repos *repodb.Manager
+	Token string // single service token (spec §20: V1 begins with one)
+	// SigningKey signs local-mode blob URLs. Empty falls back to Token,
+	// which is what every deployment configured before ARK_SIGNING_KEY
+	// existed relies on. See signingKey.
+	SigningKey string
+	Blobs      BlobStore
+	Log        *slog.Logger
+	Version    string // build stamp, reported unauthenticated on GET /
+}
+
+// signingKey is the HMAC key for local-mode blob URLs: ARK_SIGNING_KEY when
+// the deployment sets one, otherwise the service token.
+//
+// The fallback is not a convenience. The service token has been the signing
+// key since local mode existed, so every deployment and every already-issued
+// URL assumes it; making the key mandatory would break them all on upgrade.
+// It is also why the key needs a name of its own *before* RFC-0003 retires the
+// service token as a bearer (elk-work/ark#54): the day ARK_API_TOKEN goes
+// away, a signing key with no home takes local-mode artifact URLs with it, and
+// a signature that no longer verifies looks like a bad URL rather than like a
+// missing setting.
+func (s *Server) signingKey() string {
+	if s.SigningKey != "" {
+		return s.SigningKey
+	}
+	return s.Token
 }
 
 // Handler builds the HTTP API.
@@ -68,9 +90,11 @@ func (s *Server) Handler() http.Handler {
 	if local, ok := s.Blobs.(*LocalBlobStore); ok {
 		// These routes carry their own signature rather than the bearer
 		// token, because clients treat them as pre-signed URLs and send no
-		// Authorization header. The service token is the signing key, so
-		// there is nothing extra to configure and no way to leave them open.
-		local.Secret = s.Token
+		// Authorization header. The key is ARK_SIGNING_KEY, defaulting to the
+		// service token — so there is still nothing to configure and still no
+		// way to leave the routes open, but the key now has a name that
+		// outlives the service token being a bearer.
+		local.Secret = s.signingKey()
 		mux.Handle("GET /blobs/", local.Handler())
 		mux.Handle("PUT /blobs/", local.Handler())
 	}
