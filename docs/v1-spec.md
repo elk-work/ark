@@ -1407,6 +1407,21 @@ on Windows. Once the keyring holds a host's token, the client removes that
 host's entry from the fallback file — the keyring outranks it, so the copy
 would be a secret on disk that nothing will ever read.
 
+A fallback file that is **absent** is the ordinary state of a machine that has
+never stored a token outside the keyring: storage starts from empty, and
+neither storage nor resolution says a word about it. A fallback file that
+**exists and cannot be read** — a syntax error, a truncated write, a mode that
+denies the read — is a failure, and never an empty file. The client must not
+write over it: the file is keyed by host and holds a token for each, so
+rewriting it from an empty starting point replaces every host's credential
+with the one being logged in, and the bytes it destroys are the only copy
+those tokens had. Storage refuses, with 5, naming the path. Resolution reports
+the same file rather than "no credentials", because that answer is a claim
+about a store nobody could read — and it points the user at the login that
+performs the write. Both messages leave the user somewhere to go: the file is
+plain text, so it can be repaired in place or moved aside and the login run
+again.
+
 `ARK_NO_KEYRING` skips the keyring entirely, for a machine where the file is
 the deliberate choice. Storage then goes straight to the file, without a
 warning, because the operator asked for it.

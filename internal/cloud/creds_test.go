@@ -70,6 +70,19 @@ func TestTokenResolutionOrder(t *testing.T) {
 	assertResolves(t, "from-env", SourceEnv)
 }
 
+// storedFileToken reads one host's entry out of the fallback file. Reading it
+// can fail now — a file that will not decode is a state of its own rather than
+// an empty one — and every caller below has just written the file itself, so a
+// failure there is the test's own setup coming apart, not the case under test.
+func storedFileToken(t *testing.T, host string) string {
+	t.Helper()
+	tok, err := fileToken(host)
+	if err != nil {
+		t.Fatalf("read the credentials file for %s: %v", host, err)
+	}
+	return tok
+}
+
 // assertResolves checks both halves of a resolution: the token, and the store
 // that `ark status` will name as having produced it.
 func assertResolves(t *testing.T, wantToken string, wantSource TokenSource) {
@@ -169,14 +182,139 @@ func TestCredentialsFileKeepsOtherRemotesAndTightPermissions(t *testing.T) {
 	if err := writeFileToken("a.example.com", "tok-a2"); err != nil {
 		t.Fatal(err)
 	}
-	if got := fileToken("a.example.com"); got != "tok-a2" {
+	if got := storedFileToken(t, "a.example.com"); got != "tok-a2" {
 		t.Errorf("a.example.com = %q, want tok-a2", got)
 	}
-	if got := fileToken("b.example.com"); got != "tok-b" {
+	if got := storedFileToken(t, "b.example.com"); got != "tok-b" {
 		t.Errorf("b.example.com = %q, want tok-b (clobbered by rewrite)", got)
 	}
 
 	assertRestrictedCredentials(t, filepath.Join(home, ".ark", "credentials.toml"))
+}
+
+// corruptCredentialsFile plants the file from #62: one host's token, intact
+// and precious, followed by the sort of damage an interrupted write or a
+// one-character hand edit leaves behind. It returns the exact bytes, because
+// every test using it asserts they are still on disk afterwards.
+func corruptCredentialsFile(t *testing.T) (path, content string) {
+	t.Helper()
+	path = credentialsPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	content = "[remotes.\"a.example.com\"]\ntoken = \"tok-a-precious\"\n\nthis line is not TOML\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path, content
+}
+
+// TestLoginRefusesToOverwriteACredentialsFileItCannotRead is #62 itself: a
+// valid entry for one host, a line of damage after it, and a login for a
+// different host. The read that preserves other remotes used to be best
+// effort, so the one run where it failed was the one run where the write
+// replaced the file with a single entry — and `ark login` said it had worked.
+//
+// The load-bearing assertion is the last one. Everything else here is about
+// how the refusal reads; that one is about whether tok-a-precious still exists.
+func TestLoginRefusesToOverwriteACredentialsFileItCannotRead(t *testing.T) {
+	isolateHome(t)
+	// The fallback file is only reached when the keyring is out of the way,
+	// which is the machine this bug lives on: no Secret Service, or an
+	// operator who chose the file.
+	t.Setenv("ARK_NO_KEYRING", "1")
+	path, before := corruptCredentialsFile(t)
+
+	src, err := StoreToken("https://b.example.com", "tok-b")
+	if err == nil {
+		t.Fatalf("login stored the token in %q over a credentials file it could not read", src)
+	}
+	if code := records.ExitCode(err); code != 5 {
+		t.Errorf("exit code = %d, want 5 (permission): %v", code, err)
+	}
+	if src != SourceNone {
+		t.Errorf("source = %q on a refused login, want %q", src, SourceNone)
+	}
+	// A user with a corrupt file now has a command that refuses, so the error
+	// has to name the file and leave them somewhere to go.
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name the file the user has to repair", err)
+	}
+	if !strings.Contains(err.Error(), "ark login") {
+		t.Errorf("error %q stops the user without saying what to do next", err)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the credentials file is gone: %v", err)
+	}
+	if string(after) != before {
+		t.Fatalf("the credentials file was rewritten; a.example.com's token is unrecoverable\n--- before\n%s--- after\n%s", before, after)
+	}
+	// writeCredentials was never reached, so nothing should have been staged
+	// beside the file either — a stray .tmp is a token on disk with no owner.
+	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
+		t.Errorf("credentials.toml.tmp was left behind (%v); a refused login must not write at all", err)
+	}
+}
+
+// TestACredentialsFileThatWillNotReadIsNotNoCredentials: the same file on the
+// resolution path. Returning "" for a failed decode made a corrupt file
+// indistinguishable from an empty one, so `ark status` and `ark sync` reported
+// no credential and sent the user to `ark login` — which, until the fix above,
+// was the command that destroyed the file. Exit 5 either way, so nothing
+// scripting against the code changes; what changes is that the message is
+// about the file rather than about a credential that was never looked for.
+func TestACredentialsFileThatWillNotReadIsNotNoCredentials(t *testing.T) {
+	isolateHome(t)
+	path, _ := corruptCredentialsFile(t)
+
+	_, err := ResolveCredential(credsTestRemote)
+	if err == nil {
+		t.Fatal("resolution succeeded against a credentials file that does not parse")
+	}
+	if code := records.ExitCode(err); code != 5 {
+		t.Errorf("exit code = %d, want 5 (permission): %v", code, err)
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Errorf("error %q does not name the unreadable file; it reads as `nothing is stored`", err)
+	}
+}
+
+// TestAMissingCredentialsFileIsAnOrdinaryFirstLogin is the other half of the
+// distinction, and the reason the fix cannot be "treat a failed decode as an
+// error" and stop. Nearly every machine reaching this code has no credentials
+// file at all; that is the first login, and it must stay silent and succeed.
+// toml.DecodeFile opens the file itself, so absent arrives as ENOENT and
+// corrupt as a parse error — which is the only reason the two can be told
+// apart without stat-ing the path separately and racing the read.
+func TestAMissingCredentialsFileIsAnOrdinaryFirstLogin(t *testing.T) {
+	isolateHome(t)
+	t.Setenv("ARK_NO_KEYRING", "1")
+	warnings := captureWarnings(t)
+	if _, err := os.Stat(credentialsPath()); !os.IsNotExist(err) {
+		t.Fatalf("this test needs a home with no credentials file (%v)", err)
+	}
+
+	_, err := ResolveCredential(credsTestRemote)
+	if err == nil {
+		t.Fatal("resolution succeeded with nothing stored anywhere")
+	}
+	if strings.Contains(err.Error(), "could not be read") {
+		t.Errorf("a file that is simply not there was reported as unreadable: %v", err)
+	}
+
+	src, err := StoreToken(credsTestRemote, "first-token")
+	if err != nil {
+		t.Fatalf("the first login on a machine with no credentials file failed: %v", err)
+	}
+	if src != SourceFile {
+		t.Errorf("stored in %q, want %q", src, SourceFile)
+	}
+	assertResolves(t, "first-token", SourceFile)
+	if got := warnings.String(); got != "" {
+		t.Errorf("warnings = %q, want none for a deliberate opt-out and a first login", got)
+	}
 }
 
 // TestCredentialsFileIsRestrictedDespiteAStaleTempFile: an interrupted login
@@ -203,7 +341,7 @@ func TestCredentialsFileIsRestrictedDespiteAStaleTempFile(t *testing.T) {
 	if _, err := os.Stat(path + ".tmp"); !os.IsNotExist(err) {
 		t.Errorf("credentials.toml.tmp survived the write (%v); a token file was left behind", err)
 	}
-	if got := fileToken("a.example.com"); got != "tok-a" {
+	if got := storedFileToken(t, "a.example.com"); got != "tok-a" {
 		t.Errorf("a.example.com = %q, want tok-a", got)
 	}
 }
@@ -285,10 +423,10 @@ func TestStoreTokenRemovesThePlaintextCopyItSupersedes(t *testing.T) {
 	if _, err := StoreToken(credsTestRemote, "new-token"); err != nil {
 		t.Fatalf("store: %v", err)
 	}
-	if got := fileToken(host); got != "" {
+	if got := storedFileToken(t, host); got != "" {
 		t.Errorf("credentials file still holds %q for %s", got, host)
 	}
-	if got := fileToken("other.example.com"); got != "someone-elses" {
+	if got := storedFileToken(t, "other.example.com"); got != "someone-elses" {
 		t.Errorf("other.example.com = %q, want someone-elses (an unrelated remote was dropped)", got)
 	}
 	assertResolves(t, "new-token", SourceKeyring)
@@ -409,10 +547,10 @@ func TestRemoveTokenClearsBothStores(t *testing.T) {
 	if _, ok := fake.entries[fake.key(keychainService, host)]; ok {
 		t.Error("the keyring still holds the token")
 	}
-	if got := fileToken(host); got != "" {
+	if got := storedFileToken(t, host); got != "" {
 		t.Errorf("the credentials file still holds %q for %s", got, host)
 	}
-	if got := fileToken("other.example.com"); got != "someone-elses" {
+	if got := storedFileToken(t, "other.example.com"); got != "someone-elses" {
 		t.Errorf("other.example.com = %q, want someone-elses; logout is host-scoped", got)
 	}
 	if _, err := ResolveCredential(credsTestRemote); err == nil {
@@ -482,7 +620,7 @@ func TestRemoveTokenClearsTheFileEvenWhenTheKeyringRefuses(t *testing.T) {
 		}
 	}
 	assertRemovedFrom(t, rem, SourceFile)
-	if got := fileToken(host); got != "" {
+	if got := storedFileToken(t, host); got != "" {
 		t.Errorf("the plaintext copy survived the keyring failure: %q", got)
 	}
 }

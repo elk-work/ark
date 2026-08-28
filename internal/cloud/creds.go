@@ -84,7 +84,20 @@ func ResolveCredential(remote string) (Credential, error) {
 			warnKeyringRead(err)
 		}
 	}
-	if tok := fileToken(host); tok != "" {
+	tok, err := fileToken(host)
+	if err != nil {
+		// A file that will not read is not the same state as a file with no
+		// entry for this host, and reporting the second is a claim about a
+		// store nobody managed to look inside. It also used to be an actively
+		// dangerous claim: "no credentials, run `ark login`" pointed the user
+		// at the command that then overwrote the file (#62). Naming the file
+		// makes the state repairable rather than merely absent.
+		return Credential{Source: SourceNone}, &records.Error{Kind: records.KindPermission,
+			Message: fmt.Sprintf("no credentials for %s: %s could not be read, so whether it holds a token for that host is unknown — repair that file, or move it aside and run `ark login` again",
+				host, credentialsPath()),
+			Err: err}
+	}
+	if tok != "" {
 		return Credential{Token: tok, Source: SourceFile}, nil
 	}
 	return Credential{Source: SourceNone}, &records.Error{Kind: records.KindPermission,
@@ -212,25 +225,77 @@ type credentialsFile struct {
 	} `toml:"remotes"`
 }
 
-func fileToken(host string) string {
-	path := credentialsPath()
-	if path == "" {
-		return ""
-	}
+// readCredentialsFile loads the fallback file, keeping apart the two ways it
+// can yield no entries. They look alike at the call site and are opposites: a
+// file that is not there is the ordinary state of a machine that has never
+// stored a token outside the keyring, and starting from empty is correct. A
+// file that is there and will not read is unknown territory — its bytes may be
+// one host's token or every host's — and treating that as empty is the whole
+// of #62, where a login rewrote the file with one entry and reported success.
+//
+// The two are distinguishable only because toml.DecodeFile opens the file
+// itself, so an absent one surfaces as *fs.PathError around ENOENT rather than
+// as a parse failure. Anything else — a syntax error, a mode that denies the
+// read — is the unknown case, and unknown is never treated as empty here.
+func readCredentialsFile(path string) (credentialsFile, error) {
 	var c credentialsFile
 	if _, err := toml.DecodeFile(path, &c); err != nil {
-		return ""
+		if errors.Is(err, os.ErrNotExist) {
+			return credentialsFile{}, nil
+		}
+		return credentialsFile{}, err
 	}
-	return c.Remotes[host].Token
+	return c, nil
 }
 
+func fileToken(host string) (string, error) {
+	path := credentialsPath()
+	if path == "" {
+		return "", nil
+	}
+	c, err := readCredentialsFile(path)
+	if err != nil {
+		return "", err
+	}
+	return c.Remotes[host].Token, nil
+}
+
+// writeFileToken stores one host's token in the fallback file and preserves
+// every other host's, and refuses to write anything when it cannot read what
+// is already there.
+//
+// The refusal is the point. The decode used to be best effort, so the single
+// case where the read failed was the single case where the write replaced the
+// file with one entry and destroyed every token it existed to keep — while
+// `ark login` printed success (#62). A failed login costs a retry; an
+// overwritten credentials file costs tokens that were only ever on this disk.
 func writeFileToken(host, token string) error {
 	path := credentialsPath()
 	if path == "" {
 		return fmt.Errorf("cannot determine home directory")
 	}
-	var c credentialsFile
-	toml.DecodeFile(path, &c) // best effort: keep other remotes
+	c, err := readCredentialsFile(path)
+	if err != nil {
+		// Permission (exit 5) is the code §20 already gives a store that will
+		// not give a credential up, used here for a store that will not take
+		// one. Every alternative says something untrue: 2 is for a command
+		// line that is wrong and this one is not, 3 is "not found" for a file
+		// that is emphatically present, and 7 would claim the command did what
+		// it was asked. And `ark logout` already returns 5 on this identical
+		// file, so a script wrapping both does not have to know which of them
+		// it ran to know what 5 meant — the machine's credential store cannot
+		// be used and a person has to open it.
+		//
+		// The message names the file and ends in the decoder's own complaint,
+		// which carries the line number, because the repair is by hand: fix
+		// the syntax, or move the file somewhere the login will not touch. The
+		// tokens in it are plain text either way, so moving it aside loses
+		// nothing, which is why that is the advice rather than "delete it".
+		return &records.Error{Kind: records.KindPermission,
+			Message: fmt.Sprintf("refusing to store the token for %s: %s exists and could not be read, and rewriting it would destroy the tokens it holds for every other host — repair that file, or move it aside and run `ark login` again",
+				host, path),
+			Err: err}
+	}
 	if c.Remotes == nil {
 		c.Remotes = map[string]struct {
 			Token string `toml:"token"`
@@ -251,17 +316,15 @@ func writeFileToken(host, token string) error {
 // is: it may hold this host's token in bytes neither this function nor
 // resolution can read, so reporting it lets `ark logout` refuse to claim the
 // credential is gone — and lets `ark login` say the copy it supersedes is
-// still on disk.
+// still on disk. That distinction is readCredentialsFile's now, shared with
+// the read and write paths so the three cannot drift apart again.
 func clearFileToken(host string) (bool, error) {
 	path := credentialsPath()
 	if path == "" {
 		return false, nil
 	}
-	var c credentialsFile
-	if _, err := toml.DecodeFile(path, &c); err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return false, nil
-		}
+	c, err := readCredentialsFile(path)
+	if err != nil {
 		return false, err
 	}
 	if _, ok := c.Remotes[host]; !ok {
