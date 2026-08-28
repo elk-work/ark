@@ -425,11 +425,24 @@ writing even before anything is pushed), pushes pending mutations,
 uploads artifact blobs the server does not have, then pulls records
 after the local cursor.
 
-**Exit code 7 means the server refused something.** The sync itself
-worked; one or more changes were rejected, and this checkout is still
-holding them. `ark sync` names each rejection and `ark status` keeps
-counting them until the records agree with the server again, so a
-scripted caller should treat 7 as "look at this", not as success.
+**Exit code 7 means the sync worked and the repository needs a person.**
+Two causes. Either the server refused one or more changes, which this
+checkout is still holding — `ark sync` names each rejection and
+`ark status` counts them until the records agree again. Or the server
+answered with a revision *below* one this checkout had already synced
+past, which cannot happen to a healthy repository: a revision counter
+only increases, so the server is no longer serving the history this
+checkout was tracking, and records it previously acknowledged may be
+gone. A scripted caller should treat 7 as "look at this", and the second
+form as an incident.
+
+**If you see the second form, check your storage before doing anything
+else.** It is what a lost or rolled-back `repos/<repository-id>.db`
+looks like from a client — a restore from an older copy, a deleted
+object, or a repository that was missed by a migration. Ark deliberately
+does not reconcile it: the client still holds its own records and its
+mutation log, and which side is authoritative is your call, not the
+tool's.
 
 ### A second machine
 

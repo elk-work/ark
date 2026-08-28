@@ -7,6 +7,7 @@ import (
 
 	"github.com/elk-work/ark/internal/cloud"
 	"github.com/elk-work/ark/internal/records"
+	"github.com/elk-work/ark/internal/store"
 )
 
 type statusReport struct {
@@ -32,6 +33,15 @@ type statusReport struct {
 	RejectedMutations int64  `json:"rejected_mutations"`
 	Conflicts         int64  `json:"unresolved_conflicts"`
 	Remote            string `json:"remote,omitempty"`
+	// HistoryReset is the third and worst of the states this command has to
+	// tell apart. Nothing pending is one answer; something rejected is a
+	// second; the service disagreeing about what *exists* is a third, and it
+	// is the one that cost a repository. It is not derivable from either of
+	// the others — the queue was empty and every mutation had been
+	// acknowledged, by a service that no longer held the result
+	// (elk-work/ark#58) — so it is carried separately rather than folded into
+	// a count.
+	HistoryReset *store.HistoryReset `json:"history_reset,omitempty"`
 	// TokenSource is which store answered for the sync token — env, keyring,
 	// file, or none — and is set only when a remote is configured. `ark login`
 	// says where it wrote the token; resolution deserves to be as legible,
@@ -96,6 +106,9 @@ func newStatusCmd(g *globals) *cobra.Command {
 			if err := count(`SELECT COUNT(*) FROM conflicts WHERE status = 'unresolved'`, &rep.Conflicts); err != nil {
 				return err
 			}
+			if rep.HistoryReset, err = a.Store.HistoryReset(ctx); err != nil {
+				return err
+			}
 
 			p := g.printer(cmd)
 			return p.Result(rep, func() {
@@ -135,6 +148,15 @@ func newStatusCmd(g *globals) *cobra.Command {
 				}
 				if rep.Conflicts > 0 {
 					p.Line("conflicts   %d unresolved (see `ark conflict list`)", rep.Conflicts)
+				}
+				// Last, and in its own words. The two lines above are about
+				// changes; this one is about whether the service still has
+				// the repository, which is a different question and the only
+				// one whose answer has ever been "no".
+				if hr := rep.HistoryReset; hr != nil {
+					p.Line("history     service at revision %d, below this checkout's %d — its history for",
+						hr.ServerRevision, hr.LocalRevision)
+					p.Line("            this repository was reset or lost (first seen %s)", hr.DetectedAt)
 				}
 			})
 		},

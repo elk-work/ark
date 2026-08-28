@@ -782,6 +782,34 @@ Response:
 
 The client applies pulled records inside one SQLite transaction.
 
+### The cursor is a high-water mark
+
+`sync_state.last_revision` never decreases. A repository's `server_revision` is
+a counter the service only ever increments, so a pull answering with a lower
+value is not the client being ahead of a slow service — it means the service is
+**not serving the history this client was tracking**, because the repository's
+database was reset, lost, or restored from before that point.
+
+The client must detect this and report it:
+
+- It is one comparison, on data the client already has, on every sync.
+- **The cursor does not follow the service down.** Assigning the response's
+  revision is what erases the evidence: after one such sync neither side
+  remembers there was ever a higher revision.
+- **It is recorded durably**, with the revision each side was at and when it
+  was first seen — not as derived state, which stops being true as soon as the
+  client resumes pushing and the service's counter climbs back past the old
+  mark without anything having been recovered.
+- **`ark status` reports it, and `ark sync` exits 7.** This is the third state
+  `ark status` must be able to tell apart, and the only one whose answer has
+  ever been that records are gone. It is not derivable from the other two: a
+  repository once sat absent from the service for six weeks with every local
+  signal correct — nothing pending, nothing rejected, seventeen mutations all
+  acknowledged by a service that no longer held the result (elk-work/ark#58).
+- **Ark does not reconcile it.** Which side is authoritative is a judgment
+  about which records matter, and unlike a rejection this state does not clear
+  itself: no comparison the client can make will tell it a person has decided.
+
 ---
 
 ## 10. Conflict Rules
@@ -1456,12 +1484,13 @@ CLI exit codes:
 ```
 
 Exit code 7 is for a command that did what it was asked and left the
-repository needing repair anyway. `ark sync` returns it when the service
-rejected any mutation: the transfer worked, and the local database now holds
-changes the service refused and will not be asked for again (§9.1). A caller
-that scripts against exit codes learns nothing from a 0 there, which is the
-whole complaint — the divergence has to be legible to a program, not only in
-the prose the command printed.
+repository needing repair anyway. `ark sync` returns it in two cases: the
+service rejected any mutation, so the local database now holds changes it
+refused and will not be asked for again (§9.1); or the service's revision came
+back below one this checkout had already synced past, so its history for this
+repository was reset or lost (§9.2). A caller that scripts against exit codes
+learns nothing from a 0 there, which is the whole complaint — the divergence
+has to be legible to a program, not only in the prose the command printed.
 
 Exit code 2 covers **every** way the command line can be wrong, not only the
 checks Ark performs itself: an unknown command or subcommand, an unknown flag,

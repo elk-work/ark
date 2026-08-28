@@ -38,6 +38,12 @@ type Result struct {
 	ServerRevision    int64   `json:"server_revision"`
 	Issues            []Issue `json:"issues,omitempty"`
 
+	// HistoryReset is set when the service answered with a revision below one
+	// this checkout had already synced past. The service is then not serving
+	// the history this client was tracking, which is a different and worse
+	// condition than being behind on it.
+	HistoryReset *store.HistoryReset `json:"history_reset,omitempty"`
+
 	// SkippedRecords counts pulled records this build cannot represent,
 	// broken out by record type. Server and client versions skew by design,
 	// so this is information, not an error — but it is data the operator
@@ -201,6 +207,30 @@ func Pull(ctx context.Context, a *app.Context, client *cloud.Client, res *Result
 	if err != nil {
 		return err
 	}
+
+	// One comparison, on every sync, for the failure that no other signal in
+	// Ark can see. A repository's revision counter only ever increases, so a
+	// service answering below a revision this checkout already synced past is
+	// not behind — it is serving a different history, because the repository's
+	// database was reset, lost, or restored from before that point.
+	//
+	// Every local indicator is correct and useless here: the queue is empty
+	// because every mutation really was acknowledged, and it was acknowledged
+	// by a service that no longer holds the result. That is how a repository
+	// synced to revision 18 with seventeen applied mutations sat absent from
+	// the service for six weeks while `ark status` reported it clean
+	// (elk-work/ark#58).
+	if resp.ServerRevision < after {
+		if err := a.Store.RecordHistoryReset(ctx, after, resp.ServerRevision); err != nil {
+			return err
+		}
+		reset, err := a.Store.HistoryReset(ctx)
+		if err != nil {
+			return err
+		}
+		res.HistoryReset = reset
+	}
+
 	skips, err := a.Store.ApplyPull(ctx, resp)
 	if err != nil {
 		return err
