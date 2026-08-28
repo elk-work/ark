@@ -80,5 +80,14 @@ Green CI, not a draft, no `hold` label ⇒ it lands — the fleet-wide standard 
 ## What is deliberately absent (V1)
 
 Workspaces, projects, milestones, a web UI, hosted Git, a custom merge
-engine, full `gh` parity, multi-user authorization (one bearer token).
-Do not add primitives without a demonstrated need (principle 005).
+engine, full `gh` parity. Do not add primitives without a demonstrated
+need (principle 005).
+
+**Multi-user authorization is absent, but not deliberate.** V1 authorizes
+with one bearer token, and `docs/rfc-0003-elk-issued-credentials.md` —
+accepted 2026-07-28, unimplemented — replaces it with per-principal
+credentials and per-repository `read`/`write`/`admin` grants. Scoped as
+elk-work/ark#43, #52, #53 and #54. `internal/server/repometa.go` and
+`internal/server/write.go` already carry comments naming where that check
+goes; put it there when it lands rather than inventing a grant system
+beside them.
