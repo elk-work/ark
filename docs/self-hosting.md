@@ -563,7 +563,7 @@ There are two recoveries, and they answer different questions:
 | | |
 |---|---|
 | **Restore from a stored copy** | The repository's `repos/<id>.db` is gone, corrupted, or rolled back, and you still have the storage. Put the object back; the service is whole again. Seconds, and no client involved. **Reach for this first.** |
-| **Replay from a client** | You have no usable copy of the object at all — the bucket is gone, or every copy predates something that matters. Rebuild the service from a client's replica and mutation log. Minutes, and it renumbers. |
+| **Replay from a client** | You have no usable copy of the object at all — the bucket is gone, or every copy predates something that matters. Rebuild the service from a client's replica and mutation log, with `ark repair push`. Minutes, and it renumbers. |
 
 **What to back up.** The bucket, or the `DATA_DIR`. That is all the
 server-side state there is. `CACHE_DIR` is disposable.
@@ -761,7 +761,10 @@ stand up. **The `404` is the clean signal and it now survives contact**, so
 you can diagnose a missing repository with clients still running against
 it, and the good generation stops being pushed further down the listing by
 each sync. What you cannot do is leave it: nothing recovers on its own, and
-every client of that repository is stopped until you restore.
+every client of that repository is stopped until somebody acts. Restoring
+is the act to reach for. Where there is nothing left to restore from, a
+client can rebuild the repository out of its own mutation log instead —
+"Replay procedure" below.
 
 **A corrupted object** — bytes that will not open as a SQLite database —
 answers `500`, but with the code `repository_corrupt`, and the client prints
@@ -817,40 +820,74 @@ same breath as one with thirty.
 
 ### Replay procedure
 
-Rebuilding the service from a client:
+Rebuilding the service from a client is a command, `ark repair push`. It
+used to be four lines of SQL typed into `.ark/ark.db` by hand, which was
+undiscoverable, unsafe to recommend, and silently wrong about one thing
+the SQL could not express — see "What the command does that the SQL did
+not" below.
 
 1. Stand up a fresh `ark-server` (empty bucket or empty `DATA_DIR`).
 2. Point the client at it: `ark remote set <new-url>`, then `ark login`.
-3. On the client, reset the mutation queue and the pull cursor in
-   `.ark/ark.db`:
+3. `ark sync`. It exits 7 and records a history reset: the service is
+   serving a revision below one this checkout had already synced past,
+   which is the finding the repair is gated on. Expect this — it is the
+   step that unlocks the next one.
+4. `ark repair push`. Nothing changes; it prints what it would replay and
+   what that costs, including the display numbers.
+5. `ark repair push --confirm`. The client rewinds its cursor, registers,
+   pulls whatever the new service already holds, re-queues every mutation
+   the old service ruled on — rebased onto the live history — pushes,
+   re-offers its artifact blobs, and pulls back. On a clean run it clears
+   the recorded reset and exits 0.
 
-   ```sql
-   UPDATE mutations SET status = 'pending' WHERE status = 'applied';
-   UPDATE sync_state SET last_revision = 0;
-   ```
-
-4. `ark sync`. The client re-registers the repository, replays its whole
-   mutation log, re-uploads any artifact blobs the new service does not
-   have, and pulls back from revision 0.
-
-Take a copy of `.ark/ark.db` before step 3 — it is a plain SQLite file
-too, and the reset is destructive to sync bookkeeping (not to records).
+Take a copy of `.ark/ark.db` before step 5. It is a plain SQLite file, and
+while the repair is not destructive to records it does rewrite sync
+bookkeeping that cannot be reconstructed.
 
 Notes:
 
-- Replay is safe to run more than once. Mutations carry stable IDs and
+- **Replay is safe to run more than once.** Mutations carry stable IDs and
   the server records applied outcomes, so a re-run of a partially
   completed replay resumes rather than duplicating.
-- Server-assigned display numbers can differ after a rebuild. Task and
+- **Server-assigned display numbers can differ after a rebuild.** Task and
   PR numbers are display aliases; the ULID is authoritative, and the
   server renumbers on collision. Do not treat `#7` as durable across a
-  rebuild.
-- If several clients replay into the same fresh service, the first sets
-  the baseline and the rest reconcile against it. Records the first
-  client never had still arrive from the others.
-- This is a rehearsed path, not a theoretical one: the maintainers'
+  rebuild. The command names each number it saw move, which is the list of
+  references written down elsewhere that are now wrong.
+- **If several clients replay into the same fresh service**, the first sets
+  the baseline and the rest reconcile against it. Records the first client
+  never had still arrive from the others. Order matters in one direction
+  only: a client that edited a record somebody else authored has its edit
+  refused until the author has replayed, which is reported, leaves the
+  reset recorded, and is fixed by running the command again afterwards.
+- **This is a rehearsed path, not a theoretical one**: the maintainers'
   deployment was migrated between storage backends by exactly this
-  procedure.
+  procedure — and that migration is itself worth a note, because a
+  migration performed by clients only migrates the repositories whose
+  clients sync afterwards. One that nobody synced was how elk-work/ark#58
+  happened.
+
+#### What the command does that the SQL did not
+
+The old procedure re-queued the mutation log and reset the cursor, both of
+which the command still does. What it could not do is fix the mutations'
+`base_server_revision`, and that is the part that loses data quietly.
+
+A base is "the version of the record this change was made against", and the
+service reads it against its own per-field revisions when merging. After a
+reset those recorded bases count a history nobody is serving any more, so
+replaying with them compares two different scales — and it goes wrong in
+both directions. A base that lands *below* the record's live revision drops
+fields, silently, while still reporting the mutation applied. A base *above*
+it — the usual shape, because the dead history was long and the new one is
+short — suppresses the merge entirely, so the replay overwrites whatever the
+new service does hold. That second one is the sharper risk for an operator:
+the four lines of SQL, run against a service that had been rolled back
+rather than emptied, would replay straight over the records that survived.
+
+`ark repair push` pulls before it pushes and rebases each mutation onto what
+that pull returned, so a base is either a revision of the live history or
+zero. Spec §9.3 has the rule and the reasoning.
 
 **Drill it.** A recovery path you have never run is a guess. Rebuilding
 into a throwaway `DATA_DIR` instance takes minutes and is the only way
@@ -864,6 +901,14 @@ step, so the recovery is something you re-run rather than something you
 read. It populates a repository, deletes the object, truncates it,
 zeroes it, rolls it back to an earlier revision, restores from each, and
 checks what a pre-loss client, a fresh client and the raw API each see.
+
+Its last phase drills the *other* recovery, because that one is not a
+special case of this one: it deletes the object with nothing left to
+restore from and rebuilds the repository with `ark repair push`, checking
+that the preview changes nothing, that the replay comes back whole, that a
+client which has never seen the repository can then pull it, and that a
+second replica replaying the same log adds no record and mints no
+revision.
 
 ```sh
 scripts/restore-drill.sh --mode local
@@ -884,7 +929,10 @@ current. It exits non-zero and names the assertion when something has
 stopped being true.
 
 Last run 2026-08-28 against a scratch GCS bucket: 80 assertions, all
-passing, 52 seconds end to end (elk-work/ark#41).
+passing, 52 seconds end to end (elk-work/ark#41). The replay phase landed
+after that run and has been rehearsed only in `--mode local` (118
+assertions, 6 seconds); the next `--mode gcs` run is what will have drilled
+it against object storage.
 
 ---
 

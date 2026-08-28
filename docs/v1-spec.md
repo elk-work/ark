@@ -251,6 +251,12 @@ The UUID is authoritative.
 
 The number is for display and CLI ergonomics.
 
+It is also **not durable across a rebuild**. The service reassigns a number
+another record already holds, so a repository rebuilt from a client's mutation
+log (§9.3) can come back numbered differently. A reference written down outside
+Ark — in a commit message, an RFC, another repository's docs — survives only if
+it carries the ULID.
+
 ---
 
 ## 6.3 Comment
@@ -681,6 +687,12 @@ made against", and §10.4 drops every field whose server-side revision is newer
 than it, so a base that understates the record's revision silently discards the
 change field by field while the mutation is still reported applied.
 
+It is also **only meaningful within one history**. A recorded base counts
+revisions of the service that issued it, so after a history reset (§9.2) every
+base in the log names a revision of a database that is gone, and comparing it
+to the live counter is comparing two scales. A replay therefore re-derives the
+base rather than carrying it over; §9.3 has the rule.
+
 ---
 
 ## 9. Sync Model
@@ -955,6 +967,123 @@ The client must detect this and report it:
   about which records matter, and unlike a rejection this state does not clear
   itself: no comparison the client can make will tell it a person has decided.
 
+## 9.3 Repair
+
+A reset leaves the client holding records the service acknowledged and no
+longer has, in `.ark/ark.db`, along with the mutation log that produced them —
+the intents, in order, with `created_by` and `created_at` intact. Every one of
+those mutations is `applied`, which is exactly why nothing re-sends them: a
+mutation leaves the queue when the service acknowledges it, and the service
+that acknowledged these no longer exists as far as the data goes.
+
+`ark repair push` replays that log into the service. It is **the judgment of
+§9.2 carried out, not a substitute for it**: Ark still does not decide which
+side is authoritative, it gives a person a way to act once they have.
+
+**It is gated twice, and neither gate is decoration.** It refuses unless a
+reset is recorded, and it previews unless `--confirm` is passed. The command
+re-asserts one checkout's whole history at a service other clients are also
+using; no shape of it should be reachable from something that runs on a timer,
+which is also why it is not a flag on `ark sync`.
+
+The sequence is:
+
+1. **Rewind the pull cursor to zero.** A repair is the only thing that may
+   lower the high-water mark, and it must. After a reset the mark is a
+   position in a history nobody serves — a checkout at revision 18 asking a
+   service at revision 4 for everything after 18 gets an empty answer, and
+   goes on getting one until the service climbs past 18. Without the rewind
+   the pull in step 3 returns nothing, and the repair would replay over a
+   repository it had never looked at. Nothing is lost by rewinding, because
+   §9.2 records the event rather than the cursor.
+2. **Register**, now asserting a cursor of zero. That is what lets the service
+   create the repository where it has lost it (§19), and it is a no-op where
+   the service merely rolled back. One path covers both shapes.
+3. **Pull.** A repair must not delete what the service still holds, and after
+   a reset it usually holds something — actors from its own re-registration,
+   work another client has pushed since. Pulling before pushing merges those
+   records into this checkout, and it is also the only truthful source of a
+   revision for each of them, which step 4 needs.
+4. **Re-queue every mutation the service has ruled on**, in ULID order,
+   rebased. Below.
+5. **Push, upload artifact blobs, pull.** An ordinary sync from there, with
+   one difference: a blob's storage key is ignored rather than treated as
+   proof the service holds it. The `blobs` table lives in the repository
+   database, so a service that lost the repository lost its record of every
+   blob with it; content addressing keeps the re-offer cheap.
+6. **Clear the recorded reset — only on a clean run.** A push with rejections,
+   or a pull still answering below this checkout, leaves it in place, because
+   the repository still needs somebody. This is the only condition that may
+   retire the mark.
+
+### Rebasing a replayed mutation
+
+**This is the part that loses data quietly if it is got wrong.**
+`base_server_revision` is read against the service's per-field revisions
+(§10.4), and after a reset the recorded bases count a history nobody serves.
+Replaying with them reads one scale against another, and it fails in both
+directions: a base below the record's current revision drops fields silently
+while reporting the mutation applied (§8, elk-work/ark#28), and a base above it
+skips the merge check altogether, so the replay overwrites whatever the service
+does still hold — the common shape, because the dead history was long and the
+live one is short or empty, and the worse one for a command whose first duty is
+not to delete the survivors.
+
+So a repair re-derives the base rather than adjusting it. Step 3 means the
+client has seen exactly what the service holds, and:
+
+- **A record that pull returned** takes the revision it returned. That is what
+  this checkout has seen of the live history for that record, and it is true.
+- **A record it did not return** takes 0 — the service has never written a
+  revision of this record, because it has not.
+- **A create takes 0** either way (§8), and the server does not read it.
+
+Nothing depends on the client guessing the right number for its own replayed
+edits. A create replayed in the same push publishes its new revision into that
+push's session, which lifts every later mutation for the same record to it, so
+a create-then-edit sequence replays with the merge check correctly skipped at
+each step. It is the same mechanism that applies a burst of offline edits in
+order, and a replay is that burst against a service that forgot it.
+
+### Which mutations replay
+
+Those the service has ruled on: `applied` and `rejected`. A refusal issued by a
+history that no longer exists is not a verdict about the service being talked
+to now, and a rejection's local effect is kept rather than rolled back (§9.1),
+so the client still holds that change and a rebuild that left it out would be
+quietly partial.
+
+The two are re-queued differently, and the server's idempotency rule is what
+forces it. §9.1 has the service keep the outcome it reached for a mutation ID,
+which is what makes an accepted replay converge — and equally what makes a
+refusal permanent for that ID. So an **applied** mutation is re-queued in
+place, keeping the ID that makes it idempotent, while a **rejected** one is
+re-submitted under a fresh ULID carrying the same intent, `created_at` and
+`created_by`. That is not a workaround: §9.1 says a rejected mutation is never
+retried, and §10.8's resolution path already re-submits a refused change as a
+new mutation. The rejected row is left untouched, as §8 requires.
+
+Conflicts do not replay. They are a decision waiting on a person, with
+`ark conflict resolve` to carry it out (§10.8).
+
+### Several clients
+
+Replay is idempotent by mutation ID, and a re-queue does not change an ID, so
+two replicas replaying one history converge on a single copy of each record and
+the second mints no revision. Nothing orders one client's replay against
+another's, though, so an update to a record whose author has not replayed yet
+is refused as `record not found`. That is loud, it leaves the reset recorded,
+and running the command again once the author has replayed is the way through.
+
+### What a repair does not preserve
+
+Display numbers. The service reassigns a task or pull-request number another
+record already holds (§6.2), so a repaired repository can come back numbered
+differently. The command says so before it acts and names each number that
+moved afterwards, because an `ark:<repo>#N` written into a commit message or a
+design doc is not stored in Ark and cannot be corrected by it. ULIDs do not
+change.
+
 ---
 
 ## 10. Conflict Rules
@@ -1146,6 +1275,7 @@ V1 commands:
 ark init
 ark status
 ark sync
+ark repair push
 
 ark repo show
 ark repo set
@@ -1778,6 +1908,15 @@ back below one this checkout had already synced past, so its history for this
 repository was reset or lost (§9.2). A caller that scripts against exit codes
 learns nothing from a 0 there, which is the whole complaint — the divergence
 has to be legible to a program, not only in the prose the command printed.
+
+`ark repair push` (§9.3) answers 0 **only when the repository no longer needs
+repair**: a replay the service took whole, after which the recorded reset is
+cleared. Everything else it can do is a 7 — a preview, which by design changed
+nothing, and a replay the service rejected part of. The command's whole subject
+is a repository in a state needing work, so a 0 from one that is still in it
+would be the same false "in sync" that let elk-work/ark#58 sit for six weeks.
+Refusing to run at all — no reset is recorded — is a 2, like any other
+precondition the command line did not meet.
 
 Exit code 8 is for a service that answered and cannot serve this repository:
 its stored database will not open. It is a 5xx, and the reason it is not 6 is

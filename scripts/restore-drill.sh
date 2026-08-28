@@ -2,9 +2,11 @@
 #
 # Ark recovery drill — restore a repository from its stored copy.
 #
-# Exercises the recovery path documented in docs/self-hosting.md ("Restore
-# from a stored copy"): a repository's `repos/<id>.db` is lost, corrupted, or
-# rolled back, and the service is stood back up from the object alone.
+# Exercises both recovery paths documented in docs/self-hosting.md. "Restore
+# from a stored copy": a repository's `repos/<id>.db` is lost, corrupted, or
+# rolled back, and the service is stood back up from the object alone. And
+# "Replay procedure" (phase 7): there is no object left to restore, so the
+# service is rebuilt out of a client's mutation log with `ark repair push`.
 #
 # The drill is the artifact. It is meant to be re-run — before a storage
 # change, after a server change that touches internal/server/repodb, or on a
@@ -359,6 +361,22 @@ client_sync() { # name
 }
 
 sync_field() { echo "$SYNC_JSON" | jq -r "$1"; }
+
+# Runs `ark repair push --json`, capturing exit code and result. Never aborts:
+# every outcome of this command except a completed repair is a non-zero exit,
+# including the preview, so `set -e` would end the drill at the first one.
+REPAIR_RC=0
+REPAIR_JSON=""
+client_repair() { # name [extra flags]
+	local name="$1"
+	shift
+	REPAIR_RC=0
+	REPAIR_JSON="$(ark_in "$name" repair push --json "$@" 2>>"$LOG")" || REPAIR_RC=$?
+	case "$REPAIR_JSON" in "") REPAIR_JSON='{}' ;; esac
+	printf 'repair[%s] rc=%d %s\n' "$name" "$REPAIR_RC" "$REPAIR_JSON" >>"$LOG"
+}
+
+repair_field() { echo "$REPAIR_JSON" | jq -r "$1"; }
 
 status_field() { # name jq-path
 	ark_in "$1" status --json 2>>"$LOG" | jq -r "$2"
@@ -838,6 +856,90 @@ assert_eq "  no NEW reset is reported" null "$(sync_field '.history_reset')"
 assert_ne "  but status still carries the recorded reset — it does not self-clear" \
 	null "$(status_field alpha2_rb '.history_reset')"
 
+# ================================================================== phase 7
+
+phase "Phase 7 — replay from a client, when there is nothing left to restore"
+
+# The other recovery, and the one the rest of this drill cannot substitute
+# for. Everything above puts an object back; this is the case where there is
+# no object to put back and a client's own mutation log is the last copy of
+# the repository (docs/self-hosting.md, "Replay procedure"; spec §9.3).
+
+step "losing the object for good"
+st_delete
+if st_exists; then bad "object deleted for the replay"; else ok "object deleted for the replay"; fi
+
+client_from_snapshot delta "$SNAP/alpha-R$R2.tar"
+DELTA_TASKS="$(task_count delta)"
+client_sync delta
+assert_eq "the client detects the loss (exit 7)" 7 "$SYNC_RC"
+assert_eq "  the service holds no history at all" 0 "$(sync_field '.history_reset.server_revision')"
+# Snapshot the detected state: a second replica of it is how the idempotency
+# of a replay gets tested below, with the same mutation IDs on both sides.
+client_snapshot delta "$SNAP/delta-detected.tar"
+
+step "a repair without --confirm is a preview"
+client_repair delta
+assert_eq "the preview exits 7 — it left the repository needing repair" 7 "$REPAIR_RC"
+assert_eq "  and says it changed nothing" true "$(repair_field .dry_run)"
+assert_eq "  it queued nothing" 0 "$(repair_field .requeued_mutations)"
+assert_ge "  it counted the log it would replay" 1 "$(repair_field .replayable_mutations)"
+assert_ne "  it named the reset it would repair" null "$(repair_field '.history_reset')"
+if st_exists; then
+	bad "the preview re-created the object" "$(object_fingerprint)"
+else
+	ok "the preview left the service untouched"
+fi
+
+step "and with --confirm it rebuilds the repository"
+REPLAY_START=$(date +%s)
+client_repair delta --confirm
+REPLAY_SECS=$(($(date +%s) - REPLAY_START))
+assert_eq "the replay exits 0 — nothing left to repair" 0 "$REPAIR_RC"
+assert_eq "  nothing was rejected" 0 "$(repair_field '.sync.rejected')"
+assert_eq "  nothing conflicted" 0 "$(repair_field '.sync.conflicts')"
+assert_eq "  the recorded reset is cleared" true "$(repair_field .history_reset_cleared)"
+assert_eq "  the replay covered the whole log" "$(repair_field .replayable_mutations)" \
+	"$(repair_field .requeued_mutations)"
+if st_exists; then ok "the object is back"; else bad "the object is back"; fi
+R3="$(repair_field '.sync.server_revision')"
+REPLAY_F="$(object_fingerprint)"
+REPLAY_ROWS="${REPLAY_F%% *}"
+step "R3=$R3, fingerprint $REPLAY_F, ${REPLAY_SECS}s"
+
+step "what a client and the raw API each see afterwards"
+assert_eq "the replaying client kept every task it held" "$DELTA_TASKS" "$(task_count delta)"
+assert_eq "  and reports itself in sync" 0 "$(status_field delta .pending_mutations)"
+assert_eq "  with no history reset left" null "$(status_field delta '.history_reset')"
+client_sync delta
+assert_eq "  its next ordinary sync is clean" 0 "$SYNC_RC"
+code="$(api_pull 0)"
+assert_eq "raw pull serves the rebuilt repository" 200 "$code"
+assert_ge "  carrying records" "$REPLAY_ROWS" "$(api_last | jq '.records | length')"
+
+new_git_repo "$(client_dir epsilon)"
+ark_in epsilon init --skill=false --repository "$REPO_ID" >>"$LOG" 2>&1
+ark_in epsilon remote set "$BASE_URL" >>"$LOG" 2>&1
+client_sync epsilon
+assert_eq "a client that has never seen this repository syncs clean" 0 "$SYNC_RC"
+assert_eq "  and pulls down every task" "$DELTA_TASKS" "$(task_count epsilon)"
+
+# The property that makes a replay safe to run from more than one machine, and
+# safe to re-run after one that half-finished: the server keys idempotency on
+# the mutation ID, and a re-queue does not change an ID.
+step "a second replica replaying the same log converges rather than duplicating"
+client_from_snapshot delta2 "$SNAP/delta-detected.tar"
+# Baseline taken here rather than after the first replay: the joining client
+# above registered an actor of its own on the way past, which is a record and
+# a revision that has nothing to do with the replay being measured.
+BEFORE_SECOND_F="$(object_fingerprint)"
+BEFORE_SECOND_R="$(object_revision)"
+client_repair delta2 --confirm
+assert_eq "the second replay exits 0" 0 "$REPAIR_RC"
+assert_eq "  nothing was rejected" 0 "$(repair_field '.sync.rejected')"
+assert_eq "  it minted no revision" "$BEFORE_SECOND_R" "$(repair_field '.sync.server_revision')"
+assert_eq "  and duplicated no record" "$BEFORE_SECOND_F" "$(object_fingerprint)"
+
 # =================================================================== report
 
 phase "Result"
@@ -848,6 +950,7 @@ say "object            $(storage_label)"
 say "baseline          revision $R1, $BASE_ROWS records, generation $G1"
 say "restore method    $RESTORE_METHOD"
 say "restore duration  ${RESTORE_SECS}s (deletion) / ${RESTORE2_SECS}s (corruption)"
+say "replay            revision $R3, $REPLAY_ROWS records, ${REPLAY_SECS}s"
 say "drill duration    ${DRILL_SECS}s"
 say "assertions        $PASS passed, $FAIL failed"
 say "log               $LOG"

@@ -67,6 +67,13 @@ func newSyncCmd(g *globals) *cobra.Command {
 					p.Line("or restored from an earlier point. Records it acknowledged may be gone.")
 					p.Line("Ark has not tried to reconcile this: which side is authoritative is not")
 					p.Line("a decision it can make. First detected %s.", hr.DetectedAt)
+					// Naming the way out is not the same as taking it. The
+					// decision stays a person's; what changes is that they
+					// now have somewhere to make it, rather than the SQLite
+					// surgery this used to require (elk-work/ark#60).
+					p.Line("")
+					p.Line("If the service's own storage cannot be restored, this checkout can")
+					p.Line("rebuild the repository from its mutation log: `ark repair push`.")
 				}
 			}); err != nil {
 				return err
