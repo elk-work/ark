@@ -31,9 +31,26 @@ type statusReport struct {
 	// that had just refused three writes, and nothing in this command said
 	// otherwise (elk-work/ark#46). Whatever else status reports, it must not
 	// be able to describe a diverged repository as a clean one.
-	RejectedMutations int64  `json:"rejected_mutations"`
-	Conflicts         int64  `json:"unresolved_conflicts"`
-	Remote            string `json:"remote,omitempty"`
+	RejectedMutations int64 `json:"rejected_mutations"`
+	Conflicts         int64 `json:"unresolved_conflicts"`
+	// HeldRecords counts records pulled from the service and not applied,
+	// because each names a record this checkout does not hold. #75 made that
+	// survivable — the batch and the cursor go through, and a held record is
+	// applied on a later pull the moment its referent arrives — and in the
+	// ordinary case it resolves itself before anyone looks.
+	//
+	// It is reported because it can also never resolve. The service accepts a
+	// child whose parent it does not hold, deliberately (elk-work/ark#56), so
+	// a held record is the client-side face of a dangling reference the
+	// service has already recorded (elk-work/ark#77). If the parent is never
+	// coming, nothing else in this command would ever say so.
+	//
+	// Deliberately NOT part of the divergence story above. A rejection is
+	// terminal and means the service refused something; this means the client
+	// is waiting, resolves without intervention, and must not push `ark sync`
+	// to exit 7 (spec §9.2).
+	HeldRecords int64  `json:"held_records,omitempty"`
+	Remote      string `json:"remote,omitempty"`
 	// HistoryReset is the third and worst of the states this command has to
 	// tell apart. Nothing pending is one answer; something rejected is a
 	// second; the service disagreeing about what *exists* is a third, and it
@@ -135,6 +152,9 @@ func newStatusCmd(g *globals) *cobra.Command {
 			if err := count(`SELECT COUNT(*) FROM conflicts WHERE status = 'unresolved'`, &rep.Conflicts); err != nil {
 				return err
 			}
+			if rep.HeldRecords, err = a.Store.DeferredRecordCount(ctx); err != nil {
+				return err
+			}
 			if rep.HistoryReset, err = a.Store.HistoryReset(ctx); err != nil {
 				return err
 			}
@@ -184,6 +204,16 @@ func newStatusCmd(g *globals) *cobra.Command {
 				}
 				if rep.Conflicts > 0 {
 					p.Line("conflicts   %d unresolved (see `ark conflict list`)", rep.Conflicts)
+				}
+				// Waiting, not diverged, and said in those words. Every other
+				// line here is about something the operator must act on; this
+				// one usually clears itself on the next pull, and saying
+				// otherwise would spend the attention the lines above need.
+				// It is reported at all because "usually" is not "always" —
+				// the referent may not be coming.
+				if rep.HeldRecords > 0 {
+					p.Line("held        %d record(s) waiting for records that have not arrived yet;", rep.HeldRecords)
+					p.Line("            they apply on their own once those do")
 				}
 				// Last, and in its own words. The two lines above are about
 				// changes; this one is about whether the service still has
