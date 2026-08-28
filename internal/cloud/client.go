@@ -56,6 +56,18 @@ func VerifyToken(ctx context.Context, remote, token string) error {
 	if err == nil {
 		return nil
 	}
+	// A 403 is proof the credential authenticated — the service recognised it
+	// and then declined the request — which is the whole of what this probe
+	// claims to establish, so it verifies rather than refuses.
+	//
+	// It is reachable: the probe id is a well-formed ULID and therefore
+	// registrable, so if anyone ever registers it, every later `ark login`
+	// against a principal without a grant on it would have been told its
+	// working credential was rejected (elk-work/ark#106). Checked before Kind
+	// because both `permission` statuses share one Kind by design.
+	if errors.Is(err, ErrAuthorizationRefused) {
+		return nil
+	}
 	var arkErr *records.Error
 	if errors.As(err, &arkErr) {
 		switch arkErr.Kind {
@@ -138,7 +150,13 @@ func statusError(status int, e api.Error) error {
 		// about the credential. Both stay exit 5: the two mean the same thing
 		// to a program — you may not do this, and retrying will not change it
 		// — and only the sentence a person reads differs.
-		return &records.Error{Kind: records.KindPermission, Message: forbidden(e.Message)}
+		//
+		// Tagged, so a caller that needs the difference can match on it rather
+		// than read the sentence. `#95` made the two read differently; this
+		// makes them tellable apart, which VerifyToken needs and a message
+		// cannot safely provide.
+		return authorizationRefused{&records.Error{
+			Kind: records.KindPermission, Message: forbidden(e.Message)}}
 	case http.StatusNotFound:
 		return records.NotFoundf("%s", msg)
 	case http.StatusConflict:
@@ -190,6 +208,27 @@ func forbidden(msg string) string {
 	return msg + " — the stored credential was accepted, so logging in again will not help;" +
 		" the grant is the missing part"
 }
+
+// ErrAuthorizationRefused marks a refusal that came *after* authentication
+// succeeded: the service recognised the bearer and declined the request.
+//
+// The two `permission` statuses stay one Kind and one exit code, deliberately
+// (see the 403 branch above) — so the difference cannot be read off Kind, and
+// reading it off the message would be guessing at text. This makes it
+// matchable, the way ErrCredentialsUnreadable did for #63.
+//
+// VerifyToken is the caller that needed it: a probe establishing only that a
+// credential authenticates must treat a 403 as proof that it does.
+var ErrAuthorizationRefused = errors.New("the service refused the request, not the credential")
+
+// authorizationRefused tags a 403 while leaving the service's own refusal as
+// the message and the unwrap target, so errors.As still finds the
+// *records.Error and ExitCode still answers 5.
+type authorizationRefused struct{ err error }
+
+func (a authorizationRefused) Error() string        { return a.err.Error() }
+func (a authorizationRefused) Unwrap() error        { return a.err }
+func (a authorizationRefused) Is(target error) bool { return target == ErrAuthorizationRefused }
 
 func (c *Client) RegisterRepo(ctx context.Context, req api.RegisterRepositoryRequest) error {
 	return c.do(ctx, http.MethodPost, "/v1/repositories", req, nil)
