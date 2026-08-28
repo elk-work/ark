@@ -233,8 +233,28 @@ way — and `--json` carries the actor ULID that tells them apart.
 `delegated_by` must name a human actor the repository already holds. An
 invocation whose delegation is absent, dangling, or names an agent is refused
 before it writes anything, because an agent cannot invent the authority it
-claims to act under. The service makes the same check where it registers an
-agent remotely (§19).
+claims to act under.
+
+**The service resolves a remote writer by the same key**, on the §19 write
+routes and on `POST /v1/repositories/{id}/metadata` — the request's `writer`
+names an agent and a delegating human, and the pair is what selects or
+registers the actor the write is attributed to
+(`docs/rfc-0004-work-record-write-api.md`, Decision 2). It has to be the same
+key, because the two are one stated equivalence: while the service keyed on
+the name alone, the same `--agent claude-code` resolved to one actor through a
+local write and possibly another through a remote one, and every person using
+the CLI writes remotely through the same `ark-cli` name, so the second person
+to run `ark repo set` in a repository was attributed to the first.
+
+Two things differ remotely, because a request is not a local database. The
+delegation is checked on **every** write rather than only where an agent is
+registered — it is half the lookup key, so a check at registration alone would
+leave the reuse path as open as the name-only lookup was. And the human a
+request may name is governed by the actor binding (§19.2): one bound to
+another principal is refused with `permission`, which is what stops a request
+from asserting a delegation it was not given. The stored actor record is never
+rewritten from a request either way, so nothing can re-point a registered
+agent at a different human.
 
 **Changing that key re-attributes nothing.** Records already written name the
 actor they named. A client that upgrades finds no actor for its (name, human)
@@ -1858,12 +1878,23 @@ binding says which identity it may write as**, and it is what makes the
   resolves to somebody else's agent and must not be refused for it. Writing as
   an agent is therefore governed by the delegation rule below until the fleet
   has moved; `internal/server/grantsactors.go` records what that leaves open.
-- **Delegation is enforced on new agent actors.** A newly introduced actor of
-  type `agent` must carry a `delegated_by` naming a human actor in this
-  repository that does not belong to another principal; absent or dangling is
-  `permission`. On later writes `delegated_by` is read from the stored actor
-  record and never from the request, so nothing can re-point an existing
-  agent at a different human.
+- **Delegation is enforced on new agent actors, and on every write through
+  the §19 write routes.** An actor of type `agent` must carry a
+  `delegated_by` naming a human actor in this repository that does not belong
+  to another principal. On a push that is checked where the agent is
+  introduced, and every failure is `permission`. On the write routes it is
+  checked on every call, because the delegating human is half the key a
+  writer is resolved by (§6.0) and a check at registration alone would let a
+  later request name somebody else's human and land on their agent; there an
+  absent, dangling or non-human value is `validation` — a malformed `writer`
+  is a malformed request — and only "belongs to another principal" is
+  `permission`.
+- **A request selects a registration; it never rewrites one.** The stored
+  actor record's `delegated_by` is never taken from a payload, on either
+  surface, so nothing can re-point an existing agent at a different human. A
+  push re-sending an existing actor is a no-op, and a write route naming a
+  different human resolves to that human's own agent, registers it, or is
+  refused.
 - **The legacy service token binds nothing and is bound by nothing.** An
   actor "introduced by" a string the whole fleet shares is introduced by
   everybody, and binding under it would hand every existing actor to a

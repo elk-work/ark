@@ -22,8 +22,15 @@ const (
 // writeReq exercises a write route with auth and an optional idempotency key.
 func writeReq(t *testing.T, s *Server, path, key, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	return writeReqAs(t, s, s.Token, path, key, body)
+}
+
+// writeReqAs is writeReq as a chosen bearer, so a test can put two principals
+// on one route and see which identity each of them resolves to.
+func writeReqAs(t *testing.T, s *Server, bearer, path, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest("POST", path, strings.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+s.Token)
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	req.Header.Set("Content-Type", "application/json")
 	if key != "" {
 		req.Header.Set("Idempotency-Key", key)
@@ -70,8 +77,24 @@ func decodeWrite(t *testing.T, rec *httptest.ResponseRecorder) api.RecordRespons
 
 // taskBody builds a create-task request naming the seeded writer.
 func taskBody(title string) string {
+	return taskBodyAs(agent, humanID, title)
+}
+
+// taskBodyAs builds one naming any (agent name, delegating human) pair — the
+// key a writer is now resolved by.
+func taskBodyAs(agentName, delegatedBy, title string) string {
 	return fmt.Sprintf(`{"writer":{"agent_name":%q,"delegated_by":%q},"title":%q}`,
-		agent, humanID, title)
+		agentName, delegatedBy, title)
+}
+
+// writerOf is the actor a written record is attributed to.
+func writerOf(t *testing.T, resp api.RecordResponse) string {
+	t.Helper()
+	var task store.Task
+	if err := json.Unmarshal(resp.Record.Data, &task); err != nil {
+		t.Fatalf("decode as store.Task: %v", err)
+	}
+	return task.CreatedBy
 }
 
 func createTask(t *testing.T, s *Server, key, title string) api.RecordResponse {
@@ -185,40 +208,237 @@ func TestWriterRegistration(t *testing.T) {
 	}
 }
 
-// A second write by the same agent name reuses the actor rather than
-// minting a new identity per request, and cannot re-point it at someone else.
-func TestWriterIsReusedAndCannotBeRepointed(t *testing.T) {
-	s := writeServer(t)
-	first := createTask(t, s, "k1", "One")
+// secondHuman is a second person's actor, seeded the way a client would.
+const secondHuman = "01TESTHUMAN2NDPERSON0000000"
 
-	// A second human, and a request claiming the existing agent now
-	// delegates from them.
+// seedActor introduces an actor through the ordinary push path.
+func seedActor(t *testing.T, s *Server, a api.Actor) {
+	t.Helper()
 	body, err := json.Marshal(api.PushRequest{RepositoryID: repoID, ClientID: "c1",
-		Actors:    []api.Actor{{ID: "01TESTHUMAN2NDPERSON0000000", Type: "human", Name: "Bob"}},
-		Mutations: []api.Mutation{}})
+		Actors: []api.Actor{a}, Mutations: []api.Mutation{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	doRequest(t, s, "POST", "/v1/sync/push", string(body))
+	if rec := doRequest(t, s, "POST", "/v1/sync/push", string(body)); rec.Code != 200 {
+		t.Fatalf("seed actor %s: %d %s", a.ID, rec.Code, rec.Body.String())
+	}
+}
 
-	rec := writeReq(t, s, "/v1/repositories/"+repoID+"/tasks", "k2",
-		fmt.Sprintf(`{"writer":{"agent_name":%q,"delegated_by":"01TESTHUMAN2NDPERSON0000000"},"title":"Two"}`, agent))
+// A writer resolves per (agent name, delegating human), matching what
+// store.FindAgentActor gives a local agent after elk-work/ark#100 — the
+// equivalence RFC-0004 Decision 2 states and elk-work/ark#102 restored. The
+// same pair reuses one identity; a different human is a different identity;
+// and naming a different human never re-points the registration that exists
+// (Decision 2 rule 3).
+func TestWriterIsReusedPerDelegatingHuman(t *testing.T) {
+	s := writeServer(t)
+	seedActor(t, s, api.Actor{ID: secondHuman, Type: "human", Name: "Bob"})
+	path := "/v1/repositories/" + repoID + "/tasks"
+
+	first := writerOf(t, createTask(t, s, "k1", "One"))
+	again := writerOf(t, createTask(t, s, "k2", "Two"))
+	if first != again {
+		t.Errorf("the same (agent, human) minted two actors: %s and %s", first, again)
+	}
+
+	rec := writeReq(t, s, path, "k3", taskBodyAs(agent, secondHuman, "Three"))
 	if rec.Code != 201 {
-		t.Fatalf("second create: %d %s", rec.Code, rec.Body.String())
+		t.Fatalf("same agent name under a second human: %d %s", rec.Code, rec.Body.String())
 	}
-	second := decodeWrite(t, rec)
-
-	var a, b store.Task
-	json.Unmarshal(first.Record.Data, &a)
-	json.Unmarshal(second.Record.Data, &b)
-	if a.CreatedBy != b.CreatedBy {
-		t.Errorf("same agent name produced two actors: %s and %s", a.CreatedBy, b.CreatedBy)
+	second := writerOf(t, decodeWrite(t, rec))
+	if second == first {
+		t.Fatalf("two people writing as %q shared one actor %s", agent, first)
 	}
 
-	actor := recordData(t, s, "actor", a.CreatedBy)
-	if actor["delegated_by"] != humanID {
-		t.Errorf("delegated_by = %v, want %s (a request must not re-point a registered agent)",
-			actor["delegated_by"], humanID)
+	// Rule 3: the registration that already existed is untouched. The
+	// request selected a different one — it did not rewrite this one.
+	if got := recordData(t, s, "actor", first)["delegated_by"]; got != humanID {
+		t.Errorf("the first agent now delegates from %v, want %s "+
+			"(a request must not re-point a registered agent)", got, humanID)
+	}
+	if got := recordData(t, s, "actor", second)["delegated_by"]; got != secondHuman {
+		t.Errorf("the second agent delegates from %v, want %s", got, secondHuman)
+	}
+	for _, id := range []string{first, second} {
+		if got := recordData(t, s, "actor", id)["agent_name"]; got != agent {
+			t.Errorf("actor %s has agent_name %v, want %s", id, got, agent)
+		}
+	}
+}
+
+// The divergence elk-work/ark#102 is about, at the surface it appeared on:
+// every person using the CLI writes through the same `ark-cli` agent name, so
+// keying on the name alone attributed the second person's writes to the
+// first — under a delegated_by naming the first person. Two principals, one
+// agent name, two identities.
+func TestTwoPrincipalsWritingAsOneAgentNameDoNotShareAnActor(t *testing.T) {
+	a, alice, bob := twoPrincipals(t)
+	path := "/v1/repositories/" + repoID + "/tasks"
+
+	// Each introduces their own human actor, which binds it to them.
+	if rec := pushAs(t, a.Server, alice.Token, api.PushRequest{
+		Actors: []api.Actor{human(aliceActor, "alice")}}); rec.Code != 200 {
+		t.Fatalf("alice introduces herself: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := pushAs(t, a.Server, bob.Token, api.PushRequest{
+		Actors: []api.Actor{human(bobActor, "bob")}}); rec.Code != 200 {
+		t.Fatalf("bob introduces himself: %d %s", rec.Code, rec.Body.String())
+	}
+
+	rec := writeReqAs(t, a.Server, alice.Token, path, "k-alice",
+		taskBodyAs("ark-cli", aliceActor, "Alice ran repo set"))
+	if rec.Code != 201 {
+		t.Fatalf("alice writing as ark-cli: %d %s", rec.Code, rec.Body.String())
+	}
+	aliceAgent := writerOf(t, decodeWrite(t, rec))
+
+	rec = writeReqAs(t, a.Server, bob.Token, path, "k-bob",
+		taskBodyAs("ark-cli", bobActor, "Bob ran it second"))
+	if rec.Code != 201 {
+		t.Fatalf("bob writing as ark-cli: %d %s", rec.Code, rec.Body.String())
+	}
+	bobAgent := writerOf(t, decodeWrite(t, rec))
+
+	if aliceAgent == bobAgent {
+		t.Fatalf("two principals writing as ark-cli share actor %s", aliceAgent)
+	}
+	if got := recordData(t, a.Server, "actor", bobAgent)["delegated_by"]; got != bobActor {
+		t.Errorf("bob's write is attributed to an agent delegating from %v, want %s", got, bobActor)
+	}
+	// And the binding this route records now names the right person for
+	// each, which first-caller-wins made meaningless (elk-work/ark#52).
+	if got := actorBoundTo(t, a.Server, aliceAgent); got != alice.Principal.ID {
+		t.Errorf("alice's ark-cli is bound to %q, want %s", got, alice.Principal.ID)
+	}
+	if got := actorBoundTo(t, a.Server, bobAgent); got != bob.Principal.ID {
+		t.Errorf("bob's ark-cli is bound to %q, want %s", got, bob.Principal.ID)
+	}
+}
+
+// Keying the lookup on the delegating human means the value arrives in the
+// request, so the request must not be able to assert one it should not. The
+// authenticated principal is what stops it: a human actor bound to somebody
+// else is refused — checkDelegation's rule (grantsactors.go), applied here on
+// every write rather than only where an agent is registered.
+func TestARequestCannotClaimAnotherPrincipalsHuman(t *testing.T) {
+	a, alice, bob := twoPrincipals(t)
+	path := "/v1/repositories/" + repoID + "/tasks"
+
+	if rec := pushAs(t, a.Server, alice.Token, api.PushRequest{
+		Actors: []api.Actor{human(aliceActor, "alice")}}); rec.Code != 200 {
+		t.Fatalf("alice introduces herself: %d %s", rec.Code, rec.Body.String())
+	}
+	rec := writeReqAs(t, a.Server, alice.Token, path, "k-alice",
+		taskBodyAs("ark-cli", aliceActor, "Alice's"))
+	if rec.Code != 201 {
+		t.Fatalf("alice writing as her own ark-cli: %d %s", rec.Code, rec.Body.String())
+	}
+	aliceAgent := writerOf(t, decodeWrite(t, rec))
+	before := revision(t, a.Server)
+
+	// Bob names Alice's human. Under the name-only lookup he did not even
+	// have to: `{"agent_name":"ark-cli"}` landed on her actor by itself.
+	rec = writeReqAs(t, a.Server, bob.Token, path, "k-bob",
+		taskBodyAs("ark-cli", aliceActor, "Bob's, as Alice"))
+	if rec.Code != 403 {
+		t.Fatalf("bob claimed alice's authority: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := errCode(t, rec); got != "permission" {
+		t.Errorf("error code %q, want permission", got)
+	}
+	// Rule 3, from the other side: the refusal changed nothing, and a
+	// rolled-back write left no revision behind either.
+	if got := recordData(t, a.Server, "actor", aliceAgent)["delegated_by"]; got != aliceActor {
+		t.Errorf("alice's agent now delegates from %v, want %s", got, aliceActor)
+	}
+	if got := actorBoundTo(t, a.Server, aliceAgent); got != alice.Principal.ID {
+		t.Errorf("alice's agent is bound to %q, want %s", got, alice.Principal.ID)
+	}
+	if got := revision(t, a.Server); got != before {
+		t.Errorf("a refused write bumped the revision %d -> %d", before, got)
+	}
+
+	// Bob under his own human is not refused — the rule is about identity,
+	// not about the agent name, which people share by design.
+	if rec := pushAs(t, a.Server, bob.Token, api.PushRequest{
+		Actors: []api.Actor{human(bobActor, "bob")}}); rec.Code != 200 {
+		t.Fatalf("bob introduces himself: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := writeReqAs(t, a.Server, bob.Token, path, "k-bob-2",
+		taskBodyAs("ark-cli", bobActor, "Bob's, as Bob")); rec.Code != 201 {
+		t.Fatalf("bob writing as his own ark-cli: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+// The legacy service token is one string the whole fleet holds and it
+// identifies nobody, so there is no principal to check a delegation against
+// and it is never refused for one. Six live repositories sync on it.
+func TestTheLegacyTokenWritesUnderAnyDelegation(t *testing.T) {
+	a, alice, _ := twoPrincipals(t)
+	path := "/v1/repositories/" + repoID + "/tasks"
+
+	if rec := pushAs(t, a.Server, alice.Token, api.PushRequest{
+		Actors: []api.Actor{human(aliceActor, "alice")}}); rec.Code != 200 {
+		t.Fatalf("alice introduces herself: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := actorBoundTo(t, a.Server, aliceActor); got != alice.Principal.ID {
+		t.Fatalf("alice's actor is bound to %q, want %s", got, alice.Principal.ID)
+	}
+
+	rec := writeReqAs(t, a.Server, a.Token, path, "k-legacy",
+		taskBodyAs("ark-cli", aliceActor, "From the fleet"))
+	if rec.Code != 201 {
+		t.Fatalf("the service token was refused: %d %s", rec.Code, rec.Body.String())
+	}
+	// It binds nothing either, so the actor it registers stays free for
+	// whoever first writes as it (grantsactors.go).
+	if got := actorBoundTo(t, a.Server, writerOf(t, decodeWrite(t, rec))); got != "" {
+		t.Errorf("the service token bound an actor to %q", got)
+	}
+}
+
+// What a client built before this change does. The fleet is pinned to v0.7.0,
+// whose `remoteWriter` (internal/cli/repo.go) already sends a delegation on
+// every request — the local agent's for an `--agent` run, the person's own
+// human actor otherwise — so its writes keep working and simply stop sharing
+// one `ark-cli` identity between people. A caller that read `delegated_by` as
+// registration-only and omitted it afterwards is refused, in the field's own
+// words rather than as a lookup that quietly found nobody.
+func TestAnOlderClientsWriter(t *testing.T) {
+	path := "/v1/repositories/" + repoID + "/tasks"
+	cases := []struct {
+		name     string
+		writer   string
+		wantCode int
+		wantErr  string
+	}{
+		{"v0.7.0 CLI, a person at the keyboard",
+			`{"agent_name":"ark-cli","agent_version":"0.7.0","delegated_by":"` + humanID + `"}`, 201, ""},
+		{"v0.7.0 CLI, an --agent run under its own delegation",
+			`{"agent_name":"claude-code","agent_version":"0.7.0","delegated_by":"` + humanID + `"}`, 201, ""},
+		{"v0.7.0 CLI, an --agent run under somebody else's, unbound",
+			`{"agent_name":"claude-code","agent_version":"0.7.0","delegated_by":"` + secondHuman + `"}`, 201, ""},
+		{"a caller that omits the delegation it sent once",
+			`{"agent_name":"release-bot"}`, 400, "validation"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s := writeServer(t)
+			seedActor(t, s, api.Actor{ID: secondHuman, Type: "human", Name: "Bob"})
+			rec := writeReq(t, s, path, "k1", `{"writer":`+c.writer+`,"title":"T"}`)
+			if rec.Code != c.wantCode {
+				t.Fatalf("code %d, want %d (%s)", rec.Code, c.wantCode, rec.Body.String())
+			}
+			if c.wantErr == "" {
+				return
+			}
+			if got := errCode(t, rec); got != c.wantErr {
+				t.Errorf("error code %q, want %q", got, c.wantErr)
+			}
+			if !strings.Contains(rec.Body.String(), "delegated_by") {
+				t.Errorf("the refusal does not name the field: %s", rec.Body.String())
+			}
+		})
 	}
 }
 

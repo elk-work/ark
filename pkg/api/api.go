@@ -209,15 +209,18 @@ type Error struct {
 const ErrorCodeRepositoryCorrupt = "repository_corrupt"
 
 // Writer names the agent identity a server-side write is attributed to.
-// The service resolves it to a repository-local actor: first use creates
-// that actor, every later write reuses it, and DelegatedBy is read from the
-// stored actor record rather than from the request. See
-// docs/rfc-0004-work-record-write-api.md Decision 2.
+// The service resolves it to a repository-local actor, per (AgentName,
+// DelegatedBy): first use of a pair creates that actor, every later write
+// under the same pair reuses it. See docs/rfc-0004-work-record-write-api.md
+// Decision 2 and v1-spec §6.0.
 type Writer struct {
 	AgentName    string `json:"agent_name"`
 	AgentVersion string `json:"agent_version,omitempty"`
-	// DelegatedBy is the ULID of a human actor already in the repository.
-	// Consulted only when the agent actor is created; ignored afterwards.
+	// DelegatedBy is the ULID of a human actor already in the repository,
+	// and is required on every write: it is half the key the writer is
+	// resolved by, not only a value stamped at registration. It selects a
+	// registration and never rewrites one, so a request still cannot
+	// re-point an existing agent at a different human.
 	DelegatedBy string `json:"delegated_by,omitempty"`
 }
 
