@@ -22,7 +22,11 @@ func newTestServer(t *testing.T) *Server {
 	}
 }
 
-const repoID = "01TESTREPO0000000000000000"
+// A real ULID, because registration now requires one (elk-work/ark#84). The
+// previous fixture, "01TESTREPO…", was the right length and not a ULID: the O
+// is not in Crockford's alphabet. That it went unnoticed is a small piece of
+// evidence for the issue — nothing anywhere checked.
+const repoID = "01TESTREP00000000000000000"
 
 func registerRepo(t *testing.T, s *Server) {
 	t.Helper()

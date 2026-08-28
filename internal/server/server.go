@@ -155,6 +155,24 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "validation", "id and name are required")
 		return
 	}
+	// A repository id becomes an object name in storage the service owns, and
+	// registration is the only route that mints one. `repodb.validRepoID` runs
+	// on every read and write, but it is a path-safety check — it rejects the
+	// separators and the dot, and accepts "spooky" or 600 characters of
+	// anything else. Identity is a different question and belongs here, once,
+	// where the name is chosen: clients mint ULIDs (`records.NewID`), so the
+	// service can require one rather than inherit whatever a caller sends
+	// (elk-work/ark#84).
+	//
+	// This also makes auth.db's collision-immunity explicit. It lives at the
+	// reserved key `ark.auth`, which no client can register because the dot is
+	// rejected — correct, but a stronger guarantee than it looked like, resting
+	// on a rule written for path safety. A ULID cannot contain a dot either,
+	// so the reservation now holds for a reason you can read.
+	if !records.ValidID(req.ID) {
+		writeErr(w, http.StatusBadRequest, "validation", "id must be a ULID")
+		return
+	}
 	if req.DefaultBranch == "" {
 		req.DefaultBranch = "main"
 	}
