@@ -564,6 +564,87 @@ repository the service knows about.
 
 ---
 
+## Inspecting a repository: dangling references
+
+The service **does not enforce referential integrity on push**, and that
+is deliberate ([v1-spec.md](v1-spec.md) §9.1). Nothing orders one
+client's push against another's, so the record a new child names may
+still be sitting in somebody else's queue; refusing the child would turn
+a skew that ends by itself into a rejection, which is permanent. What
+the service does instead is write the unresolved reference down, in a
+`dangling_references` table in that repository's database. This is how
+you read it:
+
+```text
+GET /v1/repositories/{repo}/dangling[?all=true][&limit=N]
+```
+
+```sh
+curl -sS "$ARK_URL/v1/repositories/$REPO/dangling" \
+  -H "Authorization: Bearer $ARK_API_TOKEN"
+```
+
+```json
+{"repository_id":"01K3…","outstanding":1,"recorded":1,"server_revision":412,
+ "references":[{"record_type":"comment","record_id":"01K3…",
+   "field":"parent_id","parent_type":"task","parent_id":"01K3…",
+   "mutation_id":"01K3…","first_seen_at":"2026-08-28T09:14:02.118Z"}]}
+```
+
+**`outstanding` is the number that matters, and an outstanding entry is a
+defect rather than a statistic.** It is a record this service is serving
+whose pointer resolves to nothing here, which no client can render. The
+set is defined by comparison and clears itself the moment the record it
+names arrives — there is no `resolved_at` and there must not be one — so
+`outstanding` is always a current statement, while `recorded` counts
+every entry ever written, including the ones that have since resolved
+(`?all=true` lists those, each marked `resolved`).
+
+`outstanding` and `recorded` describe the whole repository and are never
+affected by `all` or `limit`, so a short listing cannot make a repository
+look healthier than it is; `truncated` says the listing was cut. Entries
+come oldest first, because a reference recorded minutes ago is ordinary
+skew and one outstanding for a week is a record that is never coming.
+`limit` defaults to 100 and accepts 1–1000.
+
+Reading this needs **`read`** on the repository — the level that already
+pulls its records — so a per-principal credential with `read` is enough
+and the service token, which carries implicit `admin` everywhere, works
+unchanged. `ark repo dangling` is the same call from a checkout:
+
+```sh
+ark repo dangling          # what is outstanding here
+ark repo dangling --all    # and what has since resolved
+ark repo dangling --repo 01K3… --json
+```
+
+**What to do about one.** Usually nothing: the record being named is in
+another client's queue and the entry clears on its own within a sync
+interval. If it does not, find the client that holds the missing record
+and sync it — `mutation_id` names the push that carried the orphan, which
+is the thread back to the client that sent it. If no client holds it, the
+entry will not clear, and the record stays invisible on every client.
+Nothing the service can do repairs that; the record has to be created
+again.
+
+Clients see the other half of the same condition without asking the
+service: `ark status` reports `held_records`, the records a checkout has
+pulled and set aside because they name records it does not hold (spec
+§9.2). A held record on every client plus an outstanding dangling
+reference on the service is one skew, not two problems.
+
+The old way still works and is no longer the only way — the table is in
+the repository's own database, so a copy pulled out of the bucket answers
+the same question directly:
+
+```sql
+SELECT d.* FROM dangling_references d WHERE NOT EXISTS (
+  SELECT 1 FROM records r
+  WHERE r.record_type = d.parent_type AND r.record_id = d.parent_id);
+```
+
+---
+
 ## Health check
 
 ```text

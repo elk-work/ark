@@ -108,6 +108,10 @@ func (s *Server) Handler() http.Handler {
 	// repository (RFC-0003 Decision 4). Both are `admin` acts. See grants.go.
 	mux.HandleFunc("GET /v1/repositories/{repo}/grants", s.auth(s.handleListGrants))
 	mux.HandleFunc("POST /v1/repositories/{repo}/grants", s.auth(s.handleSetGrant))
+	// The ledger of references this service accepted while holding nothing
+	// at the other end (§9.1). A `read` act: it names record ids in this
+	// repository and nothing else. See dangling.go.
+	mux.HandleFunc("GET /v1/repositories/{repo}/dangling", s.auth(s.handleDangling))
 	// Work-record write routes (docs/rfc-0004-work-record-write-api.md):
 	// what a program uses instead of speaking the mutation protocol.
 	mux.HandleFunc("POST /v1/repositories/{repo}/tasks", s.auth(s.handleCreateTask))

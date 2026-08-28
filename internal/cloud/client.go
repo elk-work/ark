@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -170,6 +172,32 @@ func (c *Client) GetRecord(ctx context.Context, repoID, recordType, recordID str
 		return nil, err
 	}
 	return &rec, nil
+}
+
+// Dangling lists the references the service accepted in this repository
+// while holding nothing at the other end (spec §9.1).
+//
+// `all` asks for every entry ever recorded rather than only the ones that
+// still resolve to nothing; `limit` bounds the listing, zero taking the
+// service's default. The counts in the response describe the repository
+// either way, so neither argument can make it look healthier than it is.
+func (c *Client) Dangling(ctx context.Context, repoID string, all bool, limit int) (*api.DanglingResponse, error) {
+	q := url.Values{}
+	if all {
+		q.Set("all", "true")
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	path := "/v1/repositories/" + repoID + "/dangling"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	var resp api.DanglingResponse
+	if err := c.do(ctx, http.MethodGet, path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return &resp, nil
 }
 
 func (c *Client) Merge(ctx context.Context, prID string, req api.MergeRequest) (*api.MergeResponse, error) {

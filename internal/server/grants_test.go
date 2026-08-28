@@ -62,6 +62,7 @@ var everyRepositoryRoute = []struct {
 	{"get repository", "GET", "/v1/repositories/" + repoID, "", api.GrantRead},
 	{"get record", "GET", "/v1/repositories/" + repoID + "/records/task/01TESTTASK0000000000000000", "", api.GrantRead},
 	{"download url", "POST", "/v1/artifacts/download-url", `{"repository_id":"` + repoID + `"}`, api.GrantRead},
+	{"dangling", "GET", "/v1/repositories/" + repoID + "/dangling", "", api.GrantRead},
 	{"push", "POST", "/v1/sync/push", `{"repository_id":"` + repoID + `","client_id":"c1","mutations":[]}`, api.GrantWrite},
 	{"create task", "POST", "/v1/repositories/" + repoID + "/tasks",
 		`{"writer":{"agent_name":"` + agent + `","delegated_by":"` + humanID + `"},"title":"t"}`, api.GrantWrite},

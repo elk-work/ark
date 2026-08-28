@@ -214,6 +214,18 @@ func newStatusCmd(g *globals) *cobra.Command {
 				if rep.HeldRecords > 0 {
 					p.Line("held        %d record(s) waiting for records that have not arrived yet;", rep.HeldRecords)
 					p.Line("            they apply on their own once those do")
+					// The other half of the same skew, named where somebody
+					// is already looking at this one. A held record is the
+					// client's face of a reference the service accepted
+					// while holding nothing at the other end (§9.1), and
+					// only the service can say whether the record being
+					// waited for exists anywhere — which is the difference
+					// between waiting and waiting forever. Offered rather
+					// than answered here: status does not make a network
+					// call, and must not start.
+					if rep.Remote != "" {
+						p.Line("            (`ark repo dangling` says whether the service is missing them too)")
+					}
 				}
 				// Last, and in its own words. The two lines above are about
 				// changes; this one is about whether the service still has
