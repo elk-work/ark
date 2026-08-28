@@ -28,6 +28,23 @@ CREATE TABLE IF NOT EXISTS records (
 
 CREATE INDEX IF NOT EXISTS idx_records_revision ON records (server_revision);
 
+-- Which principal introduced, or first wrote as, each actor in this
+-- repository. The actor half of spec §20 and RFC-0003 Decision 4:
+-- first-writer-binds, so writing *as* somebody else's actor is refused while
+-- carrying their actor record stays the harmless no-op every client's sync
+-- depends on. See internal/server/grantsactors.go.
+--
+-- A table rather than a column on `records`: the schema is applied with
+-- CREATE TABLE IF NOT EXISTS on every open, which adds tables to a live
+-- database and cannot add a column to one. It also keeps an authorization
+-- fact out of the record document, which is replicated to every client —
+-- who may write as an actor is the service's business, not the pulled copy's.
+CREATE TABLE IF NOT EXISTS actor_principals (
+    actor_id     TEXT PRIMARY KEY,
+    principal_id TEXT NOT NULL,
+    bound_at     TEXT NOT NULL
+);
+
 -- Which revision last changed each field of a record. Powers the
 -- field-level merge rules in docs/v1-spec.md §10.4.
 CREATE TABLE IF NOT EXISTS field_revisions (

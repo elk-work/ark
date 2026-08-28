@@ -47,6 +47,9 @@ const (
 // copy that `ark init` wrote.
 func (s *Server) handleGetRepository(w http.ResponseWriter, r *http.Request) {
 	repoID := r.PathValue("repo")
+	if !s.allow(w, r, repoID, api.GrantRead) {
+		return
+	}
 	var meta api.RepositoryMetadata
 	err := s.Repos.View(r.Context(), repoID, func(db *sql.DB) error {
 		return loadMetadata(db.QueryRowContext(r.Context(), metadataQuery), &meta)
@@ -75,6 +78,14 @@ func loadMetadata(row scanner, meta *api.RepositoryMetadata) error {
 // handleSetRepositoryMetadata corrects one or more metadata fields.
 func (s *Server) handleSetRepositoryMetadata(w http.ResponseWriter, r *http.Request) {
 	repoID := r.PathValue("repo")
+	// `admin`, and this is the clearest admin-level act on the service:
+	// renaming a repository changes what it is called for everyone, and
+	// nothing about it is recoverable from a client. The check is here rather
+	// than beside the writer resolution below because it needs no repository
+	// database — a caller with no authority should not cost a fetch.
+	if !s.allow(w, r, repoID, api.GrantAdmin) {
+		return
+	}
 	req, ok := decode[api.SetRepositoryMetadataRequest](w, r)
 	if !ok {
 		return
@@ -133,11 +144,11 @@ func (s *Server) handleSetRepositoryMetadata(w http.ResponseWriter, r *http.Requ
 
 		// Resolved for the authorization rule rather than for attribution:
 		// metadata carries no created_by. Running the same writer check on
-		// every write route keeps the rule in one place, and this is where
-		// RFC-0003's per-repository grant check goes when it lands — renaming
-		// a repository is the clearest `admin`-level act on this service, and
-		// V1 has one service token with no level to check it against.
-		if _, err := resolveWriter(ctx, tx, req.Writer); err != nil {
+		// every write route keeps the rule in one place. The per-repository
+		// grant this act needs — `admin` — was checked before the handler
+		// touched storage; this is the second half of the same rule, about
+		// the identity the write is made under rather than the caller.
+		if _, err := resolveWriter(ctx, tx, req.Writer, principalOf(r)); err != nil {
 			return err
 		}
 		rev, err := nextRevision(ctx, tx)

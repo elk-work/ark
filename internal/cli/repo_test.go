@@ -166,3 +166,71 @@ func TestRepoWithoutARemote(t *testing.T) {
 		}
 	}
 }
+
+// `ark repo grant` end to end, against a real service.
+//
+// The client here holds the service token, which carries implicit admin
+// everywhere until elk-work/ark#54 retires it — so this exercises the
+// command, the route and the store without needing an identity provider. What
+// each level *does* is pinned server-side, in internal/server/grants_test.go.
+func TestRepoGrantIssuesRevokesAndLists(t *testing.T) {
+	dir, _ := syncedRepo(t)
+
+	// A grant to somebody who has never logged in is the point of keying on
+	// an email, and the command has to say that is what happened.
+	out := ark(t, dir, "repo", "grant", "newcomer@example.com", "--write")
+	if !strings.Contains(out, "first login") || !strings.Contains(out, "write") {
+		t.Errorf("granting to an unknown address did not say it is waiting: %s", out)
+	}
+
+	var list api.GrantListResponse
+	arkJSON(t, dir, &list, "repo", "grants")
+	if len(list.Grants) != 1 || list.Grants[0].Email != "newcomer@example.com" ||
+		list.Grants[0].Level != api.GrantWrite || !list.Grants[0].Pending {
+		t.Fatalf("grants after issuing one: %+v", list.Grants)
+	}
+
+	// Re-granting corrects the level rather than adding a second row.
+	ark(t, dir, "repo", "grant", "newcomer@example.com", "--read")
+	arkJSON(t, dir, &list, "repo", "grants")
+	if len(list.Grants) != 1 || list.Grants[0].Level != api.GrantRead {
+		t.Fatalf("after re-granting: %+v", list.Grants)
+	}
+
+	// Revoking is idempotent: removing what nobody holds is a success.
+	for i := 0; i < 2; i++ {
+		ark(t, dir, "repo", "grant", "newcomer@example.com", "--revoke")
+	}
+	arkJSON(t, dir, &list, "repo", "grants")
+	if len(list.Grants) != 0 {
+		t.Errorf("grants after revoking: %+v", list.Grants)
+	}
+}
+
+// Spec §22: a level that was not asked for, or two that were, is invalid
+// input — exit 2, and refused before anything reaches the service.
+func TestRepoGrantExitCodes(t *testing.T) {
+	dir, _ := syncedRepo(t)
+	cases := []struct {
+		name string
+		args []string
+		want int
+	}{
+		{"no level", []string{"repo", "grant", "someone@example.com"}, 2},
+		{"two levels", []string{"repo", "grant", "someone@example.com", "--read", "--admin"}, 2},
+		{"a level and a revoke", []string{"repo", "grant", "someone@example.com", "--read", "--revoke"}, 2},
+		{"no email", []string{"repo", "grant", "--read"}, 2},
+		{"unknown repository", []string{"repo", "grants", "--repo", "01ABSENTREP000000000000000"}, 3},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			out, err := arkErr(t, dir, c.args...)
+			if err == nil {
+				t.Fatalf("ark %v should have failed, got:\n%s", c.args, out)
+			}
+			if got := records.ExitCode(err); got != c.want {
+				t.Errorf("ark %v: exit code = %d, want %d: %v", c.args, got, c.want, err)
+			}
+		})
+	}
+}

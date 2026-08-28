@@ -233,6 +233,20 @@ Recorded as debt, with a named remedy, in the shape `docs/self-hosting.md`
 already uses: until RFC-0003 ships, "anyone holding the token can read and
 write every repository the service knows about" covers these routes too.
 
+**Discharged 2026-08-28 (elk-work/ark#52).** These routes check
+`grants.level = 'write'` on `{repo}` before touching storage, and the accepted
+cost above is retired for a credential: it no longer reaches a repository it
+was not granted, and a push cannot be written as a human actor bound to
+another principal. Decision 2's rule tightened exactly as predicted and no
+wire format, request shape, or client changed. Two things it did not
+discharge: the sentence quoted above is still true **of the service token
+itself**, which keeps implicit `admin` everywhere until elk-work/ark#54; and
+two programs calling themselves `release-bot` still share one actor, because
+`resolveWriter` keys on the agent name alone. That was the equivalence with
+`store.FindAgentActor` this decision states, and elk-work/ark#100 has since
+changed the client side of it to key on the delegating human too —
+elk-work/ark#102 carries whether this side should follow. See v1-spec §19.2.
+
 ---
 
 ## Decision 4 — server-side writes advance `server_revision` in the same transaction, and idempotency is an explicit `Idempotency-Key`

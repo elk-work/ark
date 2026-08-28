@@ -46,6 +46,7 @@ The server takes **no command-line flags**. Everything is environment:
 | `ARK_BOOTSTRAP_TOKEN` | no | — | Accepted on `POST /v1/principals` and no other route, to mint the first per-principal credential. Unset, that route refuses everything and the service token is the only way in. See [Per-principal credentials](#per-principal-credentials). |
 | `ARK_IDP_APPROVAL_URL` | no | — | Where `ark login` sends a person to approve a device code. Unset, this service offers no device login and `GET /` says so; `ark login --token` is unaffected. See [Logging in without a token](#logging-in-without-a-token). |
 | `ARK_IDP_KEY` | with the above | — | Shared secret the identity provider presents on `POST /v1/device/approve`. Startup fails if `ARK_IDP_APPROVAL_URL` is set and this is not: a service that cannot verify an approval would fail at the last step of a login instead. |
+| `ARK_DEFAULT_GRANT` | no | `seeded` | What a principal holds on a repository nobody granted it: `none`, `read`, or `seeded`. Seeding is what an approval asserts, so with no identity provider `seeded` grants nothing — a self-hosted service is deny-by-default without setting this. `read` makes every principal a reader of everything and never confers `write`. A value that is none of the three fails startup. |
 | `GCS_BUCKET` | object-storage mode | — | Google Cloud Storage bucket for repository databases and blobs. Set → object-storage mode; unset → local mode. |
 | `BASE_URL` | local mode | — | Externally reachable base URL of this service. Required when `GCS_BUCKET` is unset; used to build blob URLs. Startup fails without it. |
 | `DATA_DIR` | no | `data` | Local mode only. Repository databases go in `<DATA_DIR>/repos`, blobs in `<DATA_DIR>/blobs`. Relative paths resolve against the working directory. |
@@ -226,23 +227,37 @@ the account as both the resource and the member.
 
 ## Authentication
 
-V1 is deliberately one token for everything (spec §20). There are no
-users, no per-repository permissions, and no scopes. Anyone holding the
-token can read and write every repository the service knows about.
+**`ARK_API_TOKEN` is still one token for everything, and it still has no
+users, no per-repository permissions, and no scopes.** Anyone holding it
+can read and write every repository the service knows about. That is what
+it has always been and it has not changed.
 
-That is a stage rather than the end state, and the first part of the end
-state has landed:
-[rfc-0003-elk-issued-credentials.md](rfc-0003-elk-issued-credentials.md)
+What has changed is that it is no longer the only thing the service
+accepts. [rfc-0003-elk-issued-credentials.md](rfc-0003-elk-issued-credentials.md)
 replaces one shared token with per-principal credentials, per-repository
-grants and individual revocation, and its bootstrap path needs no
-identity provider at all. **Per-principal credentials work today** — see
-[Per-principal credentials](#per-principal-credentials) below, and
-[Logging in without a token](#logging-in-without-a-token) for issuing
-them through a browser rather than by hand — and
-per-repository grants do not yet: a valid credential currently reaches
-everything the service token reaches. So the paragraph above is still the
-whole authorization model, and the reason to mint credentials now is
-attribution and individual revocation, not confinement.
+grants and individual revocation, and its bootstrap path needs no identity
+provider at all. **Both halves work today**: per-principal credentials —
+see [Per-principal credentials](#per-principal-credentials) below, and
+[Logging in without a token](#logging-in-without-a-token) for issuing them
+through a browser rather than by hand — and per-repository grants, which
+are `read`, `write`, or `admin` on one repository and are enforced on every
+route (spec §19.2). So the choice is now a real one:
+
+- **The service token** is the pre-authorization world, unchanged. Use it
+  to bootstrap, and to issue the first grants on repositories that
+  predate them — it carries implicit `admin` everywhere.
+- **A credential** reaches only the repositories it has been granted, at
+  the level it was granted, and can be revoked on its own without
+  disturbing anybody else.
+
+`ARK_DEFAULT_GRANT` decides what a principal holds on a repository nobody
+granted it: `none`, `read`, or `seeded` (the default). Seeding is what an
+approval asserts — the identity provider names the repositories a person
+may read, and the service writes them as ordinary `read` rows (§20.1) — so
+a deployment with no identity provider seeds nothing and gets
+deny-by-default for free. Set it to `read` if you would rather every
+principal who can sign in be able to read everything, which is closer to
+what the service token already does.
 
 **Server side.** `ARK_API_TOKEN` is read once at startup; empty or
 missing is a startup failure. Every `/v1` route strips a leading
@@ -329,11 +344,33 @@ What you get for it, today:
   every client of every repository.
 - **Attribution that is checked rather than asserted.** The service logs
   a principal id on every request and records `last_used_on` per
-  credential, at day granularity.
+  credential, at day granularity. It also refuses a push written as an
+  actor that belongs to a different principal, which is what makes the
+  `created_by` on every record mean something (spec §19.2).
+- **Per-repository permissions.** A credential holds `read`, `write`, or
+  `admin` on each repository and nothing anywhere else.
 
-What you do not get yet: per-repository permissions. A credential reaches
-everything the service token reaches, which is why `ARK_API_TOKEN` is
-still what the paragraph at the top of this section describes.
+Grants are issued by anyone holding `admin` on the repository, and are
+keyed on an email address so they can be issued to somebody who has never
+logged in:
+
+```sh
+ark repo grant alice@example.com --write     # this repository
+ark repo grant ci@example.com --read --repo 01KX9B83TF2FV51C6K04563FQ0
+ark repo grants                              # who holds what
+ark repo grant alice@example.com --revoke
+```
+
+Whoever first registers a repository gets `admin` on it. For repositories
+that already existed before grants did, nobody does — issue the first one
+with `ARK_TOKEN` set to `ARK_API_TOKEN`, which carries implicit `admin`
+everywhere.
+
+A grant to an address nobody holds yet is stored and shown as pending; it
+becomes real the first time that person logs in, whichever way they do it
+— `ark principal create`, or the device flow. An identity provider may also
+seed `read` at approval, and seeding never overwrites: a `write` you issued
+before somebody's first login is still `write` afterwards.
 
 **Where the credentials live.** One SQLite database, beside the
 repository databases and written the same way:
@@ -349,8 +386,15 @@ If it is lost, the service token still works and
 which is the point of both.
 
 Revocation is cached for up to **60 seconds** across instances, so a
-revoked credential can keep working for that long. On a single-instance
-deployment it is effectively immediate.
+revoked credential — or a revoked grant — can keep working for that long.
+On a single-instance deployment it is effectively immediate.
+
+Revoking a **credential** has no command yet: `ark repo grant --revoke`
+takes away a person's access to a repository, which is the revocation the
+grant model can authorize, but retiring the credential itself is a
+service-wide act and the model here is per-repository. Until
+elk-work/ark#94 settles who may act service-wide, the answer is to remove
+their grants, or to edit `auth.db` — it is a file in a bucket.
 
 ### Logging in without a token
 

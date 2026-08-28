@@ -65,8 +65,9 @@ Delivery output and failures append to `.ark/elk-push.log`; the manual
 on event keys, so this immediate path can safely overlap a scheduled puller.
 
 Running the service yourself: [docs/self-hosting.md](docs/self-hosting.md)
-covers both storage modes, the single-token auth model, health checks, and
-the backup/replay recovery path. [docs/deploy.md](docs/deploy.md) is the
+covers both storage modes, authentication — the shared service token, and the
+per-principal credentials and per-repository `read`/`write`/`admin` grants
+that now sit beside it — health checks, and the backup/replay recovery path. [docs/deploy.md](docs/deploy.md) is the
 short index of deployment options.
 
 ## How Ark's own work is tracked

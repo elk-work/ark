@@ -259,6 +259,12 @@ func TestCreatePrincipalValidation(t *testing.T) {
 // The acceptance bullet, stated as an equivalence rather than as a list of
 // status codes: a credential must reach every route the legacy token reaches,
 // and get the same answer there.
+//
+// Since grants landed (elk-work/ark#52) the equivalence needs a level to hold
+// at: the legacy token carries implicit admin everywhere, so the credential it
+// is compared against is one holding `admin` on this repository. Without a
+// grant the answer is 403 on every one of these routes, which is
+// TestAPrincipalWithNoGrantIsRefusedEverywhere.
 func TestACredentialAuthenticatesEveryRouteTheLegacyTokenDoes(t *testing.T) {
 	a := newAuthServer(t)
 	if rec := doRequestAs(t, a.Server, a.Token, "POST", "/v1/repositories",
@@ -266,6 +272,7 @@ func TestACredentialAuthenticatesEveryRouteTheLegacyTokenDoes(t *testing.T) {
 		t.Fatalf("register: %d %s", rec.Code, rec.Body.String())
 	}
 	cred := mintCredentialFor(t, a, "me@example.com")
+	grantTo(t, a, repoID, "me@example.com", api.GrantAdmin)
 
 	routes := []struct{ method, path, body string }{
 		{"POST", "/v1/repositories", fmt.Sprintf(`{"id":%q,"name":"test"}`, repoID)},

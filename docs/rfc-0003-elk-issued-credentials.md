@@ -8,7 +8,38 @@
 
 Status: accepted 2026-07-28 (replaces the single service token of v1-spec §20).
 All three queued decisions resolved by the owner the same day — see "Resolved by
-the owner". Not yet implemented.
+the owner".
+
+**Implementation status (2026-08-28).** Slices 1-4 of "What ships in the first
+slice" have landed: `auth.db` and the dual-path verifier (elk-work/ark#43),
+`ARK_BOOTSTRAP_TOKEN` and `ark principal create` (#43), grants, `ark repo
+grant`, and the `Mutation.CreatedBy` actor binding (#52), and the device flow
+with `ark login` (#53). The contract they implement is v1-spec §19.2, §20 and
+§20.1; read those first, and this for the reasoning. Slice 5 (the Elk
+`ark-auth` function) is Elk-side; the legacy token retires in #54.
+
+Grants therefore resolve at **either** login — `ark principal create` on a
+service with no identity provider, and the device flow's redemption on one
+with — and both claim an email-keyed grant before seeding runs, so an admin's
+`write` is never displaced by a seeded `read`.
+
+Two places where the implementation is narrower than this text, both recorded
+where they bite rather than only here:
+
+- **The actor binding is enforced on human actors, not on agent actors.** A
+  named agent actor was shared between principals by the client's own
+  resolution, so enforcing it would have refused a developer for a choice
+  their client made before the request existed. The client half is fixed
+  (elk-work/ark#100 keys the lookup on the delegating human); the service
+  waits for the fleet to upgrade before enforcing, which is elk-work/ark#101.
+  Delegation is enforced on both kinds throughout. See
+  `internal/server/grantsactors.go`.
+- **Revoking a credential has no route.** Decision 2 makes `revoked_at` the
+  revocation mechanism and the verifier honours it, but it is a service-wide
+  act and Decision 4's grants are per-repository, so nothing in the model
+  above says who may perform one. Decision 6 confines `ARK_BOOTSTRAP_TOKEN`
+  to `POST /v1/principals`, so it cannot be the answer without amending that.
+  elk-work/ark#94 carries the decision.
 Related: docs/v1-spec.md §20, docs/adoption.md § Credentials, docs/self-hosting.md
 § Authentication, docs/rfc-0002-elk-work-record-adapter.md (Decision 3 — the
 self-hosting constraint), Elk-scout `supabase/migrations/0001_init.sql`

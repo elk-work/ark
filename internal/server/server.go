@@ -38,9 +38,15 @@ type Server struct {
 	// device.go.
 	IDPApprovalURL string
 	IDPKey         string
-	Blobs          BlobStore
-	Log            *slog.Logger
-	Version        string // build stamp, reported unauthenticated on GET /
+	// DefaultGrant is ARK_DEFAULT_GRANT: what a principal holds on a
+	// repository nobody has granted it. Empty means the default, `seeded` —
+	// grants arrive from the identity provider at approval (device.go) and
+	// nowhere else, so a service with no identity provider seeds nothing and
+	// is deny. See grants.go.
+	DefaultGrant string
+	Blobs        BlobStore
+	Log          *slog.Logger
+	Version      string // build stamp, reported unauthenticated on GET /
 
 	// auths is the credential store, opened on first use. See authStore.
 	authOnce sync.Once
@@ -98,6 +104,10 @@ func (s *Server) Handler() http.Handler {
 	// which registration itself deliberately cannot do. See repometa.go.
 	mux.HandleFunc("GET /v1/repositories/{repo}", s.auth(s.handleGetRepository))
 	mux.HandleFunc("POST /v1/repositories/{repo}/metadata", s.auth(s.handleSetRepositoryMetadata))
+	// Per-repository grants: who may read, write, or administer this
+	// repository (RFC-0003 Decision 4). Both are `admin` acts. See grants.go.
+	mux.HandleFunc("GET /v1/repositories/{repo}/grants", s.auth(s.handleListGrants))
+	mux.HandleFunc("POST /v1/repositories/{repo}/grants", s.auth(s.handleSetGrant))
 	// Work-record write routes (docs/rfc-0004-work-record-write-api.md):
 	// what a program uses instead of speaking the mutation protocol.
 	mux.HandleFunc("POST /v1/repositories/{repo}/tasks", s.auth(s.handleCreateTask))
@@ -258,6 +268,14 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 	// `create` carries the whole decision, and both shapes come back as
 	// repodb.ErrNotFound.
 	created := false
+	// Registration is where authorization begins, so it is the one route that
+	// cannot simply check a level and proceed: creating a repository is open
+	// to any authenticated principal and *confers* admin on it
+	// (first-writer-registers, RFC-0003 Decision 4), while registering against
+	// one that already exists is the idempotent call every sync makes and
+	// needs only `read` — a reader whose every sync began with a 403 could
+	// never pull at all.
+	existingFault := s.authorize(r, req.ID, api.GrantRead)
 	err := s.Repos.Update(ctx, req.ID, req.LastRevision == 0, func(tx *sql.Tx) error {
 		// The whole closure reruns on a lost CAS race; reset the accumulator
 		// so a replay cannot report a creation the first attempt made.
@@ -267,6 +285,9 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		created = registered == 0
+		if !created && existingFault != nil {
+			return existingFault
+		}
 
 		// Registration runs on every sync, and the name a client sends is just
 		// the basename of wherever it happens to be checked out. Overwriting on
@@ -297,15 +318,12 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 		// its own client would delegate from (elk-work/ark#47). upsertActor
 		// mints a revision only for an actor it has not seen, so repeat
 		// registrations stay quiet and pulls stay empty.
-		for _, a := range req.Actors {
-			if a.ID == "" {
-				continue
-			}
-			if err := upsertActor(ctx, tx, a); err != nil {
-				return err
-			}
-		}
-		return nil
+		//
+		// They carry the same identity rules a push does — this is a real
+		// introduction of an actor, and it is the one that runs
+		// unconditionally, so exempting it would leave the rule enforced on
+		// the surface a client can choose not to use.
+		return introduceActors(ctx, tx, req.Actors, principalOf(r))
 	})
 	if errors.Is(err, repodb.ErrNotFound) {
 		// not_found, and deliberately: it is the same answer pull and push
@@ -328,8 +346,24 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		s.respond(w, "register repository", err)
+		s.finish(w, "register repository", err, nil, http.StatusOK)
 		return
+	}
+	if created {
+		// First-writer-registers: the principal that brought the repository
+		// into existence administers it, and everyone else has no access
+		// until granted. It cannot ride in the transaction above — auth.db is
+		// a different object under its own compare-and-swap — so a failure
+		// here leaves a repository nobody administers. That is worth a 500
+		// rather than a quiet log: the caller retries, and until then the
+		// service token still carries implicit admin everywhere and can issue
+		// the grant by hand (#54 removes that fallback and must replace it).
+		if binder := binderOf(principalOf(r)); binder != "" {
+			if err := s.authStore().grantOnCreate(ctx, req.ID, binder); err != nil {
+				s.internal(w, "grant the repository's creator admin", err)
+				return
+			}
+		}
 	}
 	if created && s.Log != nil {
 		// The rare and interesting half of this route. Every other
@@ -348,7 +382,11 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.allow(w, r, req.RepositoryID, api.GrantWrite) {
+		return
+	}
 	ctx := r.Context()
+	who := principalOf(r)
 	var resp api.PushResponse
 
 	err := s.Repos.Update(ctx, req.RepositoryID, false, func(tx *sql.Tx) error {
@@ -359,14 +397,16 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 			Rejected:  []api.MutationOutcome{},
 			Conflicts: []api.MutationOutcome{},
 		}
-		// Actors are upserted as records so every client can render names.
-		for _, a := range req.Actors {
-			if a.ID == "" {
-				continue
-			}
-			if err := upsertActor(ctx, tx, a); err != nil {
-				return err
-			}
+		// Actors are upserted as records so every client can render names,
+		// and a new one is bound to the principal introducing it.
+		if err := introduceActors(ctx, tx, req.Actors, who); err != nil {
+			return err
+		}
+		// Then the identity every mutation claims. This runs before any of
+		// them is applied, so a push written as somebody else's actor leaves
+		// nothing behind — the fault rolls the whole transaction back.
+		if err := authorizeMutations(ctx, tx, req.Mutations, who); err != nil {
+			return err
 		}
 		// Mutations apply in creation order; savepoint handling inside
 		// processMutation keeps one bad mutation from poisoning the batch.
@@ -388,42 +428,48 @@ func (s *Server) handlePush(w http.ResponseWriter, r *http.Request) {
 			Scan(&resp.ServerRevision)
 	})
 	if err != nil {
-		s.respond(w, "push", err)
+		s.finish(w, "push", err, nil, http.StatusOK)
 		return
 	}
 	writeJSON(w, resp)
 }
 
 // upsertActor stores an actor as a record, bumping the revision only for
-// new actors so pulls stay quiet on repeat pushes.
-func upsertActor(ctx context.Context, tx *sql.Tx, a api.Actor) error {
+// new actors so pulls stay quiet on repeat pushes. It reports whether the
+// actor was new, which is what decides whether the identity rules in
+// grantsactors.go have anything to judge: re-sending an actor the service
+// already holds is a no-op, and must stay one.
+func upsertActor(ctx context.Context, tx *sql.Tx, a api.Actor) (bool, error) {
 	var exists bool
 	err := tx.QueryRowContext(ctx, `SELECT true FROM records
 		WHERE record_type = 'actor' AND record_id = ?`, a.ID).Scan(&exists)
 	if err == nil {
-		return nil
+		return false, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return err
+		return false, err
 	}
 	data, err := json.Marshal(a)
 	if err != nil {
-		return err
+		return false, err
 	}
 	rev, err := nextRevision(ctx, tx)
 	if err != nil {
-		return err
+		return false, err
 	}
 	now := records.Now()
 	_, err = tx.ExecContext(ctx, `INSERT INTO records
 		(record_type, record_id, data, server_revision, created_at, updated_at)
 		VALUES ('actor', ?, ?, ?, ?, ?)`, a.ID, string(data), rev, now, now)
-	return err
+	return err == nil, err
 }
 
 func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 	req, ok := decode[api.PullRequest](w, r)
 	if !ok {
+		return
+	}
+	if !s.allow(w, r, req.RepositoryID, api.GrantRead) {
 		return
 	}
 	ctx := r.Context()
@@ -467,6 +513,9 @@ func (s *Server) handlePull(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetRecord(w http.ResponseWriter, r *http.Request) {
 	repoID, recordType, recordID := r.PathValue("repo"), r.PathValue("type"), r.PathValue("id")
+	if !s.allow(w, r, repoID, api.GrantRead) {
+		return
+	}
 	var rec api.Record
 	rec.RecordType, rec.RecordID = recordType, recordID
 	found := false
@@ -502,6 +551,9 @@ func (s *Server) handleMerge(w http.ResponseWriter, r *http.Request) {
 	prID := r.PathValue("id")
 	req, ok := decode[api.MergeRequest](w, r)
 	if !ok {
+		return
+	}
+	if !s.allow(w, r, req.RepositoryID, api.GrantWrite) {
 		return
 	}
 	if req.MergeCommitSHA == "" || req.HeadCommitSHA == "" {
@@ -594,6 +646,9 @@ func (s *Server) handleUploadURL(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !s.allow(w, r, req.RepositoryID, api.GrantWrite) {
+		return
+	}
 	if len(req.SHA256) != 64 || req.SizeBytes < 0 {
 		writeErr(w, http.StatusBadRequest, "validation", "sha256 and size_bytes are required")
 		return
@@ -639,6 +694,9 @@ func (s *Server) handleUploadURL(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleConfirmUpload(w http.ResponseWriter, r *http.Request) {
 	req, ok := decode[api.UploadURLRequest](w, r)
 	if !ok {
+		return
+	}
+	if !s.allow(w, r, req.RepositoryID, api.GrantWrite) {
 		return
 	}
 	if len(req.SHA256) != 64 {
@@ -710,6 +768,41 @@ func (s *Server) handleConfirmUpload(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleDownloadURL(w http.ResponseWriter, r *http.Request) {
 	req, ok := decode[api.DownloadURLRequest](w, r)
 	if !ok {
+		return
+	}
+	// `read`, not `write`: fetching an artifact somebody else stored is
+	// reading the repository, and a reader that could not open an artifact
+	// would be reading half of it.
+	if !s.allow(w, r, req.RepositoryID, api.GrantRead) {
+		return
+	}
+	// And the blob has to be one of *this* repository's. Blobs are addressed
+	// by content hash in a store shared across every repository, so the
+	// repository id in the request is the only thing scoping this call — and
+	// without checking it, `read` on any repository would sign a URL for any
+	// blob on the service, which is the one place a per-repository grant
+	// could be walked around. It was unreachable while one token reached
+	// everything; it is reachable the moment a grant means something.
+	//
+	// Either witness will do. A blobs row is what an upload into this
+	// repository leaves behind, and an artifact record naming the key is what
+	// survives a client replaying its history into a restored repository —
+	// which would otherwise stop being able to fetch its own artifacts.
+	held := false
+	err := s.Repos.View(r.Context(), req.RepositoryID, func(db *sql.DB) error {
+		return db.QueryRowContext(r.Context(), `SELECT
+			EXISTS(SELECT 1 FROM blobs WHERE storage_key = ?)
+			OR EXISTS(SELECT 1 FROM records WHERE record_type = 'artifact'
+				AND data->>'storage_key' = ?)`,
+			req.StorageKey, req.StorageKey).Scan(&held)
+	})
+	if err != nil {
+		s.respond(w, "load repository", err)
+		return
+	}
+	if !held {
+		writeErr(w, http.StatusNotFound, "not_found",
+			"blob not available: repository "+req.RepositoryID+" holds no artifact stored at "+req.StorageKey)
 		return
 	}
 	url, err := s.Blobs.SignedGetURL(r.Context(), req.StorageKey)

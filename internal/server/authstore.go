@@ -65,9 +65,14 @@ const authTTL = 60 * time.Second
 // logging in again.
 const credentialLifetime = 365 * 24 * time.Hour
 
-// authSchema is auth.db's whole shape. `grants` is created here and enforced
-// in elk-work/ark#52 — shipping the table with the others avoids a second
-// migration for one table.
+// authSchema is auth.db's whole shape.
+//
+// `pending_grants` is the email half of `grants` (RFC-0003 Decision 4). A
+// grant is issued to an address, not to a principal id, so that it can be
+// issued before its grantee has ever authenticated — which is what keeps a
+// credential from being passed person-to-person. It moves into `grants` the
+// first time that address resolves to a principal, and is enforced from that
+// moment and not before.
 const authSchema = `
 CREATE TABLE IF NOT EXISTS principals (
 	id           TEXT PRIMARY KEY,
@@ -100,6 +105,15 @@ CREATE TABLE IF NOT EXISTS grants (
 	granted_by    TEXT NOT NULL DEFAULT '',
 	granted_at    TEXT NOT NULL,
 	PRIMARY KEY (repository_id, principal_id)
+);
+
+CREATE TABLE IF NOT EXISTS pending_grants (
+	repository_id TEXT NOT NULL,
+	email         TEXT NOT NULL,
+	level         TEXT NOT NULL,
+	granted_by    TEXT NOT NULL DEFAULT '',
+	granted_at    TEXT NOT NULL,
+	PRIMARY KEY (repository_id, email)
 );
 `
 
@@ -138,6 +152,25 @@ type authSnapshot struct {
 	generation  int64
 	principals  map[string]authPrincipal
 	credentials map[string]authCredential // keyed by token_sha256
+	// grants is every resolved grant, keyed by grantKey. It rides in the
+	// same snapshot as the credentials because authorizing a request must
+	// not cost a second fetch of an object the request has already read —
+	// the whole reason auth.db is cached at all (RFC-0003, "Caching").
+	grants map[string]authGrant
+	// pending is the email half, keyed by pendingKey. Nothing on the
+	// request path reads it: it is consulted when a principal is created
+	// and listed by `ark repo grants`.
+	pending map[string]authGrant
+}
+
+// emptySnapshot is what a deployment that has never bootstrapped looks like.
+func emptySnapshot() *authSnapshot {
+	return &authSnapshot{
+		principals:  map[string]authPrincipal{},
+		credentials: map[string]authCredential{},
+		grants:      map[string]authGrant{},
+		pending:     map[string]authGrant{},
+	}
 }
 
 // authStore reads and writes auth.db.
@@ -266,10 +299,7 @@ func (a *authStore) load(ctx context.Context) (*authSnapshot, error) {
 
 	gen, err := a.backend.Fetch(ctx, authDBKey, path)
 	if errors.Is(err, repodb.ErrNotFound) {
-		return &authSnapshot{
-			principals:  map[string]authPrincipal{},
-			credentials: map[string]authCredential{},
-		}, nil
+		return emptySnapshot(), nil
 	}
 	if err != nil {
 		return nil, err
@@ -281,11 +311,8 @@ func (a *authStore) load(ctx context.Context) (*authSnapshot, error) {
 	}
 	defer db.Close()
 
-	snap := &authSnapshot{
-		generation:  gen,
-		principals:  map[string]authPrincipal{},
-		credentials: map[string]authCredential{},
-	}
+	snap := emptySnapshot()
+	snap.generation = gen
 	rows, err := db.QueryContext(ctx, `SELECT id, kind, email, display_name, created_at,
 		COALESCE(disabled_at, '') FROM principals`)
 	if err != nil {
@@ -310,16 +337,25 @@ func (a *authStore) load(ctx context.Context) (*authSnapshot, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	for rows.Next() {
 		var c authCredential
 		var hash string
 		if err := rows.Scan(&c.ID, &c.PrincipalID, &hash, &c.ExpiresAt, &c.LastUsedOn, &c.RevokedAt); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		snap.credentials[hash] = c
 	}
-	return snap, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	if err := loadGrants(ctx, db, snap); err != nil {
+		return nil, err
+	}
+	return snap, nil
 }
 
 // update runs fn inside one transaction on a fresh copy of auth.db and stores
@@ -555,6 +591,14 @@ func (a *authStore) createPrincipal(ctx context.Context, req api.CreatePrincipal
 			(id, principal_id, token_sha256, label, created_at, expires_at)
 			VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (id) DO NOTHING`,
 			credentialID, p.ID, hash, "bootstrap", createdAt, expiresAt); err != nil {
+			return err
+		}
+		// A grant issued to this address before anybody held it becomes a
+		// grant this principal holds. This is the "resolved at that person's
+		// first login" half of RFC-0003 Decision 4, and `ark principal
+		// create` is the login a service with no identity provider has; the
+		// device flow (#53) resolves the same way through the same call.
+		if err := claimPendingGrants(ctx, tx, p.ID, p.Email); err != nil {
 			return err
 		}
 		out.Principal = p
