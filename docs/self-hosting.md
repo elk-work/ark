@@ -47,7 +47,7 @@ The server takes **no command-line flags**. Everything is environment:
 | `GCS_BUCKET` | object-storage mode | — | Google Cloud Storage bucket for repository databases and blobs. Set → object-storage mode; unset → local mode. |
 | `BASE_URL` | local mode | — | Externally reachable base URL of this service. Required when `GCS_BUCKET` is unset; used to build blob URLs. Startup fails without it. |
 | `DATA_DIR` | no | `data` | Local mode only. Repository databases go in `<DATA_DIR>/repos`, blobs in `<DATA_DIR>/blobs`. Relative paths resolve against the working directory. |
-| `CACHE_DIR` | no | `<os temp dir>/ark-repos` | Scratch space for working copies of repository databases. Created at startup. Safe to lose — it is a cache, refetched on demand. |
+| `CACHE_DIR` | no | `<os temp dir>/ark-repos` | Scratch space for working copies of repository databases and of `auth.db`. Created at startup. Safe to lose — it is a cache, refetched on demand. |
 | `PORT` | no | `8080` | Listen port. |
 
 The mode is chosen solely by whether `GCS_BUCKET` is non-empty. There is
