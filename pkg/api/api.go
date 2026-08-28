@@ -34,6 +34,13 @@ type RegisterRepositoryRequest struct {
 	Name          string `json:"name"`
 	DefaultBranch string `json:"default_branch,omitempty"`
 	GitRemoteURL  string `json:"git_remote_url,omitempty"`
+	// Actors are this checkout's identities, upserted alongside the
+	// repository. They ride here as well as on PushRequest because
+	// registration is the only part of a sync that runs unconditionally: a
+	// repository that never pushed would otherwise have no actor records at
+	// all, and every write route resolves its writer against them
+	// (elk-work/ark#47).
+	Actors []Actor `json:"actors,omitempty"`
 }
 
 // RepositoryMetadata is the service's copy of a repository's identity: the

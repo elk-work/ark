@@ -62,12 +62,36 @@ func Run(ctx context.Context, a *app.Context) (*Result, error) {
 	}
 	res := &Result{Issues: []Issue{}}
 
+	// Actors travel with registration, not only with a push.
+	//
+	// They used to ride along on api.PushRequest alone, and Push returns
+	// early when the mutation queue is empty — so a repository that had
+	// registered and synced but never pushed had no actor records on the
+	// service at all, not even the human `ark init` created. Every RFC-0004
+	// write route resolves its writer against those records and admits a new
+	// agent only under a `delegated_by` naming a human the service already
+	// holds, so the first remote write into such a repository failed with a
+	// complaint about a field nobody typed (elk-work/ark#47).
+	//
+	// Registration is the right carrier: it already runs on every sync,
+	// unconditionally and idempotently, and it already pays for a full
+	// repository-database write on the service. Sending an otherwise-empty
+	// push instead — the other obvious fix — would add a second such write to
+	// every no-op poll, rewriting an identical database for a set of actors
+	// the server almost always already has. Who this checkout is belongs with
+	// what this checkout is, not with whether it happens to have queued work.
+	actors, err := a.Store.AllActors(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	// Registration is idempotent and cheap; it also validates the token.
 	if err := client.RegisterRepo(ctx, api.RegisterRepositoryRequest{
 		ID:            a.Config.RepositoryID,
 		Name:          filepath.Base(a.Root),
 		DefaultBranch: a.Git.DefaultBranch(ctx),
 		GitRemoteURL:  a.Git.RemoteURL(ctx, "origin"),
+		Actors:        actors,
 	}); err != nil {
 		return nil, err
 	}
@@ -130,14 +154,23 @@ func Push(ctx context.Context, a *app.Context, client *cloud.Client, res *Result
 		res.Applied++
 	}
 	for _, out := range resp.Rejected {
-		if err := a.Store.MarkMutation(ctx, out.MutationID, "rejected", out.Error); err != nil {
+		m, ok := byID[out.MutationID]
+		if !ok {
+			// A verdict for a mutation this push did not send. Nothing to
+			// mark diverged, but the verdict is still recorded rather than
+			// dropped.
+			if err := a.Store.MarkMutation(ctx, out.MutationID, "rejected", out.Error); err != nil {
+				return err
+			}
+			res.Rejected++
+			continue
+		}
+		if err := a.Store.RejectMutation(ctx, m, out.Error); err != nil {
 			return err
 		}
 		res.Rejected++
-		if m, ok := byID[out.MutationID]; ok {
-			res.Issues = append(res.Issues, Issue{MutationID: out.MutationID,
-				RecordType: m.RecordType, RecordID: m.RecordID, Status: "rejected", Error: out.Error})
-		}
+		res.Issues = append(res.Issues, Issue{MutationID: out.MutationID,
+			RecordType: m.RecordType, RecordID: m.RecordID, Status: "rejected", Error: out.Error})
 	}
 	for _, out := range resp.Conflicts {
 		if err := a.Store.MarkMutation(ctx, out.MutationID, "conflict", out.Error); err != nil {
