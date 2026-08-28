@@ -233,9 +233,10 @@ st_restore_generation() { # generation — GCS soft-delete restore
 	# `gcloud storage restore` will not overwrite a live object synchronously:
 	# --allow-overwrite is an --async-only flag. So clear the live object
 	# first. That is safe — deleting it soft-deletes it too, so the thing
-	# being replaced stays recoverable for the rest of the retention window —
-	# and it is the honest sequence anyway, because the live object here is
-	# the empty repository a client stood back up.
+	# being replaced stays recoverable for the rest of the retention window.
+	# Since elk-work/ark#66 a client syncing at the lost repository no longer
+	# leaves a live object here, but an operator restoring for real may find
+	# one, so the clear stays.
 	if st_exists; then
 		gcloud storage rm "gs://$BUCKET/$OBJ_PATH" >>"$LOG" 2>&1
 	fi
@@ -549,10 +550,11 @@ client_from_snapshot alpha_absent "$SNAP/alpha-R$R1.tar"
 client_sync alpha_absent
 assert_eq "sync against an absent repository exits 7 (partial)" 7 "$SYNC_RC"
 assert_ne "history-loss detection fired" null "$(sync_field '.history_reset')"
-# Not zero: registration upserts this checkout's actors before the pull, so a
-# resurrected repository is already a revision or two in. The property that
-# matters is that it is far below where the client had synced to.
-assert_lt "  reported service revision is below this checkout's" "$R1" \
+# Zero, and exactly zero: the service holds nothing for this repository and
+# now says so rather than standing an empty one up first. It used to be a
+# revision or two in, because registration created the repository and upserted
+# this checkout's actors into it before the pull ever ran (elk-work/ark#66).
+assert_eq "  the service reports holding no history at all" 0 \
 	"$(sync_field '.history_reset.server_revision')"
 assert_eq "  reported this checkout's revision" "$R1" "$(sync_field '.history_reset.local_revision')"
 assert_eq "  nothing was re-pushed" 0 "$(sync_field .pushed)"
@@ -561,18 +563,35 @@ assert_eq "status: rejected mutations still zero (#59's property)" 0 "$(status_f
 assert_ne "status: history_reset carried separately" null "$(status_field alpha_absent '.history_reset')"
 assert_eq "the client did not lose its own records" "$ALPHA_TASKS" "$(task_count alpha_absent)"
 
-# The finding this phase exists to surface: registration runs on every sync
-# with create=true, so the first client to touch an absent repository stands
-# an empty one back up.
+# The finding this phase used to surface, now pinned the other way round
+# (elk-work/ark#66). Registration ran on every sync with create=true, so the
+# first client to touch an absent repository stood an empty one back up at
+# revision 1 — and the 404, the only clean evidence the repository had been
+# lost, did not survive contact with a client. The client's cursor now travels
+# on the registration and the service refuses to create for a client that has
+# already synced.
 if st_exists; then
-	ok "a syncing client re-created the object (register is create=true)"
-	RESURRECT_F="$(object_fingerprint)"
-	RESURRECT_ROWS="${RESURRECT_F%% *}"
-	step "resurrected object: $RESURRECT_F, revision $(db_revision "$WORK/inspect.db")"
-	assert_eq "  the resurrected repository is empty of work records" 0 \
-		"$(sqlite3 "$WORK/inspect.db" "SELECT count(*) FROM records WHERE record_type <> 'actor'")"
+	bad "the object is still absent after a client synced at it" \
+		"a syncing client re-created it: $(object_fingerprint)"
 else
-	bad "a syncing client re-created the object"
+	ok "the object is still absent after a client synced at it"
+fi
+code="$(api_pull 0)"
+assert_eq "  pull still answers 404 — the diagnosis survived the sync" 404 "$code"
+assert_eq "  and still says not_found" not_found "$(api_last | jq -r .code)"
+assert_ge "  the service logged the refusal" 1 \
+	"$(grep -c 'refused to create a repository' "$WORK/server.log" 2>/dev/null || true)"
+
+# And it is the steady state, not a one-shot: an absent repository stays
+# absent however many times a client syncs at it, which is what stops a lost
+# repository accruing an empty generation per sync and aging the good one out
+# of the bucket's retention window.
+client_sync alpha_absent
+assert_eq "a second sync also exits 7 (partial)" 7 "$SYNC_RC"
+if st_exists; then
+	bad "a later sync re-created the object"
+else
+	ok "a later sync left it absent too"
 fi
 
 # ================================================================== phase 4
@@ -627,9 +646,10 @@ assert_eq "  serves the whole baseline record set" "$BASE_ROWS" \
 
 # ---- the generation compare-and-swap across a restore -------------------
 #
-# The server has been running throughout. Its in-memory cache is at the
-# generation of the empty repository a client resurrected in phase 3; the
-# object is now at G2 with entirely different content. A write here is the
+# The server has been running throughout: the object was deleted under it in
+# phase 3 and replaced under it here, with no client standing an empty one up
+# in between any more (elk-work/ark#66). Whatever it has cached, the object is
+# now at G2 with entirely different content. A write here is the
 # question the issue asks: does a stale generation wedge the CAS, and worse,
 # does the server apply the write on top of its stale cached copy?
 step "generation CAS: writing through a server whose cached generation is stale"

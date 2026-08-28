@@ -1316,6 +1316,43 @@ unconditionally, which is why identity travels on it and not on the push alone
 (§9.1). Registration **backfills** metadata and never overwrites it —
 correcting a field is a deliberate act with its own route (§19.1).
 
+Registration is also **how a repository comes into existence**: it creates one
+when the service holds no database for the ID. Nothing else could — but it is
+only right for a client with no history to contradict it, so the request
+carries the client's cursor.
+
+```json
+{
+  "id":            "01KX9B83TF2FV51C6K04563FQ0",
+  "name":          "scout",
+  "last_revision": 33,
+  "actors":        [ "..." ]
+}
+```
+
+- **`last_revision` is the revision this checkout has already synced past**
+  (§9.2). Above zero it asserts that this service issued the client history,
+  so a service holding no database for the repository has **lost** it rather
+  than never had it. Registration answers `404 not_found` and creates
+  nothing; the message names the repository and the revision the client
+  claims, because the person reading it has a missing database, not a typo.
+- **Zero — or absent — creates.** A checkout that has never synced has no
+  history to contradict, and a client built before this field omits it and
+  gets the behaviour it has always had.
+- **A registration that creates is logged**, distinguishably from the
+  idempotent no-op that runs on every sync of every repository.
+
+The refusal is `not_found` because that is already the service's answer on
+`POST /v1/sync/pull` and `POST /v1/sync/push` while a repository's database is
+missing (§9) — and because that answer is the only clean evidence the
+repository was lost. It used to survive exactly until the next `ark sync`: the
+first client to reach an absent repository re-created it empty, so an operator
+investigating afterwards found a live, registered repository holding one actor
+at revision 1 rather than a 404, and nothing recorded that a client had stood
+it back up. A client that meets the refusal reports it as a history reset and
+exits 7, exactly as it would have reported the same loss on the pull (§9.2,
+§22).
+
 The API service owns:
 
 - authentication

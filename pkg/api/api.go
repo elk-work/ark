@@ -41,6 +41,14 @@ type RegisterRepositoryRequest struct {
 	// all, and every write route resolves its writer against them
 	// (elk-work/ark#47).
 	Actors []Actor `json:"actors,omitempty"`
+	// LastRevision is the server revision this checkout has already synced
+	// past — its cursor (§9.2). It is the one fact that tells a repository
+	// being created apart from one being resurrected: a client above zero is
+	// asserting it holds history this service issued, so a service with no
+	// database for it has lost it rather than never had it, and registration
+	// refuses to create (§19). Zero — a client that has never synced, and
+	// equally a client too old to send the field — creates as it always has.
+	LastRevision int64 `json:"last_revision,omitempty"`
 }
 
 // RepositoryMetadata is the service's copy of a repository's identity: the
