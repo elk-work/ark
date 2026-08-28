@@ -151,20 +151,56 @@ names its writer once, by agent name:
 ```
 
 The service resolves that to a repository-local actor with exactly the
-semantics `internal/store.FindAgentActor` already gives a local agent — first
-use creates the actor, every later use reuses it, so repeated writes by one
-program share one identity. Three rules make the resolution safe:
+semantics `internal/store.FindAgentActor` gives a local agent: **an identity
+per (agent name, delegating human)**. First use of a pair creates the actor
+and every later write under that pair reuses it, so repeated writes by one
+program share one identity — and two people writing under one agent name do
+not share each other's.
+
+That equivalence is the definition rather than an implementation detail, and
+it has moved once. Both sides originally keyed on the agent name alone.
+elk-work/ark#100 changed the client, because sync brings in the agent actors
+other people introduced: two developers who both ran `--agent claude-code`
+converged on whichever actor held the lowest ULID, and from then on one of
+them wrote records under a `delegated_by` naming the other. elk-work/ark#102
+brought this side across, for the same failure in the same repositories
+reached from the other direction — every person using the CLI writes through
+the same `ark-cli` name, so the second person to run `ark repo set` was
+attributed to the first. See v1-spec §6.0.
+
+Three rules make the resolution safe:
 
 1. **`created_by_type` is not an input.** It is always `agent`. A remote caller
    cannot author as a human.
-2. **`delegated_by` must resolve to a human actor already in the repository**,
-   or the request is rejected with `validation`. An agent cannot invent the
-   authority it claims to act under. This is RFC-0003 Decision 5's server-side
-   delegation check, applied at the moment an agent actor is introduced —
-   which is the moment it matters.
-3. **On every later write, `delegated_by` is read from the stored actor
-   record**, not from the request. The registration is what attributes the
-   write. A request cannot re-point an existing agent at a different human.
+2. **`delegated_by` must resolve to a human actor already in the repository,
+   and one this caller may act under.** An agent cannot invent the authority
+   it claims — a missing, dangling, or non-human value is `validation`; this
+   is RFC-0003 Decision 5's server-side delegation check. A human actor bound
+   to *another principal* is `permission`: keying the lookup on the delegation
+   means the value arrives in the request, and the authenticated principal is
+   what keeps that from being an assertion. The caller may name a human that
+   is unbound or bound to itself, and no other.
+
+   Both halves run on **every** write, not only where an agent is registered.
+   A check that ran at registration alone would leave the reuse path exactly
+   as open as the name-only lookup was: name somebody else's human, land on
+   their agent. "Not somebody else's" rather than "bound to me" is copied
+   from `checkDelegation` for its reason — every human actor in the live
+   repositories was introduced under the legacy service token, which binds
+   nothing, so requiring a positive binding would refuse the first write each
+   of those people makes after moving to a credential.
+3. **`delegated_by` is never written over a stored actor record.** The
+   registration is what attributes the write, and a request only ever
+   *selects* among the registrations rule 2 entitles it to. It cannot
+   re-point an existing agent at a different human: naming one resolves to
+   that human's own agent, registers it, or — where the caller may not act
+   under that human — is refused. The actor that already exists keeps
+   pointing at the human it was registered under either way.
+
+**The legacy service token is exempt from rule 2's second half**, and has to
+be: it is one string the whole fleet holds and it identifies nobody, so there
+is no principal to check a delegation against. It keeps the implicit `admin`
+Decision 3 records against elk-work/ark#54, and this is the same break-glass.
 
 **Rejected: `created_by` taken from the request body.** This is what
 `/v1/sync/push` effectively does today — it stores whatever the client sent and
@@ -195,10 +231,20 @@ rejected rather than trusted. Until then the field carries what the credential
 cannot yet say, and every rule above already holds.
 
 **Accepted cost, stated plainly:** with one shared token, two programs that
-both call themselves `release-bot` share one actor, and any token holder can
-write as any registered agent in any repository. That is not a regression —
-the same token can already push arbitrary mutations authored by anyone — but
-it is not a property to build on. Decision 3 says what fixes it.
+both call themselves `release-bot` *under the same human* share one actor, and
+any token holder can write as any registered agent in any repository. That is
+not a regression — the same token can already push arbitrary mutations
+authored by anyone — but it is not a property to build on. Decision 3 says
+what fixes it.
+
+**Updated 2026-08-28 (elk-work/ark#102).** The delegating human is now half
+the key, so two programs under two people are two identities, and rule 2
+refuses a credential that names a human bound to somebody else. What survives
+is the legacy service token, which is exempt from that rule for the reason
+above and is elk-work/ark#54's to retire, and the case the key does not
+separate: two programs run by one person under one agent name are one actor,
+which is the same thing `FindAgentActor` says locally and is what the
+credential-derived registration below would finally distinguish.
 
 ---
 
@@ -241,11 +287,20 @@ another principal. Decision 2's rule tightened exactly as predicted and no
 wire format, request shape, or client changed. Two things it did not
 discharge: the sentence quoted above is still true **of the service token
 itself**, which keeps implicit `admin` everywhere until elk-work/ark#54; and
-two programs calling themselves `release-bot` still share one actor, because
-`resolveWriter` keys on the agent name alone. That was the equivalence with
-`store.FindAgentActor` this decision states, and elk-work/ark#100 has since
-changed the client side of it to key on the delegating human too —
-elk-work/ark#102 carries whether this side should follow. See v1-spec §19.2.
+two programs calling themselves `release-bot` still shared one actor, because
+`resolveWriter` keyed on the agent name alone. That was the equivalence with
+`store.FindAgentActor` this decision states, and elk-work/ark#100 changed the
+client side of it to key on the delegating human too.
+
+**The second half followed on 2026-08-28 (elk-work/ark#102):** `resolveWriter`
+keys on (agent name, delegating human), and the human a request may name is
+governed by the actor binding this slice records — so the binding is load-
+bearing for these actors rather than first-caller-wins, which is what Decision
+3 predicted a `write` grant would begin. Still not discharged, and deliberately
+so: the binding on the *agent* actor is recorded and not enforced
+(elk-work/ark#101), because a client that has not upgraded past #100 resolves
+to a shared agent by a choice made before its request exists. See v1-spec
+§19.2.
 
 ---
 
@@ -452,8 +507,18 @@ rolls it forward.
   bookkeeping correct. Mitigated by routing both through the same helpers
   (`nextRevision`, `setFieldRevisions`) rather than duplicating the logic —
   the same containment `handleMerge` already relies on.
-- **Agent identity is name-keyed, not credential-keyed, until RFC-0003.**
-  Recorded in Decision 2 with its remedy.
+- **Agent identity is keyed on (name, delegating human), not on the
+  credential, until RFC-0003's `ark token create --agent`.** Recorded in
+  Decision 2 with its remedy. One person running two programs under one agent
+  name still gets one actor, which the credential would separate.
+- **`delegated_by` is required on every write, not only where the agent is
+  registered.** It is half the key, so it cannot be optional on the reuse
+  path. Every request shape in this RFC already carries it and so does
+  `internal/cli/repo.go`'s `remoteWriter`, but a caller that read the field as
+  registration-only and stopped sending it gets `400 validation` naming the
+  field. Accepted over the alternative, which is to fall back to the name-only
+  lookup when it is absent — that keeps the divergence alive behind a flag
+  nobody sets deliberately.
 - **A required `Idempotency-Key` is friction for a casual `curl`.** Accepted:
   duplicate tasks that nothing can distinguish afterwards are worse than a
   header.

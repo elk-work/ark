@@ -164,62 +164,84 @@ func rememberResponse(ctx context.Context, tx *sql.Tx, key string, resp any, rev
 // resolveWriter turns the request's writer into a repository-local actor ID
 // and guarantees the record it authors is attributable (spec §3, §20).
 //
-// The registration is the actor record. A named agent is created once and
-// reused forever after — the semantics store.FindAgentActor already gives a
-// local agent — and a *new* one is admitted only with a delegated_by naming
-// a human actor that already exists here. An agent cannot invent the
-// authority it claims to act under, and a later request cannot re-point an
-// existing agent at a different human, because delegated_by is read from the
-// stored record and never from the request.
+// The registration is the actor record, and the identity it registers is per
+// (agent name, delegating human) — the semantics store.FindAgentActor gives a
+// local agent (§6.0). RFC-0004 Decision 2 defines this side by pointing at
+// that one, so when elk-work/ark#100 changed what the client resolves, the two
+// halves of a stated equivalence stopped agreeing and this had to follow
+// (elk-work/ark#102).
 //
-// The lookup picks the first registration, keyed on record_id — the client's
-// ULID, which is immutable and lexically sortable. Not created_at: this
-// server writes it as RFC3339Nano text and SQLite compares TEXT byte by byte,
-// so it does not order chronologically (records.TimeCompare), and under
-// LIMIT 1 that decides which identity a remote write is attributed to. Not
-// server_revision either — every update rewrites it, so it is last-touched
-// order rather than registration order.
+// Keying on the name alone is what it used to do, and it collapsed everyone
+// writing under one agent name in a repository onto whichever actor happened
+// to hold the lowest ULID. Every person using the CLI writes through the same
+// `ark-cli` name, so in a repository where one of them ran `ark repo set`
+// first, the next person's write was attributed to *their* agent, under a
+// delegated_by naming the first person. It was never a privilege escalation —
+// nothing here writes as a human — and it was the same attribution error #100
+// fixed on the client, reached from the other surface.
 //
-// who is the principal making the call, and is used for one thing: an agent
-// actor these routes register is bound to it (grantsactors.go), so the record
-// of who introduced an identity is complete however the identity arrived.
-// The binding is not *checked* here — a named agent is shared by everyone who
-// writes under that name in a repository, which is the whole point of
-// resolving by agent_name — so the authority this route enforces is the
-// `write` grant its handler checked and the delegation rule below.
+// # Keying on the delegating human without letting the request assert it
+//
+// The value has to be known at lookup time and the request is the only place
+// it can come from, which would be an assertion if nothing checked it. What
+// checks it is the authenticated principal: delegatingHuman admits only a
+// human actor this repository holds that does not already belong to somebody
+// else. A request therefore *chooses among the registrations its caller is
+// entitled to*, and cannot reach one it is not.
+//
+// Deriving the human from the principal instead — never reading the request —
+// was the tempting alternative and is wrong here. `ark init` mints a human
+// actor per checkout, so one principal legitimately owns several in a
+// repository, and choosing one of them would attribute the write to a
+// different identity than the client's own FindAgentActor used: the same
+// divergence #102 is about, on a new axis. It also has no answer for the
+// legacy service token, which binds nothing and identifies nobody.
+//
+// # Why Decision 2 rule 3 still holds
+//
+// No stored actor is ever rewritten from a request. delegated_by *selects* a
+// registration; it is never written over one. A request naming a different
+// human resolves to that human's agent or registers it, and the existing
+// agent keeps pointing at the human it was registered under — so what
+// attributes the record is still the stored actor record, which is what rule
+// 3 protects.
+//
+// Within one (name, human) pair the lookup still picks the first
+// registration, keyed on record_id — the client's ULID, which is immutable
+// and lexically sortable. Not created_at: this server writes it as RFC3339Nano
+// text and SQLite compares TEXT byte by byte, so it does not order
+// chronologically (records.TimeCompare), and under LIMIT 1 that decides which
+// identity a remote write is attributed to. Not server_revision either —
+// every update rewrites it, so it is last-touched order rather than
+// registration order.
+//
+// who is the principal making the call. An agent actor these routes register
+// is bound to it (grantsactors.go), so the record of who introduced an
+// identity is complete however the identity arrived. That binding is recorded
+// and not *checked*: refusing a principal that writes as an agent another
+// principal introduced is elk-work/ark#101, and it stays blocked until the
+// fleet has moved past #100 — an un-upgraded client resolves to the shared
+// actor by a choice made before the request exists.
 func resolveWriter(ctx context.Context, tx *sql.Tx, wr api.Writer, who *authenticated) (string, error) {
 	name := strings.TrimSpace(wr.AgentName)
 	if name == "" {
 		return "", faultValidation("writer.agent_name is required")
 	}
+	delegatedBy, err := delegatingHuman(ctx, tx, name, wr, who)
+	if err != nil {
+		return "", err
+	}
 
 	var actorID string
-	err := tx.QueryRowContext(ctx, `SELECT record_id FROM records
+	err = tx.QueryRowContext(ctx, `SELECT record_id FROM records
 		WHERE record_type = 'actor' AND deleted_at IS NULL
 		  AND data->>'type' = 'agent' AND data->>'agent_name' = ?
-		ORDER BY record_id LIMIT 1`, name).Scan(&actorID)
+		  AND data->>'delegated_by' = ?
+		ORDER BY record_id LIMIT 1`, name, delegatedBy).Scan(&actorID)
 	if err == nil {
 		return actorID, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
-		return "", err
-	}
-
-	delegatedBy := strings.TrimSpace(wr.DelegatedBy)
-	if delegatedBy == "" {
-		return "", faultValidation(
-			"writer.delegated_by is required to register the agent " + name +
-				": a remote write is attributed to an agent acting under a human's authority")
-	}
-	var human bool
-	err = tx.QueryRowContext(ctx, `SELECT true FROM records
-		WHERE record_type = 'actor' AND record_id = ? AND deleted_at IS NULL
-		  AND data->>'type' = 'human'`, delegatedBy).Scan(&human)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", faultValidation("writer.delegated_by " + delegatedBy +
-			" is not a human actor in this repository")
-	}
-	if err != nil {
 		return "", err
 	}
 
@@ -239,6 +261,65 @@ func resolveWriter(ctx context.Context, tx *sql.Tx, wr api.Writer, who *authenti
 		return "", err
 	}
 	return actor.ID, nil
+}
+
+// delegatingHuman validates the human a remote write claims to act under and
+// returns it, so resolveWriter can key its lookup on it.
+//
+// Two rules, answering two different questions. The first is about the value
+// and is RFC-0004 Decision 2 rule 2: it must name a human actor this
+// repository already holds, or an agent would be inventing the authority it
+// claims. That is `validation` — the request is malformed rather than
+// forbidden, which is the code the RFC specifies and the one this route has
+// always answered with.
+//
+// The second is about the caller, and is what makes the delegation safe to
+// key on: a human actor bound to another principal is not one this caller may
+// act under. That is `permission`, the code and the reasoning checkDelegation
+// already applies on the push path (grantsactors.go) — the same rule at a
+// second surface rather than a new policy, and one place to tighten when
+// elk-work/ark#101 does.
+//
+// It runs on **every** write, not only where an agent is registered. A check
+// that ran at registration alone would leave the reuse path as open as the
+// name-only lookup was: name somebody else's human, land on their agent.
+//
+// "Not somebody else's" rather than "bound to me" is deliberate, and is taken
+// from checkDelegation for its reason: every human actor in the live
+// repositories was introduced under the legacy service token, which binds
+// nothing, so requiring a positive binding would refuse the first write each
+// of those people makes after moving to a credential.
+//
+// Under the legacy token itself there is no principal to check against — one
+// string the whole fleet holds, identifying nobody — so only the first rule
+// applies. That is what keeps the fleet writing, and it is the same
+// break-glass §19.2 records against elk-work/ark#54.
+func delegatingHuman(ctx context.Context, tx *sql.Tx, agentName string, wr api.Writer, who *authenticated) (string, error) {
+	delegatedBy := strings.TrimSpace(wr.DelegatedBy)
+	if delegatedBy == "" {
+		return "", faultValidation("writer.delegated_by is required for the agent " + agentName +
+			": a remote write is attributed to an agent acting under a human's authority, and an " +
+			"agent identity is per (agent name, delegating human)")
+	}
+	// loadActorFacts is grantsactors.go's reader for exactly this question,
+	// and reusing it keeps "what the service knows about an actor" in one
+	// place. It does not filter deleted_at, and does not need to: actors
+	// travel in a push's `actors` array rather than as mutations, so nothing
+	// in Ark deletes one.
+	facts, ok, err := loadActorFacts(ctx, tx, delegatedBy)
+	if err != nil {
+		return "", err
+	}
+	if !ok || facts.Type != string(records.ActorHuman) {
+		return "", faultValidation("writer.delegated_by " + delegatedBy +
+			" is not a human actor in this repository")
+	}
+	if binder := binderOf(who); binder != "" && facts.Principal != "" && facts.Principal != binder {
+		return "", faultPermission("writer.delegated_by " + delegatedBy +
+			" belongs to another principal: " + principalLabel(who) +
+			" cannot write as an agent acting under somebody else's authority")
+	}
+	return delegatedBy, nil
 }
 
 // writeRecord inserts a new record document at a fresh revision and stamps
@@ -521,10 +602,12 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 		// Resolved for the authorization rule, not for attribution: a task
 		// record has no updated_by field (§6.2), so who moved a status is
 		// not representable on it today. Running the same writer check on
-		// every route keeps the rule in one place. RFC-0003's principal
-		// binding is the `write` grant checked at the top of this handler
-		// and the actor binding resolveWriter now records; both are in
-		// grants.go and grantsactors.go.
+		// every route keeps the rule in one place — including the delegation
+		// check, which resolveWriter now applies on every write rather than
+		// only where an agent is registered. RFC-0003's principal binding is
+		// the `write` grant checked at the top of this handler and the actor
+		// binding resolveWriter records; both are in grants.go and
+		// grantsactors.go.
 		if _, err := resolveWriter(ctx, tx, req.Writer, principalOf(r)); err != nil {
 			return err
 		}
