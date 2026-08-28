@@ -681,14 +681,17 @@ the old one:
 
 #### The two failure modes look different, and one of them is quiet
 
-**A deleted object** answers `404 not_found` on pull and on push — until a
-client syncs. Registration runs on every sync and creates the repository
-if it is missing, so **the first client to sync at an absent repository
-stands an empty one back up** at a new generation. The `404` is the clean
-signal and it does not survive contact. If you are diagnosing a missing
-repository, restore before you let anything sync at it — or accept that
-you are restoring over an empty object rather than into a gap. Nothing is
-lost either way, because the good generation is still in the window.
+**A deleted object** answers `404 not_found` on pull and on push, and keeps
+answering it. A client that has already synced the repository sends its
+cursor on registration, so the service refuses to create one in its place
+and reports the loss instead (spec §19). That client's `ark sync` exits 7
+with a history reset naming service revision **0** — the service holds
+nothing at all — rather than the revision 1 its own registration used to
+stand up. **The `404` is the clean signal and it now survives contact**, so
+you can diagnose a missing repository with clients still running against
+it, and the good generation stops being pushed further down the listing by
+each sync. What you cannot do is leave it: nothing recovers on its own, and
+every client of that repository is stopped until you restore.
 
 **A corrupted object** answers `500` with `{"code":"internal","message":"pull
 failed"}`, and clients report exit 6 with `server error: pull failed`,
@@ -698,8 +701,9 @@ truncated object, `sql: no rows in result set` for a zero-length one. **A
 repository that is "offline" for one client and fine for others is a
 corrupt object until proven otherwise; read the service's logs.** A
 zero-length object is the nastier case: SQLite reads it as a valid empty
-database, so it behaves exactly like a deletion, including the empty
-resurrection.
+database, so it behaves exactly like a deletion — including to the
+registration refusal, which treats a stored database with no repository row
+in it the same as no database at all.
 
 #### Two things that are not restored with it
 
