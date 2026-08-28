@@ -24,6 +24,13 @@
 # (`gcloud auth application-default login`) because the Go GCS client reads
 # them, and gcloud for the operator-side object surgery a restore is made of.
 #
+# In GCS mode the drill reads the bucket's retention configuration and
+# restores the way that bucket makes possible: from a noncurrent version if
+# versioning is on, from the soft-delete window if it is not. It does not turn
+# versioning on. The point of a drill is that it exercises what the deployment
+# actually has, and the two are different operations with different failure
+# modes — so proving both takes two scratch buckets, one configured each way.
+#
 # NEVER point --bucket at a production bucket. The drill deletes, truncates
 # and overwrites `repos/<id>.db` on purpose.
 #
@@ -237,6 +244,53 @@ st_soft_deleted_generations() {
 		sed -n 's/.*#\([0-9][0-9]*\)$/\1/p'
 }
 
+# Does this bucket keep noncurrent versions? The drill asks rather than
+# configures: a deployment that runs versioning and a lifecycle rule restores
+# from a noncurrent version, one on the defaults restores from the soft-delete
+# window, and each needs its own path proven (docs/self-hosting.md, "Choosing
+# a retention posture").
+st_versioning_enabled() {
+	[ "$MODE" = gcs ] || return 1
+	case "$(gcloud storage buckets describe "gs://$BUCKET" --format='value(versioning_enabled)' 2>/dev/null)" in
+	True | true) return 0 ;;
+	*) return 1 ;;
+	esac
+}
+
+# "<generation> <RFC3339 creation time>" per line, oldest first. Lists live
+# and noncurrent generations alike, so after a deletion on a versioned bucket
+# every line is a noncurrent one.
+st_generations_with_time() {
+	[ "$MODE" = gcs ] || return 0
+	# `|| true` so a failed listing comes out empty and fails an assertion,
+	# rather than aborting the drill under `set -e` with nothing said.
+	{ gcloud storage ls -l --all-versions "gs://$BUCKET/$OBJ_PATH" 2>/dev/null || true; } |
+		awk '$3 ~ /#/ { n = split($3, part, "#"); print part[n], $2 }' |
+		sort -k1,1n
+}
+
+st_newest_generation() { st_generations_with_time | awk 'END { print $1 }'; }
+
+# The operator's rule — "the last one from before the loss" — and not the same
+# rule as "the last one". See the note above phase 4.
+st_generation_before() { # rfc3339-time
+	st_generations_with_time |
+		awk -v cutoff="$1" '$2 < cutoff { g = $1 } END { if (g != "") print g }'
+}
+
+st_download_generation() { # generation dest
+	[ "$MODE" = gcs ] || return 1
+	gcloud storage cp "gs://$BUCKET/$OBJ_PATH#$1" "$2" >>"$LOG" 2>&1
+}
+
+st_restore_noncurrent() { # generation — put a noncurrent version back live
+	# A plain copy, which is the whole procedure. Unlike `gcloud storage
+	# restore` it overwrites a live object without ceremony — no --async, no
+	# clearing the object first — which is why the docs list this path first
+	# for a bucket that has it.
+	gcloud storage cp "gs://$BUCKET/$OBJ_PATH#$1" "gs://$BUCKET/$OBJ_PATH" >>"$LOG" 2>&1
+}
+
 st_restore_generation() { # generation — GCS soft-delete restore
 	# `gcloud storage restore` will not overwrite a live object synchronously:
 	# --allow-overwrite is an --async-only flag. So clear the live object
@@ -307,7 +361,10 @@ trap cleanup EXIT
 drill_objects_remove() {
 	[ "$MODE" = gcs ] || return 0
 	[ -n "$OBJ_PATH" ] || return 0
-	if st_exists; then gcloud storage rm "gs://$BUCKET/$OBJ_PATH" >>"$LOG" 2>&1 || true; fi
+	# --all-versions, because on a versioned bucket every overwrite this drill
+	# made is still there. The path is repos/<a ULID minted this run>, so
+	# there is nothing else under it to catch.
+	gcloud storage rm --all-versions "gs://$BUCKET/$OBJ_PATH" >>"$LOG" 2>&1 || true
 }
 
 # ---------------------------------------------------------------- API calls
@@ -559,6 +616,11 @@ assert_eq "a read does not rewrite the object" "$G1" "$(st_generation)"
 
 phase "Phase 3 — loss: the object is deleted"
 
+# When the loss happened. The drill knows to the second; an operator knows
+# roughly, from when their clients started exiting 7. Either way it is the
+# input to choosing a generation in phase 4, where "the last one" and "the
+# last one before the loss" are not the same generation.
+LOSS_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 st_delete
 if st_exists; then bad "object deleted"; else ok "object deleted"; fi
 
@@ -622,17 +684,84 @@ fi
 
 phase "Phase 4 — restore from the stored copy, with no client involved"
 
+# Which restore this is depends on what the bucket keeps, and the drill reads
+# that rather than arranging it. A deployment running object versioning with a
+# lifecycle rule restores from a **noncurrent version** — the source the docs
+# now list first, and the reference deployment's primary one since
+# elk-work/ark#67. A deployment on the defaults restores from the
+# **soft-delete window**. They are different commands with different failure
+# modes (`ls --all-versions` and a `cp` of a generation, against
+# `ls --soft-deleted` and `gcloud storage restore`, which will not overwrite a
+# live object synchronously), so neither covers the other, and a drill that
+# turned versioning on would stop testing what half the world is running.
 RESTORE_METHOD="out-of-band copy"
+POSTURE="n/a (local mode)"
 RESTORE_START=$(date +%s)
-if [ "$MODE" = gcs ]; then
-	# Restore from the soft-delete window. Production now also has object
-	# versioning with a lifecycle rule (see "Choosing a retention posture"
-	# in docs/self-hosting.md), so this is no longer its *only* bucket-side
-	# source — but it is the weaker of the two, it is what a self-hoster on
-	# the defaults has, and it is the one that has to keep working, so it
-	# is the path this drill exercises. Point --bucket at an unversioned
-	# scratch bucket to test it as written; restoring a noncurrent version
-	# is not covered here.
+if [ "$MODE" != gcs ]; then
+	st_upload "$SNAP/baseline-R$R1.db"
+elif st_versioning_enabled; then
+	POSTURE="object versioning"
+	step "the bucket keeps noncurrent versions — restoring from one"
+	note "the soft-delete window is this bucket's second line and is not"
+	note "exercised on a versioned bucket; point --bucket at one with"
+	note "versioning off to drill that path."
+
+	# ---- the listing an operator actually finds --------------------------
+	#
+	# "The last generation" is the wrong rule, and a lost repository is
+	# exactly where it goes wrong: the good copy ends up buried under newer
+	# generations that are all empty. Before elk-work/ark#66 every sync of a
+	# lost repository stood an empty one back up, one generation each; after
+	# it a checkout that has *no* history still creates, which is any fresh
+	# clone joining the fleet — and any bad write over a good object has the
+	# same shape. So the drill writes that listing rather than hoping to meet
+	# it, and then has to pick the right generation out of it.
+	step "burying the good generation under newer, empty ones"
+	EMPTY_GENS=0
+	for _ in 1 2 3; do
+		code="$(api_status /v1/repositories \
+			"{\"id\":\"$REPO_ID\",\"name\":\"drill\",\"last_revision\":0}")"
+		[ "$code" = 200 ] || break
+		EMPTY_GENS=$((EMPTY_GENS + 1))
+		st_delete
+	done
+	assert_eq "a client with no history still re-creates a lost repository" 3 "$EMPTY_GENS"
+	step "generations now: $(st_generations_with_time | tr '\n' ' ')"
+
+	NEWEST_GEN="$(st_newest_generation)"
+	assert_ne "the good generation is no longer the newest in the listing" "$G1" "$NEWEST_GEN"
+	rm -f "$WORK/candidate.db"
+	st_download_generation "$NEWEST_GEN" "$WORK/candidate.db" ||
+		bad "downloading generation $NEWEST_GEN" "see $LOG"
+	assert_eq "  and the newest one holds no records — restoring it restores the damage" \
+		0 "$(fingerprint "$WORK/candidate.db" | cut -d' ' -f1)"
+
+	# ---- narrow by time, then confirm by content -------------------------
+	#
+	# Both halves are what the runbook asks of a person. Time gets you to a
+	# candidate without knowing what any of them hold; reading the candidate
+	# is what catches an estimate that was wrong, before it is written back
+	# over the last good copy.
+	PICK="$(st_generation_before "$LOSS_AT")"
+	assert_eq "the newest generation from before the loss is the baseline one" "$G1" "$PICK"
+	step "checking generation $PICK before putting it back"
+	rm -f "$WORK/candidate.db"
+	st_download_generation "$PICK" "$WORK/candidate.db" ||
+		bad "downloading generation $PICK" "see $LOG"
+	assert_eq "  it carries the baseline revision" "$R1" "$(db_revision "$WORK/candidate.db")"
+	assert_eq "  it carries the baseline record set" "$BASE_F" "$(fingerprint "$WORK/candidate.db")"
+
+	if st_restore_noncurrent "$PICK"; then
+		RESTORE_METHOD="noncurrent version $PICK"
+	else
+		bad "restoring noncurrent version $PICK" "see $LOG"
+		st_upload "$SNAP/baseline-R$R1.db"
+	fi
+else
+	POSTURE="soft-delete only (no versioning)"
+	step "the bucket keeps no noncurrent versions — restoring from the soft-delete window"
+	note "this is the default posture and the weaker one; the reference"
+	note "deployment runs versioning as well (docs/self-hosting.md)."
 	SD_GENS="$(st_soft_deleted_generations)"
 	step "soft-deleted generations available: $(echo "$SD_GENS" | tr '\n' ' ')"
 	if echo "$SD_GENS" | grep -qx "$G1"; then
@@ -648,8 +777,6 @@ if [ "$MODE" = gcs ]; then
 			"falling back to the out-of-band copy"
 		st_upload "$SNAP/baseline-R$R1.db"
 	fi
-else
-	st_upload "$SNAP/baseline-R$R1.db"
 fi
 RESTORE_SECS=$(($(date +%s) - RESTORE_START))
 step "restore method: $RESTORE_METHOD"
@@ -954,6 +1081,7 @@ say "mode              $MODE"
 say "repository        $REPO_ID"
 say "object            $(storage_label)"
 say "baseline          revision $R1, $BASE_ROWS records, generation $G1"
+say "bucket posture    $POSTURE"
 say "restore method    $RESTORE_METHOD"
 say "restore duration  ${RESTORE_SECS}s (deletion) / ${RESTORE2_SECS}s (corruption)"
 say "replay            revision $R3, $REPLAY_ROWS records, ${REPLAY_SECS}s"

@@ -768,7 +768,26 @@ restart, and nothing to tell the clients.
    any copy of it is a complete backup.
 
 In each case the listing ends every line in `#<generation>`. Generations
-increase, so the last one from before the loss is the one you want.
+increase, so the last one from before the loss is the one you want — and
+**the last one before the loss is not the last one in the listing.** A lost
+repository accrues newer generations that are all empty: a checkout with no
+history still registers and creates, so any fresh clone joining the fleet
+stands an empty repository up over the hole, once per sync. (Before
+elk-work/ark#66 *every* client did that, so a bucket whose history predates
+the fix has a long run of them.) Restoring the end of the listing restores the
+damage.
+
+So narrow by time, then confirm by content:
+
+```sh
+gcloud storage ls -l --all-versions gs://<bucket>/repos/<id>.db
+```
+
+`-l` prints the creation time beside each generation. Take the newest one
+created **before** the loss — before your clients started exiting 7, or before
+whatever you were doing when the object went — and read it before you write it
+back. You are usually estimating the time; the read is what catches an
+estimate that was wrong, while the good copy is still there.
 
 **Check it before you put it back.** It is a SQLite file; read it:
 
@@ -778,7 +797,18 @@ sqlite3 ./candidate.db 'SELECT revision FROM meta WHERE id = 1'
 sqlite3 ./candidate.db 'SELECT record_type, count(*) FROM records GROUP BY 1'
 ```
 
-**Put it back.** From the soft-delete window:
+**Put it back.** From a noncurrent version — a copy, and that is the whole
+procedure:
+
+```sh
+gcloud storage cp gs://<bucket>/repos/<id>.db#<generation> gs://<bucket>/repos/<id>.db
+```
+
+It overwrites a live object without ceremony, and the generation it replaces
+becomes noncurrent in its turn, so a restore of the wrong generation is itself
+undoable.
+
+From the soft-delete window, which is a different command and has a quirk:
 
 ```sh
 gcloud storage rm gs://<bucket>/repos/<id>.db          # if a live object is in the way
@@ -1012,16 +1042,35 @@ bucket you are willing to have objects deleted and overwritten in. The
 script refuses a bucket name that looks like the reference deployment's,
 and leaves its objects behind when an assertion fails.
 
+**It restores the way the bucket you give it makes possible.** In `--mode
+gcs` it reads the bucket's configuration and takes the matching path: a
+noncurrent version where versioning is on, the soft-delete window where it is
+not. It never turns versioning on. The two are different commands with
+different failure modes, and a deployment on the defaults needs the
+soft-delete path proven as much as the reference deployment needs the other
+one — so **drilling both takes two scratch buckets**, configured one way each.
+The result block names the posture it found and the generation it restored.
+
+The versioned path also drills the part that is easy to get wrong by hand.
+The drill buries the good generation under three newer, empty ones — written
+the way a real fleet writes them, by a checkout with no history re-creating
+the lost repository — then asserts that the newest generation is *not* the one
+to take, picks the newest created before the loss, and reads it before putting
+it back. That sequence is the operator's procedure, and having it as
+assertions is the point: it fails loudly if picking by time ever stops finding
+the right copy.
+
 Run it after any change under `internal/server/repodb`, before a change to
 how storage is configured, and on whatever schedule makes the answer
 current. It exits non-zero and names the assertion when something has
 stopped being true.
 
-Last run 2026-08-28 against a scratch GCS bucket: 80 assertions, all
-passing, 52 seconds end to end (elk-work/ark#41). The replay phase landed
-after that run and has been rehearsed only in `--mode local` (118
-assertions, 6 seconds); the next `--mode gcs` run is what will have drilled
-it against object storage.
+Last run 2026-08-28, both postures against scratch GCS buckets
+(elk-work/ark#73): **123 assertions** in 71 seconds restoring from a
+noncurrent version, and **118 assertions** in 63 seconds restoring from the
+soft-delete window, all passing. `--mode local` is 120 assertions in 7 seconds. That run
+also drilled the replay phase against object storage for the first time; it
+had previously only been rehearsed locally.
 
 ---
 
