@@ -139,7 +139,20 @@ func (s *Server) respond(w http.ResponseWriter, what string, err error) {
 	switch {
 	case err == nil:
 	case errors.Is(err, repodb.ErrNotFound):
-		writeErr(w, http.StatusNotFound, "not_found", "repository not registered")
+		// One status and one code for both shapes of the loss, because the
+		// client's answer is the same: the object is absent, or it is there
+		// and holds no repository row, which is what a zero-length
+		// `repos/<id>.db` reads as. The message says which, because the
+		// operator's next move is not the same — one object was removed, the
+		// other had zero bytes written over it (elk-work/ark#85).
+		msg := "repository not registered"
+		if errors.Is(err, repodb.ErrNoRepositoryRow) {
+			if s.Log != nil {
+				s.Log.Warn(what, "error", err)
+			}
+			msg += ": a stored database is present for it and holds no repository, which is what a zero-length repos/<id>.db reads as — restore it from a copy"
+		}
+		writeErr(w, http.StatusNotFound, "not_found", msg)
 	case errors.Is(err, repodb.ErrConcurrentWrite):
 		writeErr(w, http.StatusConflict, "conflict", "repository is being updated concurrently; retry")
 	case errors.As(err, &corrupt):
@@ -204,13 +217,14 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 	// for six weeks with every client reporting itself in sync
 	// (elk-work/ark#66, elk-work/ark#58). So create only for a client at 0.
 	//
-	// errUnheldRepository is the second shape of the same condition, and it
-	// never escapes this handler: a stored database with no repository row in
-	// it. A zero-length object reads as a perfectly valid empty SQLite
-	// database, so a loss can arrive wearing a live object
-	// (docs/self-hosting.md), and the rule is about the repository, not about
-	// whether some file exists.
-	errUnheldRepository := errors.New("the stored database holds no repository")
+	// The second shape of the same condition — a stored database with no
+	// repository row in it, which is what a zero-length object reads as — used
+	// to be caught here, by a sentinel that never escaped this handler. It
+	// belongs to repodb now: the rule is about the repository rather than
+	// about whether some file exists, and pull and push were falling through
+	// to `500 internal` for it while this route said 404 (elk-work/ark#85). So
+	// `create` carries the whole decision, and both shapes come back as
+	// repodb.ErrNotFound.
 	created := false
 	err := s.Repos.Update(ctx, req.ID, req.LastRevision == 0, func(tx *sql.Tx) error {
 		// The whole closure reruns on a lost CAS race; reset the accumulator
@@ -221,9 +235,6 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		created = registered == 0
-		if created && req.LastRevision > 0 {
-			return errUnheldRepository
-		}
 
 		// Registration runs on every sync, and the name a client sends is just
 		// the basename of wherever it happens to be checked out. Overwriting on
@@ -264,17 +275,20 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	})
-	if errors.Is(err, repodb.ErrNotFound) || errors.Is(err, errUnheldRepository) {
+	if errors.Is(err, repodb.ErrNotFound) {
 		// not_found, and deliberately: it is the same answer pull and push
-		// already give for this exact condition, so all three routes now say
-		// the same thing about a repository that is gone, and the client
-		// lands on spec §22's exit 3 rather than on a validation fault about
-		// a field nobody typed. The message names what happened, because the
-		// operator reading it has a missing database, not a typo.
+		// give for this exact condition, so all three routes say the same
+		// thing about a repository that is gone, and the client lands on spec
+		// §22's exit 3 rather than on a validation fault about a field nobody
+		// typed. The message names what happened, because the operator reading
+		// it has a missing database, not a typo — and it says which shape,
+		// because a live object holding nothing and no object at all are the
+		// same loss with different causes.
 		if s.Log != nil {
 			s.Log.Warn("refused to create a repository a client has already synced",
 				"repository_id", req.ID, "name", req.Name,
-				"client_last_revision", req.LastRevision)
+				"client_last_revision", req.LastRevision,
+				"stored_object_present", errors.Is(err, repodb.ErrNoRepositoryRow))
 		}
 		writeErr(w, http.StatusNotFound, "not_found", fmt.Sprintf(
 			"this service has no database for repository %s, and this client has already synced it to revision %d — it is missing, not new. Registration will not stand an empty repository up in its place; restore it, or point this checkout at the service that holds it.",

@@ -29,8 +29,31 @@ import (
 // ErrConcurrentWrite reports a lost compare-and-swap against the backend.
 var ErrConcurrentWrite = errors.New("repository changed concurrently")
 
-// ErrNotFound reports a repository with no stored database.
+// ErrNotFound reports a repository the service does not hold.
+//
+// Two shapes of loss arrive here and they are deliberately one answer: the
+// object is absent, or the object is present and the database in it holds no
+// repository row. SQLite reads a zero-length `repos/<id>.db` as a perfectly
+// valid empty database — it opens, the schema applies, and what is missing is
+// the repository — so the second shape is a deletion wearing a live object,
+// and every route above this package has to say the same thing about both
+// (docs/self-hosting.md, elk-work/ark#85).
+//
+// Answering it here rather than in one handler is the point. While the check
+// lived in `handleRegisterRepo` only registration said `404`; pull and push
+// fell through to whichever query first noticed the empty table and answered
+// `500 {"code":"internal","message":"pull failed"}` — which is the answer for
+// "try again later", for a repository that is gone.
 var ErrNotFound = errors.New("repository not found")
+
+// ErrNoRepositoryRow is the shape of ErrNotFound that arrives wearing a live
+// object. It matches ErrNotFound, because the API contract has exactly one
+// answer for a repository the service does not hold; it is its own value so
+// that the service log and the message an operator reads can still tell a
+// deleted object from a zeroed one. The two want the same restore and not the
+// same diagnosis — one says something removed the object, the other says
+// something wrote zero bytes over it.
+var ErrNoRepositoryRow = fmt.Errorf("%w: its stored database holds no repository row", ErrNotFound)
 
 // ErrCorrupt reports a stored database the service has but cannot use: the
 // object is there and the bytes in it will not open as a SQLite database.
@@ -47,9 +70,10 @@ var ErrNotFound = errors.New("repository not found")
 // A *zero-length* object is deliberately not this. SQLite reads it as a valid
 // empty database, so it opens, the schema applies, and what is missing is the
 // repository row rather than the bytes — which is a repository the service no
-// longer holds, and `handleRegisterRepo` already answers that with the 404 it
-// answers for an absent object (elk-work/ark#66). Two kinds of damage, two
-// answers, and the difference is whether anything can still be read.
+// longer holds, and this package answers that with ErrNoRepositoryRow, so
+// every route gives it the 404 it gives an absent object (elk-work/ark#66,
+// elk-work/ark#85). Two kinds of damage, two answers, and the difference is
+// whether anything can still be read.
 var ErrCorrupt = errors.New("stored repository database is unusable")
 
 // CorruptError names the repository whose stored database is unusable. The
@@ -144,6 +168,26 @@ func openAt(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// rowQuerier is satisfied by both *sql.DB and *sql.Tx, so the one question
+// that decides whether a stored database holds a repository is asked the same
+// way on the read path and inside the write transaction.
+type rowQuerier interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// holdsRepository reports whether an opened database holds the repository row.
+// openAt has just applied the schema, so `meta` is always there and this is
+// never a missing-table error; the question is whether anything ever
+// registered into it. One indexed single-row count on a one-row table, on a
+// file that is already open — the cost is not the reason it lived in a handler.
+func holdsRepository(q rowQuerier) (bool, error) {
+	var n int
+	if err := q.QueryRow(`SELECT count(*) FROM meta WHERE id = 1`).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
 // refresh ensures the cached file matches the backend's current generation.
 // Caller holds the repo lock. Returns the current generation.
 func (m *Manager) refresh(ctx context.Context, repoID string, st *repoState) (int64, error) {
@@ -169,6 +213,7 @@ func (m *Manager) refresh(ctx context.Context, repoID string, st *repoState) (in
 }
 
 // View runs fn against a read-only snapshot of the repository database.
+// ErrNotFound when the service does not hold the repository — either shape.
 func (m *Manager) View(ctx context.Context, repoID string, fn func(db *sql.DB) error) error {
 	if err := validRepoID(repoID); err != nil {
 		return err
@@ -186,13 +231,28 @@ func (m *Manager) View(ctx context.Context, repoID string, fn func(db *sql.DB) e
 		return &CorruptError{RepoID: repoID, Reason: "its stored database will not open", Err: err}
 	}
 	defer db.Close()
+	// The object opened; whether it holds a repository is a separate question,
+	// and a reader has no business seeing the inside of a database that does
+	// not. There is no create argument here because every caller of View is
+	// reading a repository that is supposed to already exist.
+	held, err := holdsRepository(db)
+	if err != nil {
+		return err
+	}
+	if !held {
+		return ErrNoRepositoryRow
+	}
 	return fn(db)
 }
 
 // Update fetches the current database, runs fn inside one transaction, and
 // persists the result with a compare-and-swap. On a lost race it refetches
 // and reruns fn (which must be idempotent), up to three attempts.
-// create=true initializes a database when none exists.
+//
+// create=true initializes a database when none exists, and is also what lets
+// fn write into a stored database that holds no repository row — the two are
+// one condition (see ErrNotFound), so they take one argument. With create
+// false, both answer ErrNotFound before fn runs.
 func (m *Manager) Update(ctx context.Context, repoID string, create bool, fn func(tx *sql.Tx) error) error {
 	if err := validRepoID(repoID); err != nil {
 		return err
@@ -213,7 +273,7 @@ func (m *Manager) Update(ctx context.Context, repoID string, create bool, fn fun
 			return err
 		}
 
-		if err := m.applyAndStore(ctx, repoID, st, gen, fn); err != nil {
+		if err := m.applyAndStore(ctx, repoID, st, gen, create, fn); err != nil {
 			if errors.Is(err, ErrConcurrentWrite) {
 				// Another process won; invalidate the cache and replay.
 				st.generation = 0
@@ -227,7 +287,7 @@ func (m *Manager) Update(ctx context.Context, repoID string, create bool, fn fun
 	return lastErr
 }
 
-func (m *Manager) applyAndStore(ctx context.Context, repoID string, st *repoState, gen int64, fn func(tx *sql.Tx) error) error {
+func (m *Manager) applyAndStore(ctx context.Context, repoID string, st *repoState, gen int64, create bool, fn func(tx *sql.Tx) error) error {
 	// Work on a copy so a failed transaction or lost race never corrupts
 	// the cached base file.
 	base := m.dbPath(repoID)
@@ -252,6 +312,24 @@ func (m *Manager) applyAndStore(ctx context.Context, repoID string, st *repoStat
 	if err != nil {
 		db.Close()
 		return err
+	}
+	// A writer that was not allowed to create one is looking at a repository
+	// the service does not hold, whether the object was absent (refresh
+	// answered that already) or is there and empty. Asked inside the
+	// transaction, so it sees exactly what fn would have seen; skipped when
+	// create is set, because then fn is the thing about to write the row.
+	if !create {
+		held, err := holdsRepository(tx)
+		if err != nil {
+			tx.Rollback()
+			db.Close()
+			return err
+		}
+		if !held {
+			tx.Rollback()
+			db.Close()
+			return ErrNoRepositoryRow
+		}
 	}
 	if err := fn(tx); err != nil {
 		tx.Rollback()
