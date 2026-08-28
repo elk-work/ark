@@ -201,7 +201,10 @@ func openAuthDB(path string) (*sql.DB, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(authSchema); err != nil {
+	// deviceSchema is applied beside authSchema rather than folded into it:
+	// pending device codes are one table added by one slice (device.go), and
+	// keeping the statements apart is what lets the slices land in any order.
+	if _, err := db.Exec(authSchema + deviceSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply auth schema: %w", err)
 	}

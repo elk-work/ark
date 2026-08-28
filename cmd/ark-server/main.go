@@ -10,6 +10,11 @@
 //	ARK_BOOTSTRAP_TOKEN
 //	                 accepted on POST /v1/principals only, to mint the first
 //	                 per-principal credential; unset disables that route
+//	ARK_IDP_APPROVAL_URL
+//	                 where `ark login` sends a person to approve a device
+//	                 code; unset means this service offers no device login
+//	ARK_IDP_KEY      shared secret the identity provider presents on
+//	                 POST /v1/device/approve (required with the above)
 //	GCS_BUCKET       bucket for repo databases and artifact blobs (production)
 //	DATA_DIR         local directory for repo databases + blobs (used without
 //	                 GCS_BUCKET; default ./data)
@@ -55,6 +60,15 @@ func run() error {
 	if token == "" {
 		return fmt.Errorf("ARK_API_TOKEN is required")
 	}
+	// The device flow needs both halves or neither: an approval URL with no
+	// key is a service that sends people to a page whose approvals it cannot
+	// verify, and it would fail at the last step of a login rather than at
+	// startup. Refuse at startup, as ARK_API_TOKEN and BASE_URL do.
+	approvalURL := os.Getenv("ARK_IDP_APPROVAL_URL")
+	idpKey := os.Getenv("ARK_IDP_KEY")
+	if approvalURL != "" && idpKey == "" {
+		return fmt.Errorf("ARK_IDP_KEY is required when ARK_IDP_APPROVAL_URL is set")
+	}
 	cacheDir := os.Getenv("CACHE_DIR")
 	if cacheDir == "" {
 		cacheDir = filepath.Join(os.TempDir(), "ark-repos")
@@ -95,6 +109,11 @@ func run() error {
 		// Unset is also the supported configuration here, and the safer one:
 		// no bootstrap token means no route that mints principals at all.
 		BootstrapToken: os.Getenv("ARK_BOOTSTRAP_TOKEN"),
+		// Unset means no device login, which is every deployment with no
+		// identity provider. `ark login --token` and `ark principal create`
+		// are unaffected; see internal/server/device.go.
+		IDPApprovalURL: approvalURL,
+		IDPKey:         idpKey,
 		Blobs:          blobs,
 		Log:            log,
 		Version:        ver,

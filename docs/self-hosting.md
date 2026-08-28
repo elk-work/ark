@@ -44,6 +44,8 @@ The server takes **no command-line flags**. Everything is environment:
 | `ARK_API_TOKEN` | always | — | Bearer token clients must present. Startup fails without it. |
 | `ARK_SIGNING_KEY` | no | `ARK_API_TOKEN` | HMAC key for local-mode `/blobs/` URLs. Unset it is the service token, which is what it has always been; set it, the two are independent. Ignored in object-storage mode, where GCS signs. |
 | `ARK_BOOTSTRAP_TOKEN` | no | — | Accepted on `POST /v1/principals` and no other route, to mint the first per-principal credential. Unset, that route refuses everything and the service token is the only way in. See [Per-principal credentials](#per-principal-credentials). |
+| `ARK_IDP_APPROVAL_URL` | no | — | Where `ark login` sends a person to approve a device code. Unset, this service offers no device login and `GET /` says so; `ark login --token` is unaffected. See [Logging in without a token](#logging-in-without-a-token). |
+| `ARK_IDP_KEY` | with the above | — | Shared secret the identity provider presents on `POST /v1/device/approve`. Startup fails if `ARK_IDP_APPROVAL_URL` is set and this is not: a service that cannot verify an approval would fail at the last step of a login instead. |
 | `GCS_BUCKET` | object-storage mode | — | Google Cloud Storage bucket for repository databases and blobs. Set → object-storage mode; unset → local mode. |
 | `BASE_URL` | local mode | — | Externally reachable base URL of this service. Required when `GCS_BUCKET` is unset; used to build blob URLs. Startup fails without it. |
 | `DATA_DIR` | no | `data` | Local mode only. Repository databases go in `<DATA_DIR>/repos`, blobs in `<DATA_DIR>/blobs`. Relative paths resolve against the working directory. |
@@ -234,7 +236,9 @@ state has landed:
 replaces one shared token with per-principal credentials, per-repository
 grants and individual revocation, and its bootstrap path needs no
 identity provider at all. **Per-principal credentials work today** — see
-[Per-principal credentials](#per-principal-credentials) below — and
+[Per-principal credentials](#per-principal-credentials) below, and
+[Logging in without a token](#logging-in-without-a-token) for issuing
+them through a browser rather than by hand — and
 per-repository grants do not yet: a valid credential currently reaches
 everything the service token reaches. So the paragraph above is still the
 whole authorization model, and the reason to mint credentials now is
@@ -247,8 +251,12 @@ against the token in constant time — and, failing that, against the
 credential store, if the bearer looks like a credential this service
 issued. A mismatch either way is `401` with a `permission` error code.
 The only routes without a bearer check are
-`GET /` (a service banner), `GET /health`, and `POST /v1/principals`,
-which has its own token. In local mode `/blobs/`
+`GET /` (a service banner), `GET /health`, `POST /v1/principals`,
+which has its own token, and `POST /v1/device/code` and
+`POST /v1/device/token`, whose callers hold nothing to authenticate
+with yet — see [Logging in without a token](#logging-in-without-a-token).
+(`POST /v1/device/approve` has its own token too, `ARK_IDP_KEY`.)
+In local mode `/blobs/`
 also skips the bearer check, but is not unauthenticated: it requires an
 HMAC signature derived from `ARK_SIGNING_KEY` — which defaults to that
 same token — bound to the method and carrying a one-hour expiry.
@@ -343,6 +351,74 @@ which is the point of both.
 Revocation is cached for up to **60 seconds** across instances, so a
 revoked credential can keep working for that long. On a single-instance
 deployment it is effectively immediate.
+
+### Logging in without a token
+
+Everything above still asks somebody to move a credential by hand: the
+operator mints it, and the person pastes it into `ark login`. The device
+flow removes that step, and it is the one part of this document that
+needs something outside the binary — an **identity provider**: any
+service that can verify who a person is and make one HTTPS call back.
+
+Point the server at its approval page and give the two a shared secret:
+
+```sh
+ARK_IDP_APPROVAL_URL=https://idp.example.com/ark-auth ARK_IDP_KEY=$(head -c 32 /dev/urandom | base64) ./ark-server
+```
+
+Then, on any machine that can reach the service:
+
+```sh
+ark login --remote https://ark.example.com
+```
+
+Ark prints an eight-character code and the approval URL. You open that
+URL in a browser — **any browser, on any device**; it does not have to be
+the machine you are logging in from, which is the whole reason the flow
+has this shape — sign in there, type the code, and Ark stores the
+credential it is issued. Nothing is typed back into the terminal.
+
+`ark-server` never contains the name of an identity provider. It prints
+a URL it never calls, and it compares a secret. What the page behind
+that URL has to do is one call:
+
+```text
+POST /v1/device/approve        Authorization: Bearer <ARK_IDP_KEY>
+{ "user_code": "BCDF-GHJK", "subject": "…", "email": "me@example.com",
+  "display_name": "Me", "repository_ids": ["01K…"] }
+```
+
+The browser never talks to `ark-server`, so there is no CORS surface and
+no CSRF surface: the approval is a back-channel call between two
+servers. `email` is the identity — whoever controls it at the identity
+provider gets that principal's grants, which is the trust model of every
+invite system and is worth being deliberate about.
+
+`repository_ids` is optional and seeds **`read`** grants. It exists so a
+person who can already see a project wherever your identity provider
+lives does not need a second support ticket to read its Ark records. Two
+things it deliberately does not do: it never grants `write`, and it never
+removes a grant. Losing access at the identity provider therefore does
+not revoke anything here — revocation stays an explicit act, on this
+side, where you can see it.
+
+Grants are still not *enforced* — that is the sentence at the top of this
+section, and it has not changed. Seeding writes the rows; a credential
+today reaches everything the service token reaches, so what you are
+setting up is the record, not yet the confinement.
+
+Codes live 15 minutes; the client polls every 5 seconds and gives up at
+the expiry telling you to run `ark login` again. A code is redeemable
+exactly once: the response that carries the credential deletes the
+pending row in the same transaction, so nothing that replays the poll
+gets a second copy.
+
+**Without `ARK_IDP_APPROVAL_URL` there is no device login at all.** The
+three routes answer `404`, `GET /` reports `auth.device_flow: false`, and
+`ark login` with no arguments says so and points at `--token` rather than
+printing a code nobody can approve. That is the supported configuration
+for a self-hoster with no identity provider, and nothing else changes for
+them.
 
 ### Operational warnings
 
@@ -486,13 +562,16 @@ Per repository, once:
 cd your-git-repo
 ark init                                  # if not already initialized
 ark remote set https://ark.example.com    # http(s), trailing slash trimmed
-ark login                                 # token from stdin, or --token
+ark login                                 # a browser, or --token / stdin
 ark sync
 ```
 
 `ark remote set` writes the URL to `.ark/config.toml`. `ark login`
 stores the token outside the repository (the OS keyring, else
-`~/.ark/credentials.toml`) and prints which one it used. Piping is
+`~/.ark/credentials.toml`) and prints which one it used. With no
+arguments it runs the device login where the service offers one — see
+[Logging in without a token](#logging-in-without-a-token) — and says so
+plainly where it does not. To store a token you already hold, piping is
 preferred over `--token` to keep the value out of shell history:
 
 ```sh

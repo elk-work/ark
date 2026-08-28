@@ -31,6 +31,13 @@ type Server struct {
 	// accepted on no other route (RFC-0003 Decision 6). Empty disables that
 	// route entirely, which is every deployment that has not opted in.
 	BootstrapToken string
+	// IDPApprovalURL is where `ark login` sends a person to approve a device
+	// code, and IDPKey is the shared secret the identity provider presents on
+	// POST /v1/device/approve. Empty IDPApprovalURL means this service offers
+	// no device login at all, which GET / reports and `ark login` reads. See
+	// device.go.
+	IDPApprovalURL string
+	IDPKey         string
 	Blobs          BlobStore
 	Log            *slog.Logger
 	Version        string // build stamp, reported unauthenticated on GET /
@@ -38,6 +45,11 @@ type Server struct {
 	// auths is the credential store, opened on first use. See authStore.
 	authOnce sync.Once
 	auths    *authStore
+
+	// devices holds pending device codes, over the same auth.db. See
+	// device.go.
+	deviceOnce sync.Once
+	devices    *deviceStore
 }
 
 // signingKey is the HMAC key for local-mode blob URLs: ARK_SIGNING_KEY when
@@ -61,17 +73,7 @@ func (s *Server) signingKey() string {
 // Handler builds the HTTP API.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/" {
-			writeErr(w, http.StatusNotFound, "not_found", "unknown route")
-			return
-		}
-		root := map[string]string{"service": "ark-sync", "api": "v1"}
-		if s.Version != "" {
-			root["version"] = s.Version
-		}
-		writeJSON(w, root)
-	})
+	mux.HandleFunc("GET /", s.handleRoot)
 	// Not /healthz: Google Frontend intercepts that path on run.app
 	// hostnames and serves its own 404 before the request reaches the
 	// container (verified empirically 2026-07-13).
@@ -82,6 +84,12 @@ func (s *Server) Handler() http.Handler {
 	// than by a bearer, so a deployment can mint its first credential without
 	// already holding one. See auth.go.
 	mux.HandleFunc("POST /v1/principals", s.handleCreatePrincipal)
+	// Device login (RFC-0003 Decision 3, spec §20.1). The first two are
+	// unauthenticated because the caller holds nothing to authenticate with
+	// yet; the third has its own key, ARK_IDP_KEY. See device.go.
+	mux.HandleFunc("POST /v1/device/code", s.handleDeviceCode)
+	mux.HandleFunc("POST /v1/device/token", s.handleDeviceToken)
+	mux.HandleFunc("POST /v1/device/approve", s.handleDeviceApprove)
 	mux.HandleFunc("POST /v1/repositories", s.auth(s.handleRegisterRepo))
 	mux.HandleFunc("POST /v1/sync/push", s.auth(s.handlePush))
 	mux.HandleFunc("POST /v1/sync/pull", s.auth(s.handlePull))
@@ -111,6 +119,30 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("PUT /blobs/", local.Handler())
 	}
 	return mux
+}
+
+// handleRoot is the unauthenticated service banner.
+//
+// It carries an `auth` object, and that object is the whole of how a client
+// discovers how to log in: `ark login` reads it and either runs the device
+// flow or says the service has none and asks for a token. There is no client
+// configuration behind it, which is the point — a person who can reach the
+// service can find out how to authenticate to it.
+func (s *Server) handleRoot(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		writeErr(w, http.StatusNotFound, "not_found", "unknown route")
+		return
+	}
+	banner := api.ServiceBanner{
+		Service: "ark-sync",
+		API:     "v1",
+		Version: s.Version,
+		Auth:    &api.ServiceAuth{DeviceFlow: s.deviceFlowEnabled()},
+	}
+	if banner.Auth.DeviceFlow {
+		banner.Auth.ApprovalURL = s.IDPApprovalURL
+	}
+	writeJSON(w, banner)
 }
 
 func writeErr(w http.ResponseWriter, status int, code, msg string) {

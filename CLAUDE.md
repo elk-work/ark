@@ -95,9 +95,15 @@ per-repository `read`/`write`/`admin` grants. Scoped as elk-work/ark#43, #52,
   `ARK_API_TOKEN` and an `arkc_…` credential both authenticate; `POST
   /v1/principals` plus `ark principal create` mint credentials from
   `ARK_BOOTSTRAP_TOKEN`, with no identity provider.
+- **Landed (#53).** The device flow: `POST /v1/device/{code,token,approve}`
+  (`internal/server/device.go`, spec §20.1) and `ark login` with no arguments,
+  which prints a code, polls, and stores the credential the service issues.
+  `ARK_IDP_APPROVAL_URL` and `ARK_IDP_KEY` turn it on; unset, there is no
+  device login and nothing else changes. Approval may seed `read` grants, and
+  seeding only ever adds — it is not enforcement.
 - **Not yet.** `grants` is created and never read — a credential currently
   reaches every route the service token does. Grant enforcement and the actor
-  binding are #52, the device flow is #53, retiring the legacy token is #54.
+  binding are #52; retiring the legacy token is #54.
   `internal/server/repometa.go` and `internal/server/write.go` carry comments
   naming where the grant check goes; put it there when it lands rather than
   inventing a grant system beside them.
