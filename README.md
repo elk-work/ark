@@ -35,6 +35,7 @@ ark login                                # token -> OS keyring, else credentials
 ark sync                                 # push mutations, upload blobs, pull records
 ark repo show                            # the repository record the service holds
 ark repo set --name scout                # correct it; registration can only backfill
+ark repo dangling                        # references the service holds and cannot resolve
 ark logout                               # take that token back out of both stores
 ark repair push                          # the service lost this repository: replay it back
 ```

@@ -921,12 +921,55 @@ holds the record back and applies the rest of the batch (§9.2). That ends the
 wedge, not the defect: the record stays invisible on every client until the
 record it names arrives.
 
-Two things this deliberately is not. It is not **quarantine** — holding the
-child back until its referent lands and releasing it on pull — which is the
-eventual answer and more work than V1 has spent here. And the ledger is not
-yet **surfaced**: it lives in the repository database, so today an operator
-reads it there and no push response, route or `ark status` line reports it
-(elk-work/ark#74).
+This deliberately is not **quarantine** — holding the child back until its
+referent lands and releasing it on pull — which is the eventual answer and
+more work than V1 has spent here.
+
+### Reading the ledger
+
+```text
+GET /v1/repositories/{repo}/dangling[?all=true][&limit=N]
+```
+
+Answers the query above against a live service, so that an operator no longer
+has to copy `repos/<id>.db` out of the bucket to run it by hand. Until
+elk-work/ark#74 nothing did: the recording landed in #56 and #77 and was
+written and never read, which is a warning light behind a locked door and most
+of the way back to the silence the ledger exists to end.
+
+- **`read` on the repository** (§19.2). A dangling reference names record ids
+  in one repository, so reading it is reading the repository, and `read` is
+  already the level that pulls those records. Not `admin`: the grant list is
+  `admin` because it is a roster of email addresses, which this is not, and
+  putting a defect behind the higher level would rebuild the locked room in a
+  smaller size.
+- **Outstanding by default.** The response lists the set the query above
+  defines. `all=true` adds the entries whose referent has since arrived, each
+  carrying `resolved` — history rather than a defect, and kept for the reason
+  the entry is kept at all. There is still no `resolved_at`; `resolved` is the
+  comparison, made when the request is answered.
+- **The counts describe the repository, never the page.** `outstanding` and
+  `recorded` are unaffected by `all` and by `limit`, so a truncated listing
+  cannot make a repository look healthier than it is; `truncated` says the
+  listing was cut. Entries list oldest first — a reference recorded minutes
+  ago is ordinary skew, one outstanding for a week is a record that is never
+  coming — so what survives a `limit` is what is worth reading. `limit`
+  defaults to 100 and refuses anything outside 1–1000.
+- **`server_revision`** dates the answer, because the set is a comparison made
+  at a moment rather than a stored state.
+
+`ark repo dangling` is the command over it, beside `ark repo show` and `ark
+repo grants` — the commands that already ask the service what it holds about a
+repository. **It is deliberately not a line in `ark status`.** Status answers
+about a checkout without a network round trip, and both of its existing
+service-side lines report what a *sync* wrote down locally; a dangling count
+has no such local copy, so a status line would have to fetch one, on the
+command a person runs most, on a local-first tool. What status does carry is
+the pointer: its `held_records` line (§9.2) names `ark repo dangling` when a
+remote is configured, because a held record and a dangling reference are the
+same skew seen from the two sides, and only the service can say whether the
+record being waited for exists anywhere — the difference between waiting and
+waiting forever.
 
 ## 9.2 Pull
 
@@ -1017,6 +1060,13 @@ decision (§9.1), so a held record is the client-side face of a dangling
 reference the service has already recorded. Where that parent is never coming,
 this count is the only thing on the client that says so
 (elk-work/ark#89).
+
+**Which of the two it is, the line does not claim to know.** A record still in
+another client's queue and a record nobody holds look identical from here, and
+only the service can tell them apart, so the line names where to ask rather
+than answering: `ark repo dangling`, over the route in §9.1, when a remote is
+configured. Status does not ask on the reader's behalf — it answers about a
+checkout, without a network round trip, and must not acquire one.
 
 **The check reads its references from the schema**, not from a list of them
 kept beside it. A written list is a second copy of the schema, and the way a
@@ -1817,7 +1867,7 @@ for it before doing anything:
 
 | Level | Routes |
 |---|---|
-| `read` | `POST /v1/sync/pull`, `GET /v1/repositories/{id}`, `GET …/records/…`, `POST /v1/artifacts/download-url` |
+| `read` | `POST /v1/sync/pull`, `GET /v1/repositories/{id}`, `GET …/records/…`, `GET …/dangling` (§9.1), `POST /v1/artifacts/download-url` |
 | `write` | `POST /v1/sync/push`, the §19 write routes, `POST /v1/pull-requests/{id}/merge`, `POST /v1/artifacts/upload-url`, `POST /v1/artifacts/confirm` |
 | `admin` | `POST /v1/repositories/{id}/metadata`, `GET` and `POST /v1/repositories/{id}/grants` |
 
