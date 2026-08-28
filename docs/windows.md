@@ -89,6 +89,10 @@ a current-user-only ACL. It never falls back silently, and `ark status` reports
 which store the token came from. Set `ARK_NO_KEYRING=1` to choose the file
 deliberately.
 
+`ark logout` takes that credential back out, so removing a token is not a trip
+to Control Panel. It clears the Credential Manager entry and any fallback-file
+copy for that host, and succeeds whether or not either was there.
+
 That paragraph is tested rather than asserted. Ark's Windows CI job stores a
 throwaway credential in the runner's real Credential Manager, reads it back,
 overwrites it, deletes it, confirms the deleted entry reads as a miss, and has

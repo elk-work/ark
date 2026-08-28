@@ -1412,8 +1412,34 @@ the deliberate choice. Storage then goes straight to the file, without a
 warning, because the operator asked for it.
 
 Commands report which store answered. `ark login` names where it wrote the
-token; `ark status` names where the token resolved from. Neither prints the
-token itself (§21).
+token; `ark status` names where the token resolved from; `ark logout` names
+the stores it emptied. None of them prints the token itself (§21).
+
+The client must also be able to remove a credential it stored. `ark logout`
+is host-scoped, the way `ark login` is, and clears **both** stores for that
+host: the keyring entry and any entry in the fallback file. Removing only the
+store that currently answers would leave a plaintext copy the keyring
+outranks — unread, and therefore unnoticed — which is the worst outcome
+available to the one command whose purpose is that the credential is gone.
+
+Removal is idempotent. A host with nothing stored is a success, not a
+not-found: the state the caller asked for already holds, and a 3 there would
+fail an ordinary teardown on a machine that never logged in. A store that
+refuses to give the credential up is a different thing and is a failure (5),
+naming the store, the service and the account, because the token is still
+there and a person now has to finish by hand.
+
+`ARK_NO_KEYRING` skips the keyring for removal as it does for storage, but
+not silently: removal reports that the keyring went unexamined. Storage can
+be quiet about the opt-out because the operator asked for it; removal cannot,
+or "nothing to remove" is a claim about a store nobody looked in.
+
+`ARK_TOKEN` cannot be removed by a command — no process can unset a variable
+in the shell that started it. When it is set, removal still clears the stores
+and then reports that a token continues to resolve, for every remote, with
+exit code 7 (§22: the command did what it was asked and something still needs
+repairing). Reporting plain success there would describe a machine as logged
+out while every sync it runs still authenticates.
 
 The cloud service must identify:
 
