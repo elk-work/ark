@@ -123,12 +123,20 @@ func statusError(status int, e api.Error) error {
 		return records.RemoteCorruptf("%s", msg)
 	}
 	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		// The server's own wording is "invalid or missing token", which cannot
-		// distinguish a stale credential from an absent one — and the client
-		// always has one by this point, or it would not have got here.
+	case http.StatusUnauthorized:
+		// 401 is a verdict on the bearer itself: the service does not
+		// recognise it. The server's own wording is "invalid or missing
+		// token", which cannot distinguish a stale credential from an absent
+		// one — and the client always has one by this point, or it would not
+		// have got here.
 		return &records.Error{Kind: records.KindPermission,
 			Message: msg + " — the stored credential was not accepted; it may have been rotated. Run `ark login`"}
+	case http.StatusForbidden:
+		// 403 is the other half of `permission`, and it says the opposite
+		// about the credential. Both stay exit 5: the two mean the same thing
+		// to a program — you may not do this, and retrying will not change it
+		// — and only the sentence a person reads differs.
+		return &records.Error{Kind: records.KindPermission, Message: forbidden(e.Message)}
 	case http.StatusNotFound:
 		return records.NotFoundf("%s", msg)
 	case http.StatusConflict:
@@ -141,6 +149,44 @@ func statusError(status int, e api.Error) error {
 		}
 		return fmt.Errorf("%s", msg)
 	}
+}
+
+// forbidden words a 403 for the person who hit one.
+//
+// Until elk-work/ark#52 the two `permission` statuses had one cause between
+// them, so one sentence covered both. Grants are enforced now, and a 403 has
+// a second meaning: the service recognised the credential and is refusing the
+// request anyway, because the principal holds no grant — or too low a one —
+// on this repository (spec §19.2). Telling that reader to run `ark login`
+// sends them to re-authenticate a credential that is already working, which
+// cannot help and leaves them believing the credential is the problem
+// (elk-work/ark#95).
+//
+// **The status is the whole signal**, so no message text is guessed at. The
+// service refuses an unrecognised bearer with 401 and an unauthorized
+// principal with 403 — that is the HTTP distinction between "authenticate"
+// and "authorization will not help", and `faultPermission` in
+// internal/server/grants.go picks it deliberately.
+//
+// The refusal itself passes through unchanged, because the service is the
+// only side that knows which authority was missing and it already names the
+// principal, the repository, the level required, and the `ark repo grant`
+// that issues one (`refusal`, same file). The client adds the one thing the
+// service cannot know: that the credential in this machine's store is not
+// what needs repairing.
+func forbidden(msg string) string {
+	if msg == "" {
+		// Nothing named what was refused, so there is no refusal to pass
+		// through — a 403 from something sitting in front of the service, or
+		// from one too old to say. Inventing a diagnosis here would repeat
+		// the mistake this function exists to fix, so it claims only what the
+		// status itself establishes.
+		return "the service refused this request without saying what authority was missing" +
+			" — it refused a credential it accepted rather than rejecting one, so logging in" +
+			" again will not help; ask an admin of this repository whether you hold a grant on it"
+	}
+	return msg + " — the stored credential was accepted, so logging in again will not help;" +
+		" the grant is the missing part"
 }
 
 func (c *Client) RegisterRepo(ctx context.Context, req api.RegisterRepositoryRequest) error {

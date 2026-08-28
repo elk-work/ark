@@ -120,8 +120,14 @@ func TestNonOKStatusMapsToRecordsErrorKinds(t *testing.T) {
 			records.KindValidation, "title required", 2},
 		{"unauthorized", 401, `{"code":"permission","message":"invalid or missing token"}`,
 			records.KindPermission, "invalid or missing token", 5},
+		// 401 and 403 are worded differently and still share exit 5. The
+		// remedies differ, but a program's move is the same for both — stop,
+		// print, and do not retry — and splitting the code would break every
+		// script that reads 5 as "you may not do this" (elk-work/ark#95).
 		{"forbidden", 403, `{"code":"permission","message":"no access"}`,
 			records.KindPermission, "no access", 5},
+		{"forbidden with no message", 403, "",
+			records.KindPermission, "without saying what authority was missing", 5},
 		{"not found", 404, `{"code":"not_found","message":"repository not registered"}`,
 			records.KindNotFound, "repository not registered", 3},
 		{"conflict", 409, `{"code":"conflict","message":"repository is being updated concurrently"}`,
@@ -282,5 +288,103 @@ func TestRejectedCredentialErrorNamesTheRemedy(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "rotated") {
 		t.Errorf("error should name the likely cause, got: %v", err)
+	}
+}
+
+// TestPermissionAdviceFollowsTheStatus is elk-work/ark#95: the two halves of
+// `permission` need different repairs, and until grants were enforced they
+// shared one sentence.
+//
+// A 401 is a verdict on the bearer, and `ark login` is what fixes it. A 403 is
+// a verdict on what the bearer may do — the service accepted it — so `ark
+// login` re-authenticates a credential that already worked, which cannot help
+// and sends the reader hunting for a credential problem they do not have. The
+// service's own refusal names the repair, and it passes through whole.
+//
+// The refusal bodies below are `refusal()` in internal/server/grants.go
+// verbatim; grants_test.go pins the server half of the same contract.
+func TestPermissionAdviceFollowsTheStatus(t *testing.T) {
+	const noGrant = "alice@example.com has no grant on repository 01KX9B83TF2FV51C6K04563FQ0: " +
+		"read access is required. An admin of that repository issues one with " +
+		"`ark repo grant alice@example.com --read`"
+	const tooLow = "alice@example.com holds read on repository 01KX9B83TF2FV51C6K04563FQ0, and " +
+		"write access is required. An admin of that repository raises it with " +
+		"`ark repo grant alice@example.com --write`"
+
+	tests := []struct {
+		name       string
+		status     int
+		body       string
+		wantsLogin bool
+		wantIn     []string
+	}{
+		{
+			name:       "the bearer was not recognised",
+			status:     http.StatusUnauthorized,
+			body:       `{"code":"permission","message":"invalid or missing token"}`,
+			wantsLogin: true,
+			wantIn:     []string{"invalid or missing token", "rotated"},
+		},
+		{
+			name:       "a revoked credential is still a login problem",
+			status:     http.StatusUnauthorized,
+			body:       `{"code":"permission","message":"credential revoked"}`,
+			wantsLogin: true,
+			wantIn:     []string{"credential revoked"},
+		},
+		{
+			// Which repository, who has to act, and the command that does it
+			// — all of it the service's own words, kept whole.
+			name:       "no grant on the repository",
+			status:     http.StatusForbidden,
+			body:       `{"code":"permission","message":"` + noGrant + `"}`,
+			wantsLogin: false,
+			wantIn: []string{noGrant, "the stored credential was accepted",
+				"the grant is the missing part"},
+		},
+		{
+			name:       "a grant too low for the route",
+			status:     http.StatusForbidden,
+			body:       `{"code":"permission","message":"` + tooLow + `"}`,
+			wantsLogin: false,
+			wantIn:     []string{tooLow, "the stored credential was accepted"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				io.WriteString(w, tc.body)
+			}))
+			t.Cleanup(ts.Close)
+
+			_, err := testClient(ts.URL).Pull(context.Background(), api.PullRequest{RepositoryID: "r1"})
+			if err == nil {
+				t.Fatalf("status %d returned no error", tc.status)
+			}
+			var re *records.Error
+			if !errors.As(err, &re) || re.Kind != records.KindPermission {
+				t.Fatalf("error = %v, want records.Error of kind permission", err)
+			}
+			// Both halves stay exit 5. A caller scripting against it treats
+			// them identically — stop, print, do not retry — and only the
+			// sentence a person reads differs.
+			if code := records.ExitCode(err); code != 5 {
+				t.Errorf("exit code = %d, want 5", code)
+			}
+			for _, want := range tc.wantIn {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("message %q is missing %q", err.Error(), want)
+				}
+			}
+			if got := strings.Contains(err.Error(), "ark login"); got != tc.wantsLogin {
+				if tc.wantsLogin {
+					t.Errorf("message %q does not name the command that fixes it", err.Error())
+				} else {
+					t.Errorf("message %q sends the reader to re-authenticate a credential "+
+						"the service just accepted", err.Error())
+				}
+			}
+		})
 	}
 }
