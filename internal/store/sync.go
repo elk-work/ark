@@ -50,11 +50,93 @@ func (s *Store) PendingMutationRows(ctx context.Context) ([]api.Mutation, error)
 }
 
 // MarkMutation records the server's verdict on a mutation.
+//
+// Rejections go through RejectMutation instead: they are the one verdict that
+// leaves the local database holding a change the server does not have, so
+// they carry bookkeeping beyond the status word.
 func (s *Store) MarkMutation(ctx context.Context, id, status, errMsg string) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE mutations SET status = ?, error_message = ? WHERE id = ?`,
 		status, errMsg, id)
 	if err != nil {
 		return records.DBErr("mark mutation", err)
+	}
+	return nil
+}
+
+// SyncStateDiverged marks a local record the server refused a change to. It
+// is neither `local` (the record may well have synced before) nor `synced`
+// (the two copies demonstrably disagree), and both of the paths that restore
+// agreement — SetRecordRevision after an accepted push, upsertServerRecord
+// after a pull — already write `synced` unconditionally, so the mark clears
+// itself exactly when the divergence ends.
+const SyncStateDiverged = "diverged"
+
+// RejectMutation records a rejection and the divergence it leaves behind.
+//
+// The mutation is kept rather than dropped, and the record it targeted is
+// marked diverged, in one transaction. Both halves matter and for different
+// readers: the mutation row is the forensic trace — what was attempted, when,
+// and the server's reason — while the mark on the record is what makes the
+// disagreement visible to anyone looking at the record itself rather than at
+// the sync log.
+//
+// The local effect of the mutation is deliberately *not* rolled back. Two
+// reasons, and the second is the stronger one. Mechanically, the payload is a
+// delta of changed fields with no before-image anywhere in the schema
+// (conflicts.base_json is written empty for the same reason), so there is
+// nothing to roll back to without inventing a prior value. And in substance,
+// the commonest rejection is `record not found` — the server is the side
+// missing data — so reverting would destroy the only copy of a real decision
+// in order to agree with a peer that has never heard of the record. Losing
+// work quietly to reach agreement is the same defect as reporting agreement
+// that does not exist. Ark keeps the change, says so, and lets a person
+// decide which side is right (docs/v1-spec.md §9.1, §22 exit 7).
+func (s *Store) RejectMutation(ctx context.Context, m api.Mutation, errMsg string) error {
+	return db.InTx(ctx, s.DB, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`UPDATE mutations SET status = 'rejected', error_message = ?,
+			resolved_at = NULL WHERE id = ?`, errMsg, m.ID); err != nil {
+			return records.DBErr("mark mutation rejected", err)
+		}
+		table, ok := tableForType(m.RecordType)
+		if !ok {
+			// A record type with no local table cannot be marked, but the
+			// mutation row still carries the rejection, which is what
+			// UnresolvedRejections counts. The alarm is not lost.
+			return nil
+		}
+		if _, err := tx.Exec(fmt.Sprintf(
+			`UPDATE %s SET sync_state = ? WHERE id = ?`, table), SyncStateDiverged, m.RecordID); err != nil {
+			return records.DBErr("mark record diverged", err)
+		}
+		return nil
+	})
+}
+
+// UnresolvedRejections counts mutations the server refused whose effect it
+// still does not hold. This is the honest answer to "am I in sync" that
+// pending_mutations alone cannot give: a rejected mutation leaves the queue,
+// so counting the queue reports zero for a repository that has diverged —
+// which is exactly how a client came to report `0 pending mutations` about a
+// server that had refused three writes (elk-work/ark#46).
+func (s *Store) UnresolvedRejections(ctx context.Context) (int64, error) {
+	var n int64
+	err := s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM mutations
+		WHERE repository_id = ? AND status = 'rejected' AND resolved_at IS NULL`, s.RepoID).Scan(&n)
+	if err != nil {
+		return 0, records.DBErr("count rejected mutations", err)
+	}
+	return n, nil
+}
+
+// resolveRejections closes out any outstanding rejection against a record
+// that has just reached agreement with the server. Called from both paths
+// that establish agreement — an accepted push and an applied pull — because
+// either one ends the divergence, whichever change actually caused it.
+func resolveRejections(tx *sql.Tx, recordType, recordID string) error {
+	if _, err := tx.Exec(`UPDATE mutations SET resolved_at = ?
+		WHERE record_type = ? AND record_id = ? AND status = 'rejected' AND resolved_at IS NULL`,
+		records.Now(), recordType, recordID); err != nil {
+		return records.DBErr("resolve rejections", err)
 	}
 	return nil
 }
@@ -89,19 +171,24 @@ func (s *Store) SyncCursor(ctx context.Context) (clientID string, lastRevision i
 	return clientID, lastRevision, nil
 }
 
-// SetRecordRevision stamps a record row after the server accepts a mutation.
+// SetRecordRevision stamps a record row after the server accepts a mutation,
+// and closes out any earlier rejection against the same record: the server
+// has just accepted a change to it, so whatever it disagreed about before is
+// over. Both statements run in one transaction so a record can never read as
+// synced while the rejection that contradicts it is still outstanding.
 func (s *Store) SetRecordRevision(ctx context.Context, recordType, recordID string, revision int64) error {
 	table, ok := tableForType(recordType)
 	if !ok {
 		return nil
 	}
-	_, err := s.DB.ExecContext(ctx, fmt.Sprintf(
-		`UPDATE %s SET server_revision = ?, sync_state = 'synced' WHERE id = ?`, table),
-		revision, recordID)
-	if err != nil {
-		return records.DBErr("stamp record revision", err)
-	}
-	return nil
+	return db.InTx(ctx, s.DB, func(tx *sql.Tx) error {
+		if _, err := tx.Exec(fmt.Sprintf(
+			`UPDATE %s SET server_revision = ?, sync_state = 'synced' WHERE id = ?`, table),
+			revision, recordID); err != nil {
+			return records.DBErr("stamp record revision", err)
+		}
+		return resolveRejections(tx, recordType, recordID)
+	})
 }
 
 // RecordConflict stores an unresolved conflict for `ark conflict` commands.
@@ -207,6 +294,15 @@ func (s *Store) ApplyPull(ctx context.Context, resp *api.PullResponse) (PullSkip
 			}
 			if !handled {
 				skips[rec.RecordType]++
+				continue
+			}
+			// The server's copy of this record has just landed locally, so
+			// the two agree again and any rejection standing against it is
+			// spent. Note that this is how a divergence ends in the direction
+			// the server wins: the local change stays rejected history, and
+			// the record now reads as the server has it.
+			if err := resolveRejections(tx, rec.RecordType, rec.RecordID); err != nil {
+				return err
 			}
 		}
 		for _, tomb := range resp.Tombstones {
@@ -218,6 +314,11 @@ func (s *Store) ApplyPull(ctx context.Context, resp *api.PullResponse) (PullSkip
 				`UPDATE %s SET deleted_at = ?, server_revision = ?, sync_state = 'synced' WHERE id = ?`, table),
 				tomb.DeletedAt, tomb.ServerRevision, tomb.RecordID); err != nil {
 				return records.DBErr("apply tombstone", err)
+			}
+			// A record the server says is deleted is one the two sides now
+			// agree about, however loudly they disagreed before.
+			if err := resolveRejections(tx, tomb.RecordType, tomb.RecordID); err != nil {
+				return err
 			}
 		}
 		if _, err := tx.Exec(`UPDATE sync_state SET last_revision = ?, last_synced_at = ?
@@ -239,8 +340,11 @@ func (s *Store) ApplyPull(ctx context.Context, resp *api.PullResponse) (PullSkip
 // a cloud-confirmed merge) without touching the pull cursor.
 func (s *Store) ApplyServerRecord(ctx context.Context, rec api.Record) error {
 	return db.InTx(ctx, s.DB, func(tx *sql.Tx) error {
-		_, err := upsertServerRecord(tx, rec)
-		return err
+		handled, err := upsertServerRecord(tx, rec)
+		if err != nil || !handled {
+			return err
+		}
+		return resolveRejections(tx, rec.RecordType, rec.RecordID)
 	})
 }
 

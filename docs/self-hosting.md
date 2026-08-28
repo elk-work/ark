@@ -419,9 +419,17 @@ Get-Content -Raw path\to\ark-token.txt | ark login
 For CI and agents, skip `ark login` and set `ARK_TOKEN` in the
 environment; it wins over both other sources.
 
-`ark sync` registers the repository (idempotent, and it doubles as a
-token check), pushes pending mutations, uploads artifact blobs the
-server does not have, then pulls records after the local cursor.
+`ark sync` registers the repository (idempotent, it doubles as a token
+check, and it carries this checkout's actors so the server knows who is
+writing even before anything is pushed), pushes pending mutations,
+uploads artifact blobs the server does not have, then pulls records
+after the local cursor.
+
+**Exit code 7 means the server refused something.** The sync itself
+worked; one or more changes were rejected, and this checkout is still
+holding them. `ark sync` names each rejection and `ark status` keeps
+counting them until the records agree with the server again, so a
+scripted caller should treat 7 as "look at this", not as success.
 
 ### A second machine
 

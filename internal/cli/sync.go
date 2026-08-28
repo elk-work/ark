@@ -5,6 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/elk-work/ark/internal/records"
 	arksync "github.com/elk-work/ark/internal/sync"
 )
 
@@ -24,7 +25,7 @@ func newSyncCmd(g *globals) *cobra.Command {
 				return err
 			}
 			p := g.printer(cmd)
-			return p.Result(res, func() {
+			if err := p.Result(res, func() {
 				p.Line("Synced with %s (server revision %d)", a.Config.Remote, res.ServerRevision)
 				if res.Pushed > 0 {
 					p.Line("  pushed    %d mutations (%d applied, %d rejected, %d conflicts)",
@@ -55,7 +56,28 @@ func newSyncCmd(g *globals) *cobra.Command {
 				if res.Conflicts > 0 {
 					p.Line("Run `ark conflict list` to inspect conflicts.")
 				}
-			})
+			}); err != nil {
+				return err
+			}
+
+			// A sync that pushed changes the server refused is spec §22's
+			// partial success (exit 7), not a clean 0. The transfer itself
+			// worked; the repository came out of it disagreeing with the
+			// service, and the disagreement is terminal — the mutation is out
+			// of the queue and will not be retried. Reporting success there
+			// is how an automated caller learns nothing happened.
+			//
+			// Conflicts deliberately stay exit 0. They are a designed state
+			// with a repair path (`ark conflict resolve`) that `ark status`
+			// has always named, so a conflicting sync was never claiming to
+			// be in sync. Rejections were the silent half, and they are what
+			// changes here.
+			if res.Rejected > 0 {
+				return records.Partialf(
+					"%d mutation(s) rejected; the local records still carry changes the server refused — see `ark status`",
+					res.Rejected)
+			}
+			return nil
 		},
 	}
 }

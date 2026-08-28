@@ -425,8 +425,12 @@ func TestSecondClientConvergesWithRecordsAndActors(t *testing.T) {
 
 	b := newClient(t, url, a.Config.RepositoryID)
 	res := mustRun(t, b)
-	if res.PulledRecords != 3 { // A's actor, task, comment
-		t.Fatalf("B pulled %d records, want 3: %+v", res.PulledRecords, res)
+	// A's actor, the task, the comment — and B's own actor, which B's
+	// registration put on the service in the same sync. B has nothing to
+	// push, and before elk-work/ark#47 that meant B's identity never reached
+	// the service at all.
+	if res.PulledRecords != 4 {
+		t.Fatalf("B pulled %d records, want 4: %+v", res.PulledRecords, res)
 	}
 
 	tasks, err := b.Store.ListTasks(ctx, "all")
@@ -963,5 +967,133 @@ func TestPullOverAnUnpushedEditIsRecoveredByTheNextSync(t *testing.T) {
 	}
 	if fromC.Title != "Renamed locally" || fromC.Body != "body two" {
 		t.Errorf("a joining client sees title %q, body %q", fromC.Title, fromC.Body)
+	}
+}
+
+// TestSyncWithNothingToPushStillRegistersActors is elk-work/ark#47.
+//
+// Actors used to travel only as a field of api.PushRequest, and Push returns
+// early when the mutation queue is empty. So a repository that had registered
+// and synced but never pushed held no actor records on the service — not even
+// the human `ark init` creates — and the RFC-0004 write routes, which resolve
+// their writer against exactly those records, refused the first remote write
+// into it. The complaint named `delegated_by`, a field nobody types: the CLI
+// derives it from the local default actor, so from outside the command simply
+// refused for no visible reason.
+//
+// The sequence below is the issue's reproduction. Note what is absent: no
+// task, no push. Inserting one is what used to make this pass, and that
+// workaround is what identified the bug.
+func TestSyncWithNothingToPushStillRegistersActors(t *testing.T) {
+	_, url := startServer(t)
+	a := newClient(t, url, "")
+	ctx := context.Background()
+
+	res := mustRun(t, a)
+	if res.Pushed != 0 {
+		t.Fatalf("this test is only meaningful with an empty queue: %+v", res)
+	}
+
+	client, err := Client(a)
+	if err != nil {
+		t.Fatalf("client: %v", err)
+	}
+	if _, err := client.GetRecord(ctx, a.Config.RepositoryID, "actor", a.Store.Actor.ID); err != nil {
+		t.Fatalf("the service does not hold this checkout's human actor after a sync: %v", err)
+	}
+
+	// And the consequence that made it worth fixing: a write route can now
+	// resolve the writer this repository's own CLI delegates from.
+	name := "renamed by a checkout that never pushed"
+	resp, err := client.SetRepositoryMetadata(ctx, a.Config.RepositoryID, api.SetRepositoryMetadataRequest{
+		Writer: api.Writer{AgentName: "ark-cli", AgentVersion: "test", DelegatedBy: a.Store.Actor.ID},
+		Name:   &name,
+	})
+	if err != nil {
+		t.Fatalf("first remote write into a synced-but-never-pushed repository: %v", err)
+	}
+	if resp.Repository.Name != name {
+		t.Errorf("metadata after the write: %+v", resp.Repository)
+	}
+}
+
+// TestRepeatedSyncDoesNotRepublishKnownActors: carrying actors on every
+// registration must not make a no-op sync noisy. upsertActor mints a revision
+// only for an actor it has not seen, so the second sync leaves the revision
+// alone and pulls nothing — the property that keeps a fleet of polling
+// clients cheap (see TestSyncCursorIsIdempotentAcrossRepeatedSyncs).
+func TestRepeatedSyncDoesNotRepublishKnownActors(t *testing.T) {
+	_, url := startServer(t)
+	a := newClient(t, url, "")
+
+	first := mustRun(t, a)
+	second := mustRun(t, a)
+	if second.ServerRevision != first.ServerRevision {
+		t.Errorf("a second no-op sync moved the server revision %d -> %d",
+			first.ServerRevision, second.ServerRevision)
+	}
+	if second.PulledRecords != 0 || second.PulledTombstones != 0 {
+		t.Errorf("a second no-op sync pulled something: %+v", second)
+	}
+}
+
+// TestRejectionMarksTheRecordDivergedAndCountsAsUnresolved covers the store
+// half of elk-work/ark#46: a rejection leaves two durable traces — the
+// mutation row, which is the forensic record of what was refused and why, and
+// a mark on the record itself, which is what makes the disagreement visible
+// to anyone reading the record rather than the sync log. Neither is cleared
+// by the sync that produced it.
+func TestRejectionMarksTheRecordDivergedAndCountsAsUnresolved(t *testing.T) {
+	_, url := startServer(t)
+	a := newClient(t, url, "")
+	ctx := context.Background()
+
+	task, err := a.Store.CreateTask(ctx, "never reached the server", "")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	// Retire the create the way a stale `.ark/` store does: pushed once, to a
+	// service that no longer holds the result, so it is never sent again.
+	if _, err := a.DB.Exec(`UPDATE mutations SET status = 'applied' WHERE operation = 'create'`); err != nil {
+		t.Fatalf("retire the create mutation: %v", err)
+	}
+	if _, err := a.Store.CloseTask(ctx, task.ID); err != nil {
+		t.Fatalf("close task: %v", err)
+	}
+
+	res := mustRun(t, a)
+	if res.Rejected != 1 || len(res.Issues) != 1 {
+		t.Fatalf("expected exactly one rejection: %+v", res)
+	}
+
+	if st := scalar[string](t, a, `SELECT status FROM mutations WHERE id = ?`, res.Issues[0].MutationID); st != "rejected" {
+		t.Errorf("mutation status = %q, want rejected", st)
+	}
+	if st := scalar[string](t, a, `SELECT sync_state FROM tasks WHERE id = ?`, task.ID); st != store.SyncStateDiverged {
+		t.Errorf("task sync_state = %q, want %q", st, store.SyncStateDiverged)
+	}
+	// The local effect is deliberately kept, not rolled back: the payload
+	// carries no before-image, and here the *server* is the side missing
+	// data, so reverting would destroy the only copy of a real decision.
+	if st := scalar[string](t, a, `SELECT status FROM tasks WHERE id = ?`, task.ID); st != "closed" {
+		t.Errorf("task status = %q; the rejected change should be kept and reported, not silently undone", st)
+	}
+
+	n, err := a.Store.UnresolvedRejections(ctx)
+	if err != nil {
+		t.Fatalf("count rejections: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("unresolved rejections = %d, want 1", n)
+	}
+
+	// Agreement clears it: put the record on the service and the divergence
+	// is genuinely over, so the alarm has to stop.
+	if _, err := a.DB.Exec(`UPDATE mutations SET status = 'pending' WHERE operation = 'create'`); err != nil {
+		t.Fatalf("requeue the create: %v", err)
+	}
+	mustRun(t, a)
+	if n, err := a.Store.UnresolvedRejections(ctx); err != nil || n != 0 {
+		t.Errorf("unresolved rejections = %d (%v) after the server accepted the record, want 0", n, err)
 	}
 }

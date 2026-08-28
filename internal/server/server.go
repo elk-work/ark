@@ -133,7 +133,8 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 	if req.DefaultBranch == "" {
 		req.DefaultBranch = "main"
 	}
-	err := s.Repos.Update(r.Context(), req.ID, true, func(tx *sql.Tx) error {
+	ctx := r.Context()
+	err := s.Repos.Update(ctx, req.ID, true, func(tx *sql.Tx) error {
 		// Registration runs on every sync, and the name a client sends is just
 		// the basename of wherever it happens to be checked out. Overwriting on
 		// conflict therefore let any client silently rename the repository for
@@ -153,7 +154,25 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 				default_branch = CASE WHEN meta.default_branch = '' THEN excluded.default_branch ELSE meta.default_branch END,
 				git_remote_url = CASE WHEN meta.git_remote_url = '' THEN excluded.git_remote_url ELSE meta.git_remote_url END`,
 			req.ID, req.Name, req.DefaultBranch, req.GitRemoteURL, records.Now())
-		return err
+		if err != nil {
+			return err
+		}
+		// Actors are upserted here as well as on push, because this is the
+		// call every sync makes whether or not it has anything to send. A
+		// repository that registered and never pushed used to hold no actor
+		// records, which left every write route unable to resolve the writer
+		// its own client would delegate from (elk-work/ark#47). upsertActor
+		// mints a revision only for an actor it has not seen, so repeat
+		// registrations stay quiet and pulls stay empty.
+		for _, a := range req.Actors {
+			if a.ID == "" {
+				continue
+			}
+			if err := upsertActor(ctx, tx, a); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		s.respond(w, "register repository", err)

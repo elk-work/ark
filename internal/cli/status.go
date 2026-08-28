@@ -1,6 +1,8 @@
 package cli
 
 import (
+	"fmt"
+
 	"github.com/spf13/cobra"
 
 	"github.com/elk-work/ark/internal/cloud"
@@ -17,8 +19,19 @@ type statusReport struct {
 	OpenTasks        int64  `json:"open_tasks"`
 	OpenPRs          int64  `json:"open_pull_requests"`
 	PendingMutations int64  `json:"pending_mutations"`
-	Conflicts        int64  `json:"unresolved_conflicts"`
-	Remote           string `json:"remote,omitempty"`
+	// RejectedMutations counts changes the server refused whose effect it
+	// still does not hold — the repository's divergence from the service.
+	//
+	// pending_mutations cannot answer that on its own, and the way it fails
+	// is the worst available: a rejection *removes* the mutation from the
+	// queue, so the number goes to zero at the exact moment the two copies
+	// stop agreeing. A client reported `0 pending mutations` about a server
+	// that had just refused three writes, and nothing in this command said
+	// otherwise (elk-work/ark#46). Whatever else status reports, it must not
+	// be able to describe a diverged repository as a clean one.
+	RejectedMutations int64  `json:"rejected_mutations"`
+	Conflicts         int64  `json:"unresolved_conflicts"`
+	Remote            string `json:"remote,omitempty"`
 	// TokenSource is which store answered for the sync token — env, keyring,
 	// file, or none — and is set only when a remote is configured. `ark login`
 	// says where it wrote the token; resolution deserves to be as legible,
@@ -77,6 +90,9 @@ func newStatusCmd(g *globals) *cobra.Command {
 			if err := count(`SELECT COUNT(*) FROM mutations WHERE repository_id = ? AND status = 'pending'`, &rep.PendingMutations, a.Config.RepositoryID); err != nil {
 				return err
 			}
+			if err := count(`SELECT COUNT(*) FROM mutations WHERE repository_id = ? AND status = 'rejected' AND resolved_at IS NULL`, &rep.RejectedMutations, a.Config.RepositoryID); err != nil {
+				return err
+			}
 			if err := count(`SELECT COUNT(*) FROM conflicts WHERE status = 'unresolved'`, &rep.Conflicts); err != nil {
 				return err
 			}
@@ -90,10 +106,16 @@ func newStatusCmd(g *globals) *cobra.Command {
 				}
 				p.Line("actor       %s (%s)", rep.Actor, rep.ActorType)
 				p.Line("open        %d tasks, %d pull requests", rep.OpenTasks, rep.OpenPRs)
+				// The queue count alone is the number that lied, so it never
+				// stands alone again once anything has been rejected.
+				queue := fmt.Sprintf("%d pending mutations", rep.PendingMutations)
+				if rep.RejectedMutations > 0 {
+					queue += fmt.Sprintf(", %d rejected", rep.RejectedMutations)
+				}
 				if rep.Remote == "" {
-					p.Line("sync        no remote configured; %d local mutations recorded", rep.PendingMutations)
+					p.Line("sync        no remote configured; %s recorded", queue)
 				} else {
-					p.Line("sync        %s (%d pending mutations)", rep.Remote, rep.PendingMutations)
+					p.Line("sync        %s (%s)", rep.Remote, queue)
 					switch tokenAt {
 					case cloud.SourceNone:
 						p.Line("token       none — run `ark login`")
@@ -102,6 +124,14 @@ func newStatusCmd(g *globals) *cobra.Command {
 					default:
 						p.Line("token       %s", tokenAt.Description())
 					}
+				}
+				// Spelled out rather than left as a number on the sync line:
+				// a rejection is terminal — the mutation will not be retried
+				// — so the local record keeps a change the service has never
+				// accepted, and a reader has to be told that in words.
+				if rep.RejectedMutations > 0 {
+					p.Line("diverged    %d rejected change(s) kept locally and not on the server (`ark sync` names each)",
+						rep.RejectedMutations)
 				}
 				if rep.Conflicts > 0 {
 					p.Line("conflicts   %d unresolved (see `ark conflict list`)", rep.Conflicts)

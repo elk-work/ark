@@ -161,6 +161,10 @@ sync_state
 server_revision
 ```
 
+`sync_state` is one of `local`, `synced`, or `diverged`. `diverged` means the
+service refused a change to this record and the local copy kept it — see
+§9.1, which is also where it clears.
+
 ### Immutability Rule
 
 Ark should prefer append-only records.
@@ -595,6 +599,7 @@ pull_requests(repository_id, status)
 reviews(pull_request_id, created_at)
 artifacts(parent_type, parent_id)
 mutations(status, created_at)
+mutations(repository_id, status, resolved_at)
 ```
 
 Add SQLite FTS5 for:
@@ -629,6 +634,7 @@ created_at
 created_by
 status
 error_message
+resolved_at
 ```
 
 Allowed operations:
@@ -651,6 +657,15 @@ conflict
 ```
 
 Local state and mutation insertion must happen in the same SQLite transaction.
+
+A `rejected` mutation is never deleted. It is the only durable evidence that
+the local database holds a change the service refused, and the queue cannot
+carry that evidence because the rejection is what removes the mutation from
+the queue. `error_message` holds the service's reason; `resolved_at` is NULL
+while the disagreement stands and is stamped when the record next reaches
+agreement with the service — an accepted mutation against it, or a pull that
+brings the service's copy down. A rejection that is never resolved never stops
+being reported (§9.1).
 
 `base_server_revision` is the record's current `server_revision` at the moment
 the change is made — 0 only for a `create`, or for a record that has never
@@ -683,6 +698,7 @@ Request:
 {
   "repository_id": "01J...",
   "client_id": "01J...",
+  "actors": [],
   "mutations": []
 }
 ```
@@ -699,6 +715,47 @@ Response:
 ```
 
 The server must process each mutation idempotently by mutation ID.
+
+**A push is not the only carrier of actors, and must not be the only one.**
+Actors also travel on `POST /v1/repositories` (§19), which is the part of a
+sync that runs unconditionally. A push does not run at all when the queue is
+empty, so a repository that had registered and synced but never pushed used to
+hold no actor records on the service — not even the human `ark init` creates.
+Every write route resolves its writer against those records and admits a new
+agent only under a `delegated_by` naming a human the service already holds, so
+the first remote write into such a repository was refused, naming a field the
+caller never supplied (elk-work/ark#47). Both carriers upsert idempotently and
+mint a revision only for an actor the service has not seen, so repeated
+registration stays quiet.
+
+### Rejections
+
+A rejected mutation leaves the queue and is never retried. That much is
+correct: a write against a record the service does not hold cannot be made to
+succeed by repeating it. What follows from it is the part that binds.
+
+- **The local effect is kept, not rolled back.** A mutation payload is a delta
+  of changed fields and carries no before-image, so there is nothing to revert
+  to without inventing a prior value. More importantly, the commonest rejection
+  is `record not found`, where the *service* is the side missing data —
+  reverting would destroy the only copy of a real decision in order to agree
+  with a peer that has never heard of the record. Ark keeps the change and
+  reports the disagreement; a person decides which side is right.
+- **The rejection is durable.** The mutation row survives with
+  `status = 'rejected'` and the service's reason (§8), and the affected record
+  is marked `sync_state = 'diverged'` so the disagreement is visible to a
+  reader of the record and not only to a reader of the sync log. Both clear
+  when agreement is restored, and only then.
+- **`ark status` must report outstanding rejections.** A client that has
+  diverged from the service may not describe itself as in sync. This is not a
+  presentation detail: because a rejection empties the queue, `pending
+  mutations` reaches zero at the exact moment the two copies stop agreeing, and
+  a client once reported `0 pending mutations` about a service that had just
+  refused three writes (elk-work/ark#46).
+- **A sync with rejections exits 7**, not 0 (§22). The transfer succeeded; the
+  repository came out of it in a state needing repair. Conflicts remain exit 0
+  — they are a designed state with a resolution path that `ark status` has
+  always named, so a conflicting sync was never claiming to be in sync.
 
 ## 9.2 Pull
 
@@ -1225,6 +1282,12 @@ Cloud SQL for PostgreSQL
 Google Cloud Storage
 ```
 
+`POST /v1/repositories` registers a repository idempotently and carries this
+checkout's actors alongside its metadata. It is the only call every sync makes
+unconditionally, which is why identity travels on it and not on the push alone
+(§9.1). Registration **backfills** metadata and never overwrites it —
+correcting a field is a deliberate act with its own route (§19.1).
+
 The API service owns:
 
 - authentication
@@ -1273,7 +1336,9 @@ overwrites these fields, since registration can only backfill:
   and for the same purpose: the authorization rule, not attribution, since
   the record carries no `created_by`. It follows that the acting identity
   must already be known to the service, which it is once the repository has
-  pushed.
+  synced — registration carries actors (§9.1). It used to say "once the
+  repository has *pushed*", which was true and was the bug: a checkout that
+  had synced but never pushed could not make this call at all.
 - **Authorization is the single service token** (§20). Renaming a repository
   is an `admin`-level act under RFC-0003, and when its per-repository grants
   land the check belongs beside the writer resolution in the handler. V1 has
@@ -1389,6 +1454,14 @@ CLI exit codes:
 6 offline or remote unavailable
 7 partial success requiring repair
 ```
+
+Exit code 7 is for a command that did what it was asked and left the
+repository needing repair anyway. `ark sync` returns it when the service
+rejected any mutation: the transfer worked, and the local database now holds
+changes the service refused and will not be asked for again (§9.1). A caller
+that scripts against exit codes learns nothing from a 0 there, which is the
+whole complaint — the divergence has to be legible to a program, not only in
+the prose the command printed.
 
 Exit code 2 covers **every** way the command line can be wrong, not only the
 checks Ark performs itself: an unknown command or subcommand, an unknown flag,

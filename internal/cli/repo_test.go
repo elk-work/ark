@@ -10,9 +10,13 @@ import (
 )
 
 // syncedRepo is a repository that has registered with the service and pushed
-// at least once. The push matters: it is what carries this checkout's human
-// actor to the service, and a remote write delegates from a human the
-// service already knows.
+// at least once.
+//
+// The push used to be load-bearing: actors travelled only on a push, so a
+// checkout that had synced without one was unknown to the service and every
+// remote write into it was refused (elk-work/ark#47). Registration carries
+// actors now, so the seeded task is only setup — a repository with a task in
+// it — and no longer a workaround.
 func syncedRepo(t *testing.T) (dir, url string) {
 	t.Helper()
 	url = startSyncServer(t)
