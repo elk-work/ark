@@ -10,6 +10,7 @@ import (
 	"github.com/elk-work/ark/internal/cloud"
 	"github.com/elk-work/ark/internal/config"
 	"github.com/elk-work/ark/internal/records"
+	"github.com/elk-work/ark/pkg/api"
 )
 
 func newRemoteCmd(g *globals) *cobra.Command {
@@ -67,14 +68,68 @@ func newRemoteCmd(g *globals) *cobra.Command {
 	return cmd
 }
 
+// How a login got its credential. Both values are reported as `method` in
+// --json, so an agent can tell "I pasted a token in" from "the service issued
+// one to this machine" without inspecting the token.
+const (
+	loginMethodToken  = "token"
+	loginMethodDevice = "device"
+)
+
+// loginReport is `ark login --json`. The four original keys are unchanged and
+// keep their meaning — they are a stable interface — and the two additions
+// describe the path that did not exist before: `method`, and the principal a
+// device login resolved to, which is absent when a token was simply stored.
+type loginReport struct {
+	StoredIn  string         `json:"stored_in"`
+	Storage   string         `json:"storage"`
+	Remote    string         `json:"remote"`
+	Host      string         `json:"host"`
+	Method    string         `json:"method"`
+	Principal *api.Principal `json:"principal,omitempty"`
+}
+
+// stdinToken reads the one line `ark login` accepts on stdin — and reads it
+// only when stdin is something other than a terminal.
+//
+// The check is new and it is load-bearing. Before the device flow, `ark login`
+// with no arguments scanned stdin unconditionally, so on a terminal it sat
+// waiting for a token to be typed. Now that no arguments means "log in through
+// a browser", that read would be indistinguishable from a hang. Piping and
+// redirecting are unaffected, which is every scripted use of this command.
+func stdinToken(cmd *cobra.Command) string {
+	in := cmd.InOrStdin()
+	if f, ok := in.(*os.File); ok {
+		fi, err := f.Stat()
+		if err != nil || fi.Mode()&os.ModeCharDevice != 0 {
+			return ""
+		}
+	}
+	scanner := bufio.NewScanner(in)
+	if scanner.Scan() {
+		return strings.TrimSpace(scanner.Text())
+	}
+	return ""
+}
+
 func newLoginCmd(g *globals) *cobra.Command {
 	var remoteFlag string
 	var noVerify bool
 
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Store the API token for a sync service",
-		Long: `Store the API token for an Ark sync service.
+		Short: "Log in to a sync service, or store a token for one",
+		Long: `Log in to an Ark sync service.
+
+With no arguments, and if the service offers one, this runs a device login:
+Ark prints a short code and a URL, you approve it in a browser — any browser,
+on any device — and the service issues a credential to this machine. Nothing
+is typed back into the terminal, which is the point: the browser does not have
+to be on the machine you are logging in from.
+
+Pass --token, or pipe a token on stdin, to store a token you already hold
+instead. That is unchanged, and it is the whole story on a service with no
+identity provider configured.
 
 The credential is per SERVICE, not per repository: one login covers every
 repository pointing at the same remote, on this machine. Rotating the token
@@ -91,7 +146,7 @@ with a current-user-only ACL on Windows. Set ARK_NO_KEYRING=1 to choose that
 file deliberately and skip the keyring.
 
 Tokens are never written inside the repository, and never passed to another
-process as a command-line argument. Pass --token, or pipe the token on stdin.`,
+process as a command-line argument.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			remote, err := credentialRemote(g, cmd, remoteFlag)
@@ -101,20 +156,27 @@ process as a command-line argument. Pass --token, or pipe the token on stdin.`,
 
 			token, _ := cmd.Flags().GetString("token")
 			if token == "" {
-				// Read one line from stdin (piped or typed).
-				scanner := bufio.NewScanner(os.Stdin)
-				if scanner.Scan() {
-					token = strings.TrimSpace(scanner.Text())
-				}
-			}
-			if token == "" {
-				return records.Validationf("no token provided (use --token or pipe it on stdin)")
+				token = stdinToken(cmd)
 			}
 
-			// Check before storing. Storing an unverified token trades an error
-			// now for a confusing one later, at the next sync, in a different
-			// repository, probably to a different person.
-			if !noVerify {
+			var principal *api.Principal
+			method := loginMethodToken
+			switch {
+			case token == "":
+				// Nothing to store, so go and get something: the device flow,
+				// or a message saying this service has none. Never a blocking
+				// read on a terminal, which is what stood here before the flow
+				// existed and is now indistinguishable from a hang.
+				out, err := deviceLogin(cmd.Context(), remote, deviceNotifier(g, cmd))
+				if err != nil {
+					return err
+				}
+				token, principal, method = out.Token, &out.Principal, loginMethodDevice
+			case !noVerify:
+				// Check before storing. Storing an unverified token trades an
+				// error now for a confusing one later, at the next sync, in a
+				// different repository, probably to a different person. The
+				// device flow needs no such check: the service just minted it.
 				if err := cloud.VerifyToken(cmd.Context(), remote, token); err != nil {
 					return err
 				}
@@ -129,12 +191,17 @@ process as a command-line argument. Pass --token, or pipe the token on stdin.`,
 			p := g.printer(cmd)
 			// storage is the machine-readable half of stored_in: agents branch
 			// on "keyring" vs "file", humans read the keychain's name or a path.
-			return p.Result(map[string]string{
-				"stored_in": where,
-				"storage":   string(src),
-				"remote":    remote,
-				"host":      host,
+			return p.Result(loginReport{
+				StoredIn:  where,
+				Storage:   string(src),
+				Remote:    remote,
+				Host:      host,
+				Method:    method,
+				Principal: principal,
 			}, func() {
+				if principal != nil {
+					p.Line("Logged in as %s", principalLabel(principal))
+				}
 				p.Line("Token stored in %s for %s", where, host)
 				p.Line("Covers every repository on this machine whose remote is %s.", host)
 			})

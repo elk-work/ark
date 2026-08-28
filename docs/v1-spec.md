@@ -1833,9 +1833,10 @@ is recorded at **day** granularity and flushed lazily, so observing who is
 still using which credential does not put a write on every request.
 
 `grants` is created but **not yet consulted**: a valid credential currently
-reaches every route the service token does. Per-repository enforcement,
-the `Mutation.CreatedBy` actor binding, and the device-authorization flow are
-specified in RFC-0003 and are not part of this text yet.
+reaches every route the service token does. Per-repository enforcement and the
+`Mutation.CreatedBy` actor binding are specified in RFC-0003 and are not part
+of this text yet. The device-authorization flow, which is how a person gets a
+credential without already holding one, is §20.1.
 
 `POST /v1/principals` mints a principal and its first credential, and is the
 only route that accepts `ARK_BOOTSTRAP_TOKEN`. The credential is returned in
@@ -1851,6 +1852,94 @@ repository permission
 ```
 
 Agent actions should record both the agent identity and the delegating principal.
+
+---
+
+## 20.1 Device Authorization
+
+How a person gets a credential without already holding one
+(`docs/rfc-0003-elk-issued-credentials.md`, Decision 3). It is an RFC 8628
+device grant rather than an authorization-code flow, chosen because the case
+Ark most needs to work is a developer or an agent on a remote host with no
+local browser: a redirect flow would need the CLI to bind a loopback listener
+and the identity provider to keep a redirect-URI allowlist, and would break
+exactly there.
+
+Three routes, and the flow is **off unless the service is configured for it**:
+`ARK_IDP_APPROVAL_URL` names the page a person approves a code on, and
+`ARK_IDP_KEY` is the shared secret that page's server presents. Unset, all
+three answer `404 not_found` — a self-hoster with no identity provider has no
+device login, and `ark login --token` is unaffected.
+
+```text
+POST /v1/device/code      (unauthenticated)
+  {} → 200 { device_code, user_code, verification_uri,
+             verification_uri_complete, expires_in: 900, interval: 5 }
+
+POST /v1/device/token     (unauthenticated)
+  { device_code }
+  → 428 { code: "pending"  }   not yet approved
+  → 429 { code: "slow_down" }  polled faster than `interval`
+  → 410 { code: "expired"  }   past expires_in, or already redeemed
+  → 200 { token, principal: { id, email, display_name } }
+
+POST /v1/device/approve   (authenticated with ARK_IDP_KEY, server-to-server)
+  { user_code, subject, email, display_name, repository_ids }
+  → 200 {}
+```
+
+- **`user_code` is eight characters of Crockford base32 with the vowels
+  dropped**, rendered `XXXX-XXXX`. Ark already speaks Crockford (§17); losing
+  A and E on top of the letters Crockford already omits removes both
+  confusables and accidental words. It is normalised on arrival — case,
+  spacing, the hyphen, and Crockford's own I/L→1 and O→0 — because it is read
+  off one screen and typed into another.
+- **`device_code` is 32 random bytes, stored as a SHA-256**, like the
+  credential itself. A leaked pending-code store must not be redeemable.
+- **Redemption is one-shot.** The `200` deletes the pending row in the same
+  transaction that mints the credential, so a replayed poll gets `expired`.
+  That is what makes it safe to return a token over an unauthenticated route:
+  possession of the `device_code`, which only the requesting process ever saw,
+  **is** the authentication.
+- **Nothing is minted before redemption.** Approval records the assertion
+  against the pending row and nothing else; the principal, the credential and
+  the seeded grants are all written in the transaction that deletes the row.
+  An approval nobody redeems leaves no trace.
+- **The two unauthenticated routes are unauthenticated because they must be** —
+  the caller holds nothing yet. `/v1/device/approve` is not: it asserts who
+  somebody is, which no client of the service may do, so neither the service
+  token nor a credential reaches it.
+- **Codes live 15 minutes and are polled every 5 seconds.** A client that
+  polls faster is answered `slow_down` before the store is read, which is the
+  point of the limit. The client gives up at the expiry with a message that
+  says to run `ark login` again, not with a bare timeout.
+
+**Grants may be seeded at approval, and only there.** The identity provider
+may assert, alongside the verified email, the ark repository ids this
+principal may read; the service writes them as ordinary `read` rows in
+`grants` — the same table, on the same terms, so when enforcement lands there
+is nothing special about a seeded grant. (§20: `grants` is not yet consulted,
+so seeding today records an intention rather than confining anybody.) Ark
+never learns what the list was computed from, and nothing on the request path
+calls the identity provider. Two properties are load-bearing (RFC-0003,
+resolved decision 2):
+
+- **Seeding runs on every login**, not only the first, or a repository bound
+  after somebody paired would be invisible to them forever.
+- **Seeding only ever adds `read`.** It never removes a grant and never grants
+  `write`, so a membership change at the identity provider cannot revoke Ark
+  access as a side effect — revocation stays an explicit act.
+
+**Discovery is `GET /`**, which is already unauthenticated and already returns
+a service banner. It gains an `auth` object — `device_flow`, and
+`approval_url` when there is one — and `ark login` reads it and picks its mode.
+That is the whole mechanism: no client configuration, and nothing written down
+on the machine.
+
+`ark login` with no arguments runs the flow, prints the code and the URL,
+polls, and stores the credential exactly as it stores a pasted one. `--token`,
+the stdin path and `--remote` are unchanged, and a service reporting no device
+flow is told so plainly rather than left to time out.
 
 ---
 
