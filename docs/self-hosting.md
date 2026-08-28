@@ -749,7 +749,7 @@ the old one:
 - **A restore does not race with a lost CAS.** A lost race refetches and
   reruns the request, which is what a restore looks like from the inside.
 
-#### The two failure modes look different, and one of them is quiet
+#### The two failure modes look different, and both of them say so
 
 **A deleted object** answers `404 not_found` on pull and on push, and keeps
 answering it. A client that has already synced the repository sends its
@@ -763,17 +763,32 @@ it, and the good generation stops being pushed further down the listing by
 each sync. What you cannot do is leave it: nothing recovers on its own, and
 every client of that repository is stopped until you restore.
 
-**A corrupted object** answers `500` with `{"code":"internal","message":"pull
-failed"}`, and clients report exit 6 with `server error: pull failed`,
-which reads like a transient outage. The real error is only in the
-service's own logs — `apply schema: database disk image is malformed` for a
-truncated object, `sql: no rows in result set` for a zero-length one. **A
-repository that is "offline" for one client and fine for others is a
-corrupt object until proven otherwise; read the service's logs.** A
-zero-length object is the nastier case: SQLite reads it as a valid empty
-database, so it behaves exactly like a deletion — including to the
-registration refusal, which treats a stored database with no repository row
-in it the same as no database at all.
+**A corrupted object** — bytes that will not open as a SQLite database —
+answers `500`, but with the code `repository_corrupt`, and the client prints
+what is actually wrong:
+
+```text
+repository 01M13YJT…: its stored database will not open: apply schema:
+database disk image is malformed (11) — restore this repository's stored
+database from a copy; retrying will not clear it
+```
+
+Exit **8**, and it has its own code precisely so that a retry loop cannot
+mistake it for weather. The three things a sync can say about the service are
+now distinct: **6** could not reach it, **7** reached it and *this checkout*
+needs repair, **8** reached it and *its storage* does. The service still logs
+the underlying SQLite error, but you no longer have to go and read it — that
+trip was the defect (elk-work/ark#65). A 500 that will keep being a 500 until
+a person acts is not the same state as a socket that will not open, and the
+two must not share an exit code, because 6 is the one retry loops key on.
+
+**A zero-length object is the neighbouring case, and it lands somewhere
+else.** SQLite reads it as a perfectly valid empty database, so nothing fails
+to open and `repository_corrupt` never fires. What is absent is the repository
+row — which registration treats exactly as it treats no database at all, so
+this one is a `404`, exit 7, and a history reset. The damaged object stays
+where it is for you to restore over; nothing adopts it and nothing empties it
+further.
 
 #### Two things that are not restored with it
 
