@@ -89,6 +89,15 @@ a current-user-only ACL. It never falls back silently, and `ark status` reports
 which store the token came from. Set `ARK_NO_KEYRING=1` to choose the file
 deliberately.
 
+That paragraph is tested rather than asserted. Ark's Windows CI job stores a
+throwaway credential in the runner's real Credential Manager, reads it back,
+overwrites it, deletes it, confirms the deleted entry reads as a miss, and has
+a **separate process** read the secret out again — the property `ark login` in
+one terminal and `ark sync` in another depends on, and the one an in-memory
+test double can never show. It then runs the `ark login` and `ark status` code
+paths themselves against that store. Up to v0.6.0 this platform was verified
+only to compile, vet and pass against a fake keyring (elk-work/ark#38).
+
 Tokens are never stored inside the project. For CI and coding agents, set
 `ARK_TOKEN` in the process environment instead:
 
@@ -132,6 +141,24 @@ go vet ./...
 
 Ark's tests create temporary Git repositories and SQLite databases and do not
 need a cloud account or a C toolchain.
+
+### The live Credential Manager tests
+
+`go test ./...` never touches your own credentials: the keyring tests
+substitute a fake, so that a locked or denied store can be simulated at all and
+so a test run cannot read or write your real logins. The tests that drive
+Credential Manager itself are the same suite with one variable set:
+
+```powershell
+$env:ARK_KEYRING_LIVE = '1'
+go test -run TestLive -v ./internal/cloud
+```
+
+These write real entries — under a throwaway service name with a random
+per-run suffix, never the `ark` name your own credentials live under — and
+delete them again however the test ends. Run them when you change anything
+under `internal/cloud`; CI runs them on every pull request on Windows, Linux
+and macOS.
 
 ## Run a local sync service
 
