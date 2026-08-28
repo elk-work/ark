@@ -49,6 +49,26 @@ type Credential struct {
 	Source TokenSource
 }
 
+// ErrCredentialsUnreadable marks the one credential state a person has to
+// repair rather than simply fill in: the fallback file is there and will not
+// read, so whether it holds a token for the host is unknown. Every command on
+// this path already words the two differently (§20); this makes the difference
+// matchable, so a caller can act on it without reading the message. `ark
+// status` is the caller that needed it — reporting the source as "none" made a
+// damaged file look like a machine that had never logged in (#63).
+var ErrCredentialsUnreadable = errors.New("credentials file could not be read")
+
+// unreadableCredentials tags a resolution failure as ErrCredentialsUnreadable
+// while leaving the decoder's own complaint — the part carrying the line
+// number — as the message and the unwrap target. fmt.Errorf("%w: %w", …) would
+// have prefixed the sentinel's words onto a sentence that already says all of
+// this in the terms the user needs.
+type unreadableCredentials struct{ err error }
+
+func (u unreadableCredentials) Error() string        { return u.err.Error() }
+func (u unreadableCredentials) Unwrap() error        { return u.err }
+func (u unreadableCredentials) Is(target error) bool { return target == ErrCredentialsUnreadable }
+
 // RemoteHost normalizes a remote URL to the host a credential is filed under.
 // Exported because the scope of a credential is user-facing: `ark login` tells
 // you which host it covers, which is how you know one login was enough.
@@ -95,7 +115,7 @@ func ResolveCredential(remote string) (Credential, error) {
 		return Credential{Source: SourceNone}, &records.Error{Kind: records.KindPermission,
 			Message: fmt.Sprintf("no credentials for %s: %s could not be read, so whether it holds a token for that host is unknown — repair that file, or move it aside and run `ark login` again",
 				host, credentialsPath()),
-			Err: err}
+			Err: unreadableCredentials{err}}
 	}
 	if tok != "" {
 		return Credential{Token: tok, Source: SourceFile}, nil

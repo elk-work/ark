@@ -1430,6 +1430,19 @@ Commands report which store answered. `ark login` names where it wrote the
 token; `ark status` names where the token resolved from; `ark logout` names
 the stores it emptied. None of them prints the token itself (§21).
 
+`ark status` must also report a store it **could not read**, and not as an
+absence. Its `--json` output carries two fields for this: `token_source` — the
+store that answered, `env`, `keyring`, `file`, or `none` — and
+`token_source_error`, the resolution failure verbatim when there was one a
+person has to act on. The source stays `none` in that case, because nothing
+did resolve and the field is a stable interface; the diagnosis arrives beside
+it rather than as a new value inside it. `token_source_error` is unset on a
+machine that has simply never logged in, which is the ordinary state and needs
+no diagnosis, and unset for a keyring that is locked or absent, which
+resolution has already announced on the standard error stream. Its text is the
+sentence `ark sync` refuses with, so the two commands do not describe one
+condition in two vocabularies.
+
 The client must also be able to remove a credential it stored. `ark logout`
 is host-scoped, the way `ark login` is, and clears **both** stores for that
 host: the keyring entry and any entry in the fallback file. Removing only the

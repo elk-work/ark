@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -48,6 +49,28 @@ type statusReport struct {
 	// because reading one out of a plaintext file is a different state from
 	// reading one out of the keychain. Never the token itself.
 	TokenSource string `json:"token_source,omitempty"`
+	// TokenSourceError is why nothing resolved, in the one case where that is
+	// a state to repair rather than a blank to fill in: ~/.ark/credentials.toml
+	// exists and will not parse, so whether it holds a token for this remote is
+	// unknown (#63). `ark login`, `ark logout` and `ark sync` all refuse and
+	// name that file; status, whose whole job is to say what state this
+	// checkout is in, was the only command that reported it as "never logged
+	// in" — honest about what resolved and useless to the person most likely to
+	// be reading it.
+	//
+	// token_source stays "none" beside it. It is a stable interface and it is
+	// not wrong: nothing did resolve. The diagnosis is an addition, not a new
+	// value inside a field agents already match on.
+	//
+	// Empty for a machine that has simply never logged in — "run `ark login`"
+	// is the whole of that state, and status already says it. Empty too for a
+	// keyring that is locked or absent: resolution warns about that on stderr
+	// as it happens, which is where §20 puts it and where a reader will see it
+	// whether or not they asked for --json.
+	//
+	// The text is the resolution error verbatim, which is the sentence `ark
+	// sync` prints when it refuses for this reason. One condition, one wording.
+	TokenSourceError string `json:"token_source_error,omitempty"`
 }
 
 func newStatusCmd(g *globals) *cobra.Command {
@@ -76,11 +99,17 @@ func newStatusCmd(g *globals) *cobra.Command {
 			// Resolving here can warn on stderr that the keyring is locked or
 			// absent, which is exactly where someone would want to hear it. A
 			// missing credential is not a status failure — it is a state to
-			// report — so the error is deliberately dropped for the source.
+			// report — so the error never stops the command. It is no longer
+			// dropped, though: one of the ways it can fail is a state the user
+			// has to act on, and status is where they will look for it.
 			tokenAt := cloud.SourceNone
 			if rep.Remote != "" {
-				if cred, err := cloud.ResolveCredential(rep.Remote); err == nil {
+				cred, err := cloud.ResolveCredential(rep.Remote)
+				switch {
+				case err == nil:
 					tokenAt = cred.Source
+				case errors.Is(err, cloud.ErrCredentialsUnreadable):
+					rep.TokenSourceError = err.Error()
 				}
 				rep.TokenSource = string(tokenAt)
 			}
@@ -129,10 +158,17 @@ func newStatusCmd(g *globals) *cobra.Command {
 					p.Line("sync        no remote configured; %s recorded", queue)
 				} else {
 					p.Line("sync        %s (%s)", rep.Remote, queue)
-					switch tokenAt {
-					case cloud.SourceNone:
+					switch {
+					// Before the source, because it is the reason there is
+					// none — and not with "run `ark login`" appended, which is
+					// the advice for a machine holding nothing and here is the
+					// command that would overwrite the file (#62). The message
+					// carries its own repair.
+					case rep.TokenSourceError != "":
+						p.Line("token       %s", rep.TokenSourceError)
+					case tokenAt == cloud.SourceNone:
 						p.Line("token       none — run `ark login`")
-					case cloud.SourceFile:
+					case tokenAt == cloud.SourceFile:
 						p.Line("token       %s (plaintext fallback)", tokenAt.Description())
 					default:
 						p.Line("token       %s", tokenAt.Description())

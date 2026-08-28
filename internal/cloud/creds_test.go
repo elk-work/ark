@@ -279,6 +279,11 @@ func TestACredentialsFileThatWillNotReadIsNotNoCredentials(t *testing.T) {
 	if !strings.Contains(err.Error(), path) {
 		t.Errorf("error %q does not name the unreadable file; it reads as `nothing is stored`", err)
 	}
+	// And matchable without reading the message, so `ark status` can report
+	// this state without matching on prose (#63).
+	if !errors.Is(err, ErrCredentialsUnreadable) {
+		t.Errorf("error %v does not match ErrCredentialsUnreadable", err)
+	}
 }
 
 // TestAMissingCredentialsFileIsAnOrdinaryFirstLogin is the other half of the
@@ -302,6 +307,11 @@ func TestAMissingCredentialsFileIsAnOrdinaryFirstLogin(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "could not be read") {
 		t.Errorf("a file that is simply not there was reported as unreadable: %v", err)
+	}
+	// The other direction of the sentinel: absence must not match, or every
+	// caller that keys on it treats a first login as damage.
+	if errors.Is(err, ErrCredentialsUnreadable) {
+		t.Errorf("an absent credentials file matched ErrCredentialsUnreadable: %v", err)
 	}
 
 	src, err := StoreToken(credsTestRemote, "first-token")
