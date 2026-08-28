@@ -910,6 +910,16 @@ non-empty set is always a current statement about what this checkout cannot
 yet see, which is why it needs no `resolved_at` — the record and its referent
 are one lookup apart, and the comparison is true whenever it is made.
 
+**`ark status` reports the count**, as `held_records` in `--json` — unset when
+there are none — and as its own line in the human rendering, worded as waiting
+rather than as divergence. Self-clearing is why the line is phrased that way;
+it is not why the line can be omitted. The set drains only if the referent
+arrives, and the service accepts a child whose parent it does not hold by
+decision (§9.1), so a held record is the client-side face of a dangling
+reference the service has already recorded. Where that parent is never coming,
+this count is the only thing on the client that says so
+(elk-work/ark#89).
+
 **The check reads its references from the schema**, not from a list of them
 kept beside it. A written list is a second copy of the schema, and the way a
 second copy fails is that a migration adds a foreign key to the first and
