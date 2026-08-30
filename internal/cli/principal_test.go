@@ -34,6 +34,10 @@ type principalResult struct {
 		ID    string `json:"id"`
 		Kind  string `json:"kind"`
 		Email string `json:"email"`
+		// OperatorSince is set on a principal entitled to the two
+		// service-wide acts (elk-work/ark#94). Its presence is what makes
+		// one, so the mirror carries the field rather than a boolean.
+		OperatorSince string `json:"operator_since"`
 	} `json:"principal"`
 	Created      bool   `json:"created"`
 	Token        string `json:"token"`

@@ -32,6 +32,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,14 +76,15 @@ const credentialLifetime = 365 * 24 * time.Hour
 // moment and not before.
 const authSchema = `
 CREATE TABLE IF NOT EXISTS principals (
-	id           TEXT PRIMARY KEY,
-	kind         TEXT NOT NULL,
-	issuer       TEXT NOT NULL DEFAULT '',
-	subject      TEXT NOT NULL DEFAULT '',
-	email        TEXT NOT NULL DEFAULT '',
-	display_name TEXT NOT NULL DEFAULT '',
-	created_at   TEXT NOT NULL,
-	disabled_at  TEXT
+	id             TEXT PRIMARY KEY,
+	kind           TEXT NOT NULL,
+	issuer         TEXT NOT NULL DEFAULT '',
+	subject        TEXT NOT NULL DEFAULT '',
+	email          TEXT NOT NULL DEFAULT '',
+	display_name   TEXT NOT NULL DEFAULT '',
+	created_at     TEXT NOT NULL,
+	disabled_at    TEXT,
+	operator_since TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS principals_email ON principals (email) WHERE email <> '';
 
@@ -94,7 +96,8 @@ CREATE TABLE IF NOT EXISTS credentials (
 	created_at   TEXT NOT NULL,
 	expires_at   TEXT,
 	last_used_on TEXT,
-	revoked_at   TEXT
+	revoked_at   TEXT,
+	revoked_by   TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS credentials_principal ON credentials (principal_id);
 
@@ -135,16 +138,27 @@ type authPrincipal struct {
 	DisplayName string
 	CreatedAt   string
 	DisabledAt  string
+	// OperatorSince is set on an operator and empty on everybody else. It is
+	// its own column rather than a value of Kind because Kind describes what
+	// holds the credential — a human or an agent — and describes it for a
+	// reason Decision 5 depends on. See operators.go.
+	OperatorSince string
 }
+
+// Operator reports whether this principal may perform a service-wide act.
+func (p authPrincipal) Operator() bool { return p.OperatorSince != "" }
 
 // authCredential is a credentials row, minus the credential: only its
 // SHA-256 is ever stored, so this struct cannot leak one.
 type authCredential struct {
 	ID          string
 	PrincipalID string
+	Label       string
+	CreatedAt   string
 	ExpiresAt   string
 	LastUsedOn  string
 	RevokedAt   string
+	RevokedBy   string
 }
 
 // authSnapshot is one read of auth.db, held in memory for up to authTTL.
@@ -241,7 +255,49 @@ func openAuthDB(path string) (*sql.DB, error) {
 		db.Close()
 		return nil, fmt.Errorf("apply auth schema: %w", err)
 	}
+	// `CREATE TABLE IF NOT EXISTS` adds columns to a table that does not
+	// exist yet and to no other, so a store created before a column was
+	// declared never grows it. Every auth.db in existence predates
+	// elk-work/ark#94; addColumns is what brings those forward, and it is the
+	// whole of the upgrade — there is no deploy step and no downtime, because
+	// it runs on the next read or write like the schema above it.
+	if err := addColumns(db, authColumns); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("apply auth schema: %w", err)
+	}
 	return db, nil
+}
+
+// authColumns is every column added to auth.db after it first shipped, as a
+// table name and the column clause that defines it.
+//
+// New columns must also appear in authSchema, for a store being created
+// today, and here, for one that already exists. Both, always: the first
+// covers a fresh deployment and the second covers every deployment there is.
+var authColumns = [][2]string{
+	// elk-work/ark#94: who may act on the service as a whole, and who
+	// retired a credential. See operators.go.
+	{"principals", "operator_since TEXT"},
+	{"credentials", "revoked_by TEXT NOT NULL DEFAULT ''"},
+}
+
+// addColumns applies each column, tolerating the one it has already applied.
+//
+// SQLite has no `ADD COLUMN IF NOT EXISTS`, and the alternative — reading
+// `pragma table_info` and diffing — is more code to get wrong for the same
+// answer. A duplicate-column error is the success case on the second run, and
+// it is matched on its message because modernc.org/sqlite reports it as a
+// generic error rather than as a distinguishable code.
+func addColumns(db *sql.DB, columns [][2]string) error {
+	for _, c := range columns {
+		table, clause := c[0], c[1]
+		_, err := db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s", table, clause))
+		if err == nil || strings.Contains(err.Error(), "duplicate column name") {
+			continue
+		}
+		return fmt.Errorf("add %s.%s: %w", table, clause, err)
+	}
+	return nil
 }
 
 // snapshot returns a view of auth.db no older than the TTL.
@@ -314,13 +370,14 @@ func (a *authStore) load(ctx context.Context) (*authSnapshot, error) {
 	snap := emptySnapshot()
 	snap.generation = gen
 	rows, err := db.QueryContext(ctx, `SELECT id, kind, email, display_name, created_at,
-		COALESCE(disabled_at, '') FROM principals`)
+		COALESCE(disabled_at, ''), COALESCE(operator_since, '') FROM principals`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var p authPrincipal
-		if err := rows.Scan(&p.ID, &p.Kind, &p.Email, &p.DisplayName, &p.CreatedAt, &p.DisabledAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Kind, &p.Email, &p.DisplayName, &p.CreatedAt,
+			&p.DisabledAt, &p.OperatorSince); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -332,15 +389,17 @@ func (a *authStore) load(ctx context.Context) (*authSnapshot, error) {
 	}
 	rows.Close()
 
-	rows, err = db.QueryContext(ctx, `SELECT id, principal_id, token_sha256,
-		COALESCE(expires_at, ''), COALESCE(last_used_on, ''), COALESCE(revoked_at, '') FROM credentials`)
+	rows, err = db.QueryContext(ctx, `SELECT id, principal_id, token_sha256, label, created_at,
+		COALESCE(expires_at, ''), COALESCE(last_used_on, ''), COALESCE(revoked_at, ''),
+		COALESCE(revoked_by, '') FROM credentials`)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var c authCredential
 		var hash string
-		if err := rows.Scan(&c.ID, &c.PrincipalID, &hash, &c.ExpiresAt, &c.LastUsedOn, &c.RevokedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.PrincipalID, &hash, &c.Label, &c.CreatedAt,
+			&c.ExpiresAt, &c.LastUsedOn, &c.RevokedAt, &c.RevokedBy); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -473,6 +532,7 @@ func (a *authStore) verify(ctx context.Context, presented string) (*authenticate
 		Kind:         p.Kind,
 		Email:        p.Email,
 		CredentialID: cred.ID,
+		Operator:     p.Operator(),
 	}, nil
 }
 
@@ -528,8 +588,13 @@ func (a *authStore) flushUsage(ctx context.Context) error {
 // mintedCredential is what createPrincipal hands back: the plaintext exactly
 // once, and enough about the principal to print a useful line.
 type mintedCredential struct {
-	Principal    authPrincipal
-	Created      bool
+	Principal authPrincipal
+	Created   bool
+	// Promoted reports that this call made the principal an operator, as
+	// against finding one that already was. It is what the log line and the
+	// CLI say out loud, because becoming an operator is the one thing here
+	// that changes what somebody may do to the whole service.
+	Promoted     bool
 	Token        string
 	CredentialID string
 	ExpiresAt    string
@@ -543,7 +608,14 @@ type mintedCredential struct {
 // working break-glass — the one recovery path that does not depend on auth.db
 // being readable — without withholding anything. A *disabled* principal is the
 // exception: re-crediting it would undo the disabling.
-func (a *authStore) createPrincipal(ctx context.Context, req api.CreatePrincipalRequest) (*mintedCredential, error) {
+//
+// `req.Operator` promotes, and `promoteIfFirst` is the bootstrap rule: on a
+// service with no operator at all, the principal minted here becomes the
+// first one. Both are evaluated inside the transaction, because "is there an
+// operator yet" is a question about the copy of auth.db this attempt is
+// actually writing — the closure reruns after a lost compare-and-swap, and on
+// that rerun somebody else may have become the first operator.
+func (a *authStore) createPrincipal(ctx context.Context, req api.CreatePrincipalRequest, promoteIfFirst bool) (*mintedCredential, error) {
 	token, hash, err := mintCredential()
 	if err != nil {
 		return nil, err
@@ -570,8 +642,8 @@ func (a *authStore) createPrincipal(ctx context.Context, req api.CreatePrincipal
 			CreatedAt:   createdAt,
 		}
 		err := tx.QueryRowContext(ctx, `SELECT id, kind, display_name, created_at,
-			COALESCE(disabled_at, '') FROM principals WHERE email = ?`, req.Email).
-			Scan(&p.ID, &p.Kind, &p.DisplayName, &p.CreatedAt, &p.DisabledAt)
+			COALESCE(disabled_at, ''), COALESCE(operator_since, '') FROM principals WHERE email = ?`, req.Email).
+			Scan(&p.ID, &p.Kind, &p.DisplayName, &p.CreatedAt, &p.DisabledAt, &p.OperatorSince)
 		switch {
 		case errors.Is(err, sql.ErrNoRows):
 			if _, err := tx.ExecContext(ctx, `INSERT INTO principals
@@ -585,6 +657,34 @@ func (a *authStore) createPrincipal(ctx context.Context, req api.CreatePrincipal
 			return err
 		case p.DisabledAt != "":
 			return errPrincipalDisabled
+		}
+
+		// Promotion, and the bootstrap rule that seeds the first operator.
+		//
+		// `promoteIfFirst` fires only while the service has no operator at
+		// all, which is what keeps ARK_BOOTSTRAP_TOKEN from being an operator
+		// identity: it can mint principals forever, and it can hand out the
+		// authority exactly once, before anybody holds it. After that the
+		// only way to make an operator is to already be one.
+		if !p.Operator() && (req.Operator || promoteIfFirst) {
+			promote := req.Operator
+			if !promote {
+				var operators int
+				if err := tx.QueryRowContext(ctx,
+					`SELECT count(*) FROM principals WHERE operator_since IS NOT NULL`).
+					Scan(&operators); err != nil {
+					return err
+				}
+				promote = operators == 0
+			}
+			if promote {
+				if _, err := tx.ExecContext(ctx, `UPDATE principals SET operator_since = ?
+					WHERE id = ? AND operator_since IS NULL`, createdAt, p.ID); err != nil {
+					return err
+				}
+				p.OperatorSince = createdAt
+				out.Promoted = true
+			}
 		}
 
 		if _, err := tx.ExecContext(ctx, `INSERT INTO credentials

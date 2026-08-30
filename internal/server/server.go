@@ -88,8 +88,17 @@ func (s *Server) Handler() http.Handler {
 	})
 	// Bootstrap: the one route authenticated by ARK_BOOTSTRAP_TOKEN rather
 	// than by a bearer, so a deployment can mint its first credential without
-	// already holding one. See auth.go.
+	// already holding one. It also takes an operator's own credential, which
+	// is how operators are made after the first. See auth.go.
 	mux.HandleFunc("POST /v1/principals", s.handleCreatePrincipal)
+	// The two service-wide acts (elk-work/ark#94, D116). Listing principals
+	// is operator-only; revoking is an operator, or the holder retiring their
+	// own credential. `GET /v1/credentials` is the self-service half of the
+	// second: a credential is revoked by an id, and this is where its holder
+	// finds it. See operators.go.
+	mux.HandleFunc("GET /v1/principals", s.auth(s.handleListPrincipals))
+	mux.HandleFunc("GET /v1/credentials", s.auth(s.handleListCredentials))
+	mux.HandleFunc("POST /v1/credentials/{id}/revoke", s.auth(s.handleRevokeCredential))
 	// Device login (RFC-0003 Decision 3, spec §20.1). The first two are
 	// unauthenticated because the caller holds nothing to authenticate with
 	// yet; the third has its own key, ARK_IDP_KEY. See device.go.

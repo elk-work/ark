@@ -37,6 +37,12 @@ type authenticated struct {
 	Kind         string
 	Email        string
 	CredentialID string
+	// Operator is set on a principal entitled to the two service-wide acts:
+	// listing principals and revoking any credential (elk-work/ark#94, D116).
+	// It is never set for the legacy service token — see operators.go for why
+	// the one string the whole fleet holds is deliberately not an authority
+	// over the service.
+	Operator bool
 	// Legacy marks the shared service token. It carries implicit write on
 	// every repository, which is exactly what the token does today; when
 	// grants are enforced (elk-work/ark#52) this is the flag that says "skip
@@ -156,20 +162,21 @@ func rejectionMessage(err error) string {
 
 // handleCreatePrincipal mints a principal and its first credential.
 //
-// It is the only route that accepts ARK_BOOTSTRAP_TOKEN, and it is what makes
-// per-principal credentials work with no identity provider anywhere: a
-// self-hoster sets one random string, exactly as they set ARK_API_TOKEN today,
-// and gets a real credential out. It is also the break-glass, which is why its
-// authentication deliberately does not depend on auth.db being readable.
+// It is the only route that accepts ARK_BOOTSTRAP_TOKEN — Decision 6, and
+// unchanged by elk-work/ark#94 — and it is what makes per-principal
+// credentials work with no identity provider anywhere: a self-hoster sets one
+// random string, exactly as they set ARK_API_TOKEN today, and gets a real
+// credential out. It is also the break-glass, which is why the bootstrap
+// branch deliberately does not depend on auth.db being readable.
+//
+// Since #94 it accepts a second bearer: an **operator's own credential**.
+// That is not a change to Decision 6, which says where the bootstrap token is
+// accepted and not what else that route may accept — and it is what lets
+// operators be made by operators rather than by whoever holds an environment
+// variable. Every other bearer is refused here exactly as before.
 func (s *Server) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
-	if s.BootstrapToken == "" {
-		writeErr(w, http.StatusUnauthorized, "permission",
-			"bootstrap is not enabled on this service (ARK_BOOTSTRAP_TOKEN is unset)")
-		return
-	}
-	presented := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-	if subtle.ConstantTimeCompare([]byte(presented), []byte(s.BootstrapToken)) != 1 {
-		writeErr(w, http.StatusUnauthorized, "permission", "invalid or missing bootstrap token")
+	who, viaBootstrap, ok := s.authenticateMint(w, r)
+	if !ok {
 		return
 	}
 
@@ -189,8 +196,32 @@ func (s *Server) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "validation", `kind must be "human" or "agent"`)
 		return
 	}
+	if req.Operator && viaBootstrap {
+		// Refused rather than quietly ignored, and the message states the
+		// rule it is enforcing: the bootstrap token seeds the first operator
+		// automatically and cannot appoint another, which is the whole reason
+		// a shared secret is not an operator identity (operators.go).
+		writeErr(w, http.StatusForbidden, "permission",
+			"the bootstrap token cannot appoint an operator. The first principal on a service with no "+
+				"operator becomes one automatically; after that an operator adds another with their own "+
+				"credential (`ark principal create --operator`)")
+		return
+	}
 
-	minted, err := s.authStore().createPrincipal(r.Context(), req)
+	// Bootstrap promotes only into a vacuum. Asked here as well as inside the
+	// transaction so the log line can say which rule fired; the transaction is
+	// what actually decides, because it is the copy being written.
+	promoteIfFirst := false
+	if viaBootstrap {
+		has, err := s.authStore().hasOperator(r.Context())
+		if err != nil {
+			s.internal(w, "read operators", err)
+			return
+		}
+		promoteIfFirst = !has
+	}
+
+	minted, err := s.authStore().createPrincipal(r.Context(), req, promoteIfFirst)
 	if errors.Is(err, errPrincipalDisabled) {
 		writeErr(w, http.StatusConflict, "conflict",
 			"a disabled principal already holds that email; re-enable it rather than reissuing")
@@ -201,21 +232,66 @@ func (s *Server) handleCreatePrincipal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.Log != nil {
-		// The principal, never the credential (spec §21).
+		// The principal, never the credential (spec §21). `issued_by` is the
+		// named operator where there was one and the bootstrap token where
+		// there was not — the second only ever appears on a service that had
+		// no operator to name.
+		issuedBy := "bootstrap-token"
+		if !viaBootstrap {
+			issuedBy = who.ID
+		}
 		s.Log.Info("principal credential issued", "principal", minted.Principal.ID,
-			"credential", minted.CredentialID, "created", minted.Created)
+			"credential", minted.CredentialID, "created", minted.Created,
+			"issued_by", issuedBy, "promoted_to_operator", minted.Promoted,
+			"first_operator", minted.Promoted && viaBootstrap)
 	}
 	writeJSON(w, api.CreatePrincipalResponse{
-		Principal: api.Principal{
-			ID:          minted.Principal.ID,
-			Kind:        minted.Principal.Kind,
-			Email:       minted.Principal.Email,
-			DisplayName: minted.Principal.DisplayName,
-			CreatedAt:   minted.Principal.CreatedAt,
-		},
+		Principal:    apiPrincipal(minted.Principal),
 		Created:      minted.Created,
 		Token:        minted.Token,
 		CredentialID: minted.CredentialID,
 		ExpiresAt:    minted.ExpiresAt,
 	})
+}
+
+// authenticateMint resolves who may mint on POST /v1/principals: the
+// bootstrap token, or an operator's credential. It writes its own refusal.
+//
+// The bootstrap comparison comes first and is unchanged, so a deployment
+// whose auth.db is absent, stale or unreachable can still reach a credential
+// — the property that makes this route the break-glass.
+func (s *Server) authenticateMint(w http.ResponseWriter, r *http.Request) (*authenticated, bool, bool) {
+	presented := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if s.BootstrapToken != "" &&
+		subtle.ConstantTimeCompare([]byte(presented), []byte(s.BootstrapToken)) == 1 {
+		return nil, true, true
+	}
+	// Only an `arkc_` bearer can be an operator's credential, so nothing else
+	// costs a read of the credential store — the same rule s.authenticate
+	// follows, and for the same reason.
+	if strings.HasPrefix(presented, credentialPrefix) {
+		who, err := s.authStore().verify(r.Context(), presented)
+		switch {
+		case err == nil && who.Operator:
+			return who, false, true
+		case err == nil:
+			writeErr(w, http.StatusForbidden, "permission",
+				principalLabel(who)+" is not an operator, and minting a principal is an operator act. "+
+					"The service's ARK_BOOTSTRAP_TOKEN mints one without an operator")
+			return nil, false, false
+		case !isAuthRejection(err):
+			s.internal(w, "authenticate", err)
+			return nil, false, false
+		default:
+			writeErr(w, http.StatusUnauthorized, "permission", rejectionMessage(err))
+			return nil, false, false
+		}
+	}
+	if s.BootstrapToken == "" {
+		writeErr(w, http.StatusUnauthorized, "permission",
+			"bootstrap is not enabled on this service (ARK_BOOTSTRAP_TOKEN is unset)")
+		return nil, false, false
+	}
+	writeErr(w, http.StatusUnauthorized, "permission", "invalid or missing bootstrap token")
+	return nil, false, false
 }

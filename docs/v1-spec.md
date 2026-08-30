@@ -1693,6 +1693,9 @@ Minimum endpoints:
 
 ```text
 POST /v1/principals
+GET  /v1/principals
+GET  /v1/credentials
+POST /v1/credentials/{id}/revoke
 POST /v1/device/code
 POST /v1/device/token
 POST /v1/device/approve
@@ -1738,7 +1741,15 @@ Google Cloud Storage
 service issued or was configured with as `ARK_API_TOKEN`. It takes
 `ARK_BOOTSTRAP_TOKEN` and mints a principal and its first credential, so a
 deployment can reach a per-person credential without already holding one
-(§20). Unset, the route refuses everything.
+(§20). Unset, the route refuses everything — unless an **operator** presents
+their own credential, which is the second bearer that route accepts and the
+only way to make another operator (§20.2).
+
+The other three principal and credential routes are the two service-wide acts:
+`GET /v1/principals` is the roster and is operator-only, `GET /v1/credentials`
+is the caller's own credentials and is not, and
+`POST /v1/credentials/{id}/revoke` retires one — an operator on anybody's, a
+holder on their own. §20.2 is the contract.
 
 `POST /v1/repositories` registers a repository idempotently and carries this
 checkout's actors alongside its metadata. It is the only call every sync makes
@@ -2089,7 +2100,8 @@ how a person gets a credential without already holding one, is §20.1, and the
 `POST /v1/principals` mints a principal and its first credential, and is the
 only route that accepts `ARK_BOOTSTRAP_TOKEN`. The credential is returned in
 plaintext exactly once; nothing recovers it afterwards, and reissuing is the
-supported repair.
+supported repair. Its **id** is recoverable, which is what a revocation names —
+see §20.2, which also says who may revoke and who may see the roster.
 
 The cloud service must identify:
 
@@ -2191,6 +2203,53 @@ on the machine.
 polls, and stores the credential exactly as it stores a pasted one. `--token`,
 the stdin path and `--remote` are unchanged, and a service reporting no device
 flow is told so plainly rather than left to time out.
+
+---
+
+## 20.2 Operators
+
+Two acts are about the service rather than about a repository: listing
+principals, and revoking a credential. The three grant levels of §19.2 have
+nothing to say about either, and `ARK_BOOTSTRAP_TOKEN` is confined to one route
+by design, so an authorization model was owed. It is an **operator**
+(`docs/rfc-0003-elk-issued-credentials.md`, Amendment 1).
+
+An operator is an ordinary principal with `operator_since` set. It has a name,
+it holds a credential of its own, and that credential is revoked through the
+same route it uses to revoke anybody else's. Authority is its own column and
+never a value of `kind`, which says what holds a credential — a human or an
+agent — and is relied on for that.
+
+**The first operator comes from the bootstrap token, and only into a vacuum.**
+`POST /v1/principals` promotes the principal it mints while the service has no
+operator at all. After that `ARK_BOOTSTRAP_TOKEN` mints but cannot promote, and
+asking it to is refused rather than ignored. Every operator after the first is
+made by an operator presenting their own credential to that same route.
+
+**The shared service token is not an operator**, though it carries implicit
+`admin` on every repository. A service-wide act is attributed to somebody, and
+a string the whole fleet holds names nobody.
+
+| Route | Who |
+|---|---|
+| `GET /v1/principals` | an operator — the roster, and the credentials each principal holds |
+| `GET /v1/credentials` | any principal — its own credentials, and nobody else's |
+| `POST /v1/credentials/{id}/revoke` | an operator, or the credential's own holder |
+
+A credential is retired by **id**, and an id is printed once at issue. The two
+listing routes exist so that id is recoverable later: without them revocation
+is a route nobody can address. `GET /v1/credentials` is what makes the
+self-service half work — a lost laptop should not wait on finding an operator —
+and a caller that is not an operator gets the same answer for a credential that
+is not theirs as for one that does not exist.
+
+Neither list ever carries a credential or its digest. Revocation is idempotent:
+revoking one already revoked is a success that changes nothing and says so. It
+takes effect within the credential store's cache TTL (§20), immediately on the
+instance that performed it.
+
+`ark principal list`, `ark credential list` and `ark credential revoke <id>`
+are the CLI; `ark principal create --operator` adds an operator.
 
 ---
 
