@@ -110,7 +110,19 @@ per-repository `read`/`write`/`admin` grants. Scoped as elk-work/ark#43, #52,
   `ARK_IDP_APPROVAL_URL` and `ARK_IDP_KEY` turn it on; unset, there is no
   device login and nothing else changes. Approval may seed `read` grants, and
   seeding only ever adds — it never removes one and never grants `write`.
-- **Not yet.** Retiring the legacy token is #54. Revoking a *credential* and
-  listing principals are service-wide acts the per-repository grant model
-  cannot authorize — #94 has to decide who may perform them before either can
-  be built.
+- **Landed (#94, ruled D116 2026-08-30).** The two service-wide acts, and the
+  identity entitled to them: an **operator** is a principal with
+  `operator_since` set (`internal/server/operators.go`, spec §20.2, RFC-0003
+  Amendment 1). `GET /v1/principals` is the roster and is operator-only;
+  `POST /v1/credentials/{id}/revoke` retires one — an operator on anybody's, a
+  holder on their own; `GET /v1/credentials` is how a holder finds the id to
+  pass. `ark principal list`, `ark credential list|revoke`, and `ark principal
+  create --operator`. The first operator is seeded by `ARK_BOOTSTRAP_TOKEN`
+  into a service that has none, and after that the bootstrap token mints but
+  cannot promote. **The legacy service token is not an operator** — a
+  service-wide act names a person, and the string the fleet shares names
+  nobody.
+- **Not yet.** Retiring the legacy token is #54; the operator above is the
+  replacement break-glass it was waiting for. Nothing yet writes
+  `principals.disabled_at`, and an operator cannot be demoted — both are edits
+  to `auth.db`.

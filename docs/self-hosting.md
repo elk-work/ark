@@ -389,12 +389,44 @@ Revocation is cached for up to **60 seconds** across instances, so a
 revoked credential — or a revoked grant — can keep working for that long.
 On a single-instance deployment it is effectively immediate.
 
-Revoking a **credential** has no command yet: `ark repo grant --revoke`
-takes away a person's access to a repository, which is the revocation the
-grant model can authorize, but retiring the credential itself is a
-service-wide act and the model here is per-repository. Until
-elk-work/ark#94 settles who may act service-wide, the answer is to remove
-their grants, or to edit `auth.db` — it is a file in a bucket.
+### Operators: retiring a credential, and seeing who exists
+
+Two acts are about the service rather than about a repository — listing
+principals and revoking a credential — so the three grant levels above
+cannot authorize either. An **operator** can. It is an ordinary principal
+that may do those two things, with a name and a credential of its own
+rather than a shared secret.
+
+**You already have one.** The first principal minted on a service with no
+operator becomes the operator, so the `ark principal create` above made
+you one. After that the bootstrap token still mints principals and can no
+longer appoint an operator — an operator adds the next one:
+
+```sh
+ark principal create --email alice@example.com --operator   # as an operator, no bootstrap token
+ark principal list                                          # everyone, and every credential
+ark credential list                                         # just your own
+ark credential revoke 01KX9B83TF2FV51C6K04563FQ0
+```
+
+`ark credential list` is the reason revocation is usable at all. A
+credential is retired by id, the id is printed once when it is issued, and
+the machine that had it written down is the machine that went missing —
+so listing is where you find the one to revoke. You may always revoke your
+own; an operator may revoke anybody's.
+
+The shared `ARK_API_TOKEN` is deliberately **not** an operator, even
+though it reaches every repository: these acts are recorded against a
+person, and a string everyone holds names nobody. On a service that has
+somehow ended up with no operator at all, `ARK_BOOTSTRAP_TOKEN` mints one
+— that is the break-glass, and it is the same route it always was.
+
+A revoked credential keeps working for up to **60 seconds** on other
+instances, as above; on the instance that revoked it, immediately.
+
+Two things still have no command and are edits to `auth.db` — it is a file
+in a bucket: **disabling a principal** (`disabled_at`, which the service
+honours and nothing writes) and **demoting an operator**.
 
 ### Logging in without a token
 

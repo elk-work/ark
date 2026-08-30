@@ -202,28 +202,55 @@ func TestBootstrapMintsACredentialAndStoresOnlyItsHash(t *testing.T) {
 	}
 }
 
-// ARK_BOOTSTRAP_TOKEN is accepted on POST /v1/principals and nowhere else, and
-// nothing else is accepted there. Both halves matter: the first keeps a
-// bootstrap secret from becoming a second service token, the second keeps
-// anyone holding a credential from minting more of them (that is a grant, and
-// grants are elk-work/ark#52).
-func TestBootstrapTokenIsAcceptedOnNoOtherRouteAndNothingElseOnThatOne(t *testing.T) {
+// ARK_BOOTSTRAP_TOKEN is accepted on POST /v1/principals and nowhere else.
+// That is Decision 6, and elk-work/ark#94 did not touch it: the operator model
+// exists precisely so that the two new service-wide routes did not have to
+// widen a shared secret.
+//
+// The other half — what else that route accepts — did change, and deliberately.
+// Decision 6 says where the bootstrap token may be presented, not what the
+// route may accept beside it, and an operator minting a principal is the act
+// that keeps operators from being made by whoever holds an environment
+// variable. An ordinary credential still mints nothing.
+func TestBootstrapTokenIsAcceptedOnNoOtherRouteAndOnlyOperatorsMintBeside(t *testing.T) {
 	a := newAuthServer(t)
-	cred := mintCredentialFor(t, a, "me@example.com")
+	// The first principal on a service with no operator becomes the operator,
+	// so the second is the ordinary credential this test needs.
+	operator := mintCredentialFor(t, a, "first@example.com")
+	ordinary := mintCredentialFor(t, a, "me@example.com")
+	if !operator.Principal.Operator() {
+		t.Fatalf("the first principal should be the first operator: %+v", operator.Principal)
+	}
+	if ordinary.Principal.Operator() {
+		t.Fatalf("the second principal should not be an operator: %+v", ordinary.Principal)
+	}
 
-	for _, path := range []string{"/v1/sync/pull", "/v1/sync/push", "/v1/repositories"} {
+	for _, path := range []string{"/v1/sync/pull", "/v1/sync/push", "/v1/repositories",
+		"/v1/credentials/01NOSUCHCREDENTIAL00000000/revoke"} {
 		if rec := doRequestAs(t, a.Server, testBootstrap, "POST", path, `{}`); rec.Code != 401 {
 			t.Errorf("the bootstrap token authenticated %s: %d", path, rec.Code)
 		}
 	}
-	for name, bearer := range map[string]string{
-		"the service token": a.Token,
-		"a credential":      cred.Token,
-		"nothing":           "",
+	for _, path := range []string{"/v1/principals", "/v1/credentials"} {
+		if rec := doRequestAs(t, a.Server, testBootstrap, "GET", path, ""); rec.Code != 401 {
+			t.Errorf("the bootstrap token authenticated GET %s: %d", path, rec.Code)
+		}
+	}
+
+	for name, tc := range map[string]struct {
+		bearer string
+		want   int
+	}{
+		"the service token":        {a.Token, 401},
+		"an ordinary credential":   {ordinary.Token, 403},
+		"nothing":                  {"", 401},
+		"an operator's credential": {operator.Token, 200},
 	} {
-		rec := doRequestAs(t, a.Server, bearer, "POST", "/v1/principals", `{"email":"x@example.com"}`)
-		if rec.Code != 401 {
-			t.Errorf("%s minted a principal: %d %s", name, rec.Code, rec.Body.String())
+		rec := doRequestAs(t, a.Server, tc.bearer, "POST", "/v1/principals",
+			fmt.Sprintf(`{"email":"%s@example.com"}`, strings.ReplaceAll(name, " ", "-")))
+		if rec.Code != tc.want {
+			t.Errorf("%s on POST /v1/principals: %d %s, want %d",
+				name, rec.Code, rec.Body.String(), tc.want)
 		}
 	}
 }

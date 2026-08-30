@@ -34,12 +34,13 @@ where they bite rather than only here:
   waits for the fleet to upgrade before enforcing, which is elk-work/ark#101.
   Delegation is enforced on both kinds throughout. See
   `internal/server/grantsactors.go`.
-- **Revoking a credential has no route.** Decision 2 makes `revoked_at` the
-  revocation mechanism and the verifier honours it, but it is a service-wide
-  act and Decision 4's grants are per-repository, so nothing in the model
-  above says who may perform one. Decision 6 confines `ARK_BOOTSTRAP_TOKEN`
-  to `POST /v1/principals`, so it cannot be the answer without amending that.
-  elk-work/ark#94 carries the decision.
+- **Revoking a credential had no route, and now has one.** Decision 2 makes
+  `revoked_at` the revocation mechanism and the verifier honours it, but it is
+  a service-wide act and Decision 4's grants are per-repository, so nothing in
+  the text above says who may perform one. elk-work/ark#94 carried that
+  question; it was ruled on 2026-08-30 and the answer is **Amendment 1** at the
+  end of this document — an operator, which is a principal, not a widening of
+  `ARK_BOOTSTRAP_TOKEN`. Decision 6 is unchanged.
 Related: docs/v1-spec.md §20, docs/adoption.md § Credentials, docs/self-hosting.md
 § Authentication, docs/rfc-0002-elk-work-record-adapter.md (Decision 3 — the
 self-hosting constraint), Elk-scout `supabase/migrations/0001_init.sql`
@@ -735,3 +736,113 @@ change.
 > repositories and a handful of clients exist, a date is more defensible here
 > than it would be at scale, and the readonly stage already provides a soft
 > landing.
+
+---
+
+## Amendments
+
+Decisions 1-6 above are accepted and are not rewritten. What follows are later
+rulings that add to them, each with its date and the person who made it.
+
+### Amendment 1 — operators: who may act on the service as a whole
+
+**Ruled by Issac, 2026-08-30 (D116). Filed as elk-work/ark#94. Implemented in
+`internal/server/operators.go`.**
+
+Two acts had no authorization model. Revoking a credential was reachable only
+by editing `auth.db` by hand, and listing principals was not reachable at all
+— which made revocation unusable even where it existed, because a credential
+is retired by an id that is printed once at issue and never again. Neither act
+is *about* a repository, so Decision 4's three levels had nothing to say about
+either, and Decision 6 confines `ARK_BOOTSTRAP_TOKEN` to one route, so the one
+service-wide secret could not be the answer without amending an accepted
+decision.
+
+**The answer is an operator: an ordinary principal that may perform the two
+service-wide acts.** Named, holding a credential of its own, and revocable
+through the same route it uses to revoke anybody else's. That is the property
+the alternative did not have — widening the bootstrap token would have made one
+environment variable the whole operator identity, so every service-wide act in
+the log would have been attributed to a string several people hold and nobody
+owns.
+
+**It is a column, not a `kind`.** The ruling offered either; the implementation
+takes `principals.operator_since TEXT`, nullable, its presence being what makes
+an operator. `kind` answers a different question — *what* holds this
+credential, a human or an agent — and Decision 5 turns on that answer. Spending
+that field on authority collapses two axes into one, so promoting a person
+would erase the fact that they are a person, and an operator that is a CI agent
+could not be described at all. A timestamp column is also the schema's own
+idiom for a state with a time on it (`disabled_at`, `revoked_at`, `granted_at`),
+and it demotes by going back to NULL, which a repurposed `kind` cannot do
+without remembering what it used to say.
+
+`credentials.revoked_by TEXT` lands beside it, because the non-goals rule out
+an audit-log export and a revocation still has to say whose act it was.
+
+**Where an operator comes from.**
+
+- The **first** comes from the bootstrap token, and only into a vacuum: `POST
+  /v1/principals` promotes the principal it mints when the service has no
+  operator at all. After that `ARK_BOOTSTRAP_TOKEN` can still mint — Decision 6,
+  unchanged — but it cannot promote, and asking it to is refused rather than
+  ignored. So a leaked bootstrap secret can create a principal and cannot make
+  itself an authority over the service.
+- **Every operator after the first is made by an operator**, presenting their
+  own credential to the same route. Decision 6 says where the bootstrap token
+  may be presented; it does not say what else that route may accept, so this is
+  an addition to Decision 6 rather than a change to it.
+
+**The legacy service token is deliberately not an operator**, though it carries
+implicit `admin` on every repository. The point of this amendment is that a
+service-wide act is attributed to somebody, and letting the string the whole
+fleet holds perform one would leave the model built and unused. elk-work/ark#54
+asks that the legacy break-glass not be removed without a replacement: this is
+the replacement, and the break-glass for a service with no operator is
+`ARK_BOOTSTRAP_TOKEN` on the route it was already confined to.
+
+**Routes** (§19 of `v1-spec.md` carries the list; §20.2 the contract):
+
+```text
+GET  /v1/principals                 operator — the roster, and each principal's credentials
+GET  /v1/credentials                any principal — its own credentials, and nobody else's
+POST /v1/credentials/{id}/revoke    operator, or the credential's own holder
+POST /v1/principals                 + an operator's credential, beside ARK_BOOTSTRAP_TOKEN
+```
+
+`GET /v1/credentials` is option 3 of elk-work/ark#94 kept as a subset of option
+2, and it is not decoration: a laptop goes missing on a Saturday and its owner
+should not have to find an operator before the credential on it stops working.
+It is also what makes self-revocation addressable at all, since the id is the
+thing that was lost with the machine.
+
+**Revocation remains eventually consistent, bounded at `authTTL`.** Nothing
+here changes the caching contract of Decision 2; the write drops the issuing
+instance's cache, so a revocation is immediate there and lands elsewhere within
+the minute. The CLI says so, because a still-served request in that window
+otherwise reads as the revocation having failed.
+
+**Attribution.** Every operator act is logged against the named principal and
+the credential it presented — `operator`, `operator_email`, `credential` — and
+never against a shared secret. The one line that can name a secret is the
+first-operator promotion, logged as `issued_by=bootstrap-token`, which by
+construction only ever appears on a service that had no operator to name.
+
+**Not built, and left as gaps rather than discovered as ones:**
+
+- **No demotion route.** An operator is promoted and never demoted. Ending a
+  departed operator's access is revoking their credentials and disabling the
+  principal, both of which exist; removing the flag is an edit to `auth.db`, as
+  every principal-state change was before this amendment.
+- **No route disables a principal.** `disabled_at` is honoured by the verifier
+  and written by nothing, exactly as `revoked_at` was before #94. It is the
+  next thing of this shape to build and it is not in scope here.
+- **No audit table.** The non-goals rule out audit-log export; the log line and
+  `credentials.revoked_by` are the record.
+
+**Storage.** Both columns are added to `authSchema` for a store created today
+and applied as tolerated `ALTER TABLE … ADD COLUMN` for one that already exists
+(`addColumns`, `internal/server/authstore.go`). Every `auth.db` in existence
+predates this amendment, so the second path is the one that runs; it happens on
+the next read or write of the store, which means **there is no migration
+command and no deploy step** beyond shipping the binary.
