@@ -1914,7 +1914,9 @@ both directions, below.
   string the whole fleet holds and it identifies nobody, so there is nothing
   to check it against; it is also the break-glass that issues the first
   grants on repositories that predate them. Retiring it is elk-work/ark#54,
-  which has to replace that break-glass rather than only remove it.
+  which has to replace that break-glass rather than only remove it —
+  `ARK_LEGACY_TOKEN=readonly` caps this implicit level at `read` and `off`
+  stops accepting the token as a bearer, both described in §20.
 
 ### The actor binding
 
@@ -2079,6 +2081,20 @@ this order:
 A bearer without the `arkc_` prefix is not a credential this service issued, so
 nothing is looked up for it. Everything refused is `401` with a `permission`
 error code (§22), whichever mechanism refused it.
+
+**`ARK_LEGACY_TOKEN` narrows the first of the two.** It is read once at
+startup and takes `full`, `readonly` or `off`; unset is `full`, and any other
+value fails startup rather than being read as `full`. Under `full` the branch
+above is exactly as described. Under `readonly` the service token still
+authenticates and its implicit level is capped at `read`: it pulls, and every
+operation above `read` — pushes, record writes, grants, repository creation —
+is refused `403 permission` with a message naming the cutover, and logged as
+`principal=legacy mode=readonly` with the route that was refused. Under `off`
+the comparison is not made at all, so the service token is an unrecognised
+bearer and takes the same path as any other. The token remains required in
+every mode; retiring it as configuration is a separate step, because it is
+also the default `ARK_SIGNING_KEY`. This is RFC-0003's staged migration
+(Stages 3 and 4).
 
 Credentials live in one SQLite database, `auth.db`, held in the same backend as
 the repository databases and written with the same object-generation

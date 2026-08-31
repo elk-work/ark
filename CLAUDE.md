@@ -122,7 +122,18 @@ per-repository `read`/`write`/`admin` grants. Scoped as elk-work/ark#43, #52,
   cannot promote. **The legacy service token is not an operator** — a
   service-wide act names a person, and the string the fleet shares names
   nobody.
-- **Not yet.** Retiring the legacy token is #54; the operator above is the
+- **Landed (#54, Stage 3).** `ARK_LEGACY_TOKEN` is the dial the cutover turns:
+  unset or `full` is today's behaviour, `readonly` lets the legacy bearer pull
+  and refuses every write with `permission` (logging `principal=legacy
+  mode=readonly` and the route, which is the "who has not moved yet?" list),
+  and `off` stops registering the legacy branch so the token is an unknown
+  credential. Any other value fails startup. `internal/server/legacy.go` owns
+  every decision it makes; `grants.go` caps the implicit level and
+  `handleRegisterRepo` refuses repository *creation* by hand, because
+  registration asks for `read` — the re-registration every pull begins with
+  must keep working.
+- **Not yet.** The rest of #54: `ARK_API_TOKEN` becoming optional (Stage 4)
+  and the four-store rotation. The operator above is the
   replacement break-glass it was waiting for. Nothing yet writes
   `principals.disabled_at`, and an operator cannot be demoted — both are edits
   to `auth.db`.

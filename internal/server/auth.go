@@ -94,7 +94,13 @@ func (s *Server) authenticate(r *http.Request) (*authenticated, error) {
 	// in the fleet presents this string, and the credential store is a new
 	// single point of contention (RFC-0003 "Costs accepted") — it must not
 	// become one for the path that already worked.
-	if s.Token != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) == 1 {
+	//
+	// Unless the branch is not registered at all: ARK_LEGACY_TOKEN=off is
+	// RFC-0003 Stage 4's "the legacy branch is simply not registered", and it
+	// is a comparison that does not happen rather than a caller who is
+	// refused — so the service token falls through to the prefix check below
+	// and is answered as the unknown credential it now is (legacy.go).
+	if s.legacyAccepted() && s.Token != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) == 1 {
 		return &authenticated{ID: legacyPrincipalID, Kind: legacyPrincipalKind, Legacy: true}, nil
 	}
 	// Anything without the prefix is not a credential this service minted, so

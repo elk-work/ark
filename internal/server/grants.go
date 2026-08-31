@@ -376,6 +376,17 @@ func (s *Server) levelOf(ctx context.Context, who *authenticated, repoID string)
 	// identifies nobody, so there is no grant it could be checked against;
 	// #54 removes this branch along with the token itself.
 	if who.Legacy {
+		// Except under ARK_LEGACY_TOKEN=readonly, where the implicit level is
+		// capped at `read`: RFC-0003 Stage 3, "legacy bearers may pull, not
+		// push". Capping the level rather than listing the routes is what
+		// makes it total — a write route added tomorrow is narrowed by this
+		// without anybody remembering to narrow it. It costs the two `admin`
+		// reads as well (the grant roster, which is an admin act because the
+		// people who may see it are the people who may change it), and that
+		// is the correct answer for a token being retired.
+		if s.legacyReadonly(who) {
+			return api.GrantRead, nil
+		}
 		return api.GrantAdmin, nil
 	}
 	level, err := s.authStore().levelFor(ctx, repoID, who.ID)
@@ -445,6 +456,14 @@ func (s *Server) authorize(r *http.Request, repoID, want string) *writeFault {
 	// caller gets in.
 	if err := s.Repos.View(r.Context(), repoID, func(*sql.DB) error { return nil }); errors.Is(err, repodb.ErrNotFound) {
 		return nil
+	}
+	// A narrowed legacy token is refused in its own words. `refusal` below
+	// would say it holds `read` and needs `write`, and send the reader to
+	// `ark repo grant principal legacy --write` — a command that names a
+	// principal which is not a row anywhere and would undo the cutover if it
+	// were. See legacy.go.
+	if s.legacyReadonly(who) {
+		return s.refuseLegacyReadonly(r)
 	}
 	return faultPermission(refusal(who, repoID, level, want))
 }
