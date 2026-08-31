@@ -23,6 +23,13 @@ import (
 type Server struct {
 	Repos *repodb.Manager
 	Token string // single service token (spec §20: V1 begins with one)
+	// LegacyMode is ARK_LEGACY_TOKEN: what the service token above may still
+	// do. Empty means `full` — the behaviour every deployment configured
+	// before this field existed is running — and the other two positions are
+	// `readonly` and `off`. It is the dial RFC-0003 Stage 3 narrows the token
+	// with (elk-work/ark#54); see legacy.go, which owns every decision it
+	// makes.
+	LegacyMode string
 	// SigningKey signs local-mode blob URLs. Empty falls back to Token,
 	// which is what every deployment configured before ARK_SIGNING_KEY
 	// existed relies on. See signingKey.
@@ -289,6 +296,14 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 	// needs only `read` — a reader whose every sync began with a 403 could
 	// never pull at all.
 	existingFault := s.authorize(r, req.ID, api.GrantRead)
+	// Which is also why this route is the one write ARK_LEGACY_TOKEN=readonly
+	// has to refuse by hand: `read` is enough to be let through above, and
+	// that is correct for the re-registration every pull begins with — the
+	// handshake a narrowed legacy bearer must keep, or `readonly` would stop
+	// pulls as well as pushes and be no different from `off`. Bringing a
+	// repository into existence is not that call, so it is refused, and only
+	// once the transaction has established that it is what is happening.
+	legacyCreate := s.legacyReadonly(principalOf(r))
 	err := s.Repos.Update(ctx, req.ID, req.LastRevision == 0, func(tx *sql.Tx) error {
 		// The whole closure reruns on a lost CAS race; reset the accumulator
 		// so a replay cannot report a creation the first attempt made.
@@ -300,6 +315,9 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 		created = registered == 0
 		if !created && existingFault != nil {
 			return existingFault
+		}
+		if created && legacyCreate {
+			return legacyReadonlyCreate
 		}
 
 		// Registration runs on every sync, and the name a client sends is just
@@ -357,6 +375,11 @@ func (s *Server) handleRegisterRepo(w http.ResponseWriter, r *http.Request) {
 			"this service has no database for repository %s, and this client has already synced it to revision %d — it is missing, not new. Registration will not stand an empty repository up in its place; restore it, or point this checkout at the service that holds it.",
 			req.ID, req.LastRevision))
 		return
+	}
+	if errors.Is(err, legacyReadonlyCreate) {
+		// Logged here rather than in the closure above, which reruns on a lost
+		// compare-and-swap and would count one refusal several times.
+		s.logLegacyRefusal(r)
 	}
 	if err != nil {
 		s.finish(w, "register repository", err, nil, http.StatusOK)

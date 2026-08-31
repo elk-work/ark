@@ -5,6 +5,11 @@
 // Configuration (environment):
 //
 //	ARK_API_TOKEN    bearer token clients must present (required)
+//	ARK_LEGACY_TOKEN what ARK_API_TOKEN may still do as a bearer:
+//	                 full | readonly | off (default full, which is the
+//	                 behaviour before this setting existed). readonly lets it
+//	                 pull and read and refuses every write; off stops
+//	                 accepting it as a bearer at all. RFC-0003 Stage 3
 //	ARK_SIGNING_KEY  HMAC key signing local-mode /blobs/ URLs (default:
 //	                 ARK_API_TOKEN)
 //	ARK_BOOTSTRAP_TOKEN
@@ -84,6 +89,15 @@ func run() error {
 		return fmt.Errorf("ARK_DEFAULT_GRANT is %q; it takes %s",
 			defaultGrant, strings.Join(server.DefaultGrantValues, ", "))
 	}
+	// And for the same reason again, more sharply: this one narrows what the
+	// token the whole fleet holds may do, so a value that is none of the three
+	// must not be read as "carry on as before" — a service that answered
+	// ARK_LEGACY_TOKEN=read-only by accepting every write would report the
+	// riskiest step of the cutover as done while changing nothing.
+	legacyMode, err := server.ParseLegacyMode(os.Getenv("ARK_LEGACY_TOKEN"))
+	if err != nil {
+		return err
+	}
 	cacheDir := os.Getenv("CACHE_DIR")
 	if cacheDir == "" {
 		cacheDir = filepath.Join(os.TempDir(), "ark-repos")
@@ -117,6 +131,9 @@ func run() error {
 	s := &server.Server{
 		Repos: repodb.NewManager(backend, cacheDir),
 		Token: token,
+		// `full` unless an operator narrowed it, which is what every
+		// deployment configured before ARK_LEGACY_TOKEN existed is running.
+		LegacyMode: legacyMode,
 		// Unset is the supported configuration, not an oversight: the signing
 		// key falls back to the service token, which is what it has always
 		// been. Setting it is how a deployment stops depending on that.
@@ -144,6 +161,11 @@ func run() error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// Once, at startup, and unconditionally — including for `full`. Which
+	// position the dial is in is the first question anybody debugging a
+	// refused push will ask, and the second is whether the revision that was
+	// rolled to change it actually came up with the new value.
+	log.Info("legacy service token", "mode", legacyMode)
 	log.Info("listening", "port", port)
 	return httpServer.ListenAndServe()
 }

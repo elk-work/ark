@@ -42,6 +42,7 @@ The server takes **no command-line flags**. Everything is environment:
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
 | `ARK_API_TOKEN` | always | — | Bearer token clients must present. Startup fails without it. |
+| `ARK_LEGACY_TOKEN` | no | `full` | What `ARK_API_TOKEN` may still do as a bearer: `full`, `readonly`, or `off`. `full` is what it has always done — authenticate and carry implicit `admin` on every repository. `readonly` lets it pull and read and refuses every write with `permission`, naming the cutover. `off` stops accepting it as a bearer at all, so it is answered like any unrecognised token; it is still required, and still the default signing key. A value that is none of the three fails startup. See [Retiring the shared token](#retiring-the-shared-token). |
 | `ARK_SIGNING_KEY` | no | `ARK_API_TOKEN` | HMAC key for local-mode `/blobs/` URLs. Unset it is the service token, which is what it has always been; set it, the two are independent. Ignored in object-storage mode, where GCS signs. |
 | `ARK_BOOTSTRAP_TOKEN` | no | — | Accepted on `POST /v1/principals` and no other route, to mint the first per-principal credential. Unset, that route refuses everything and the service token is the only way in. See [Per-principal credentials](#per-principal-credentials). |
 | `ARK_IDP_APPROVAL_URL` | no | — | Where `ark login` sends a person to approve a device code. Unset, this service offers no device login and `GET /` says so; `ark login --token` is unaffected. See [Logging in without a token](#logging-in-without-a-token). |
@@ -427,6 +428,36 @@ instances, as above; on the instance that revoked it, immediately.
 Two things still have no command and are edits to `auth.db` — it is a file
 in a bucket: **disabling a principal** (`disabled_at`, which the service
 honours and nothing writes) and **demoting an operator**.
+
+### Retiring the shared token
+
+Once everybody holds a credential of their own, `ARK_API_TOKEN` is a string
+several machines still have and nobody needs. Removing it in one step is
+not the way to find out which machines those are, so `ARK_LEGACY_TOKEN`
+narrows it in stages and each stage is one environment variable:
+
+| Value | The service token can | Use it to |
+|---|---|---|
+| `full` (default, and unset) | authenticate, and administer every repository | run as before — deploying a build that understands this variable changes nothing until you set it |
+| `readonly` | pull and read | find the holders nobody has migrated. Every write is refused with `permission` (client exit 5) and a message naming the cutover, and the service logs `principal=legacy mode=readonly` with the operation it refused — that log is the list of who has not moved |
+| `off` | nothing | complete the cutover. The token is no longer compared, so presenting it is answered exactly like any unrecognised bearer: `401`, "invalid or missing token" |
+
+Run `readonly` for long enough to cover everything periodic — a nightly
+job that pushes once a day will not show up in an afternoon — and read the
+refusals before going to `off`. It is reversible by unsetting the variable,
+so a mistake costs one revision and no data.
+
+Two things `readonly` deliberately does **not** stop, because both are
+reads in everything but name: the idempotent re-registration a client sends
+at the start of every sync (`POST /v1/repositories` against a repository
+that already exists), which is the handshake a pull begins with, and the
+actor introduction that rides along with it. Creating a repository *is*
+refused.
+
+`ARK_API_TOKEN` is still required in every mode — it is also the default
+`ARK_SIGNING_KEY`, and `off` retires it only as a bearer. Set
+`ARK_SIGNING_KEY` explicitly before you stop thinking of the service token
+as configuration.
 
 ### Logging in without a token
 
