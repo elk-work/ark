@@ -25,9 +25,10 @@ func newTaskCmd(g *globals) *cobra.Command {
 	return cmd
 }
 
-// taskCreated is `ark task create`'s result: the task, plus the Elk parent
-// the call posted as a marker comment. Additive over store.Task's JSON.
-type taskCreated struct {
+// taskResult is what `ark task create` and `ark task edit` both print: the
+// task, plus its Elk parent as it stands after the call. Additive over
+// store.Task's JSON.
+type taskResult struct {
 	*store.Task
 	ElkRef string `json:"elk_ref,omitempty"`
 }
@@ -48,32 +49,16 @@ func newTaskCreateCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			elkRef := ""
-			if cmd.Flags().Changed("elk") {
-				raw, _ := cmd.Flags().GetString("elk")
-				if elkRef, err = validElkRef(raw); err != nil {
-					return err
-				}
-			}
-			// The refusal is this repository's own rule (ark config set
-			// require-elk-parent true), checked before anything is written so a
-			// refused create leaves no record behind.
-			if elkRef == "" && a.Config.RequireElkParent {
-				return records.Validationf("this repository requires an Elk parent for every task: " +
-					"pass --elk <ref> (#35, 35, elk:35, or the Elk action id), " +
-					"or have Elk create the task with push_to_work_record")
-			}
-			t, err := a.Store.CreateTask(cmd.Context(), title, b)
+			elkRef, err := elkFlagRef(cmd)
 			if err != nil {
 				return err
 			}
-			if elkRef != "" {
-				if _, err := a.Store.AddComment(cmd.Context(), "task", t.ID, elkParentMarker(elkRef), ""); err != nil {
-					return fmt.Errorf("task #%d (%s) was created, but posting its elk-parent marker failed: %w", t.Number, t.ID, err)
-				}
+			t, err := createTaskWithElk(cmd.Context(), a, title, b, elkRef)
+			if err != nil {
+				return err
 			}
 			p := g.printer(cmd)
-			return p.Result(taskCreated{Task: t, ElkRef: elkRef}, func() {
+			return p.Result(taskResult{Task: t, ElkRef: elkRef}, func() {
 				p.Line("Created task #%d: %s (%s)", t.Number, t.Title, t.ID)
 				if elkRef != "" {
 					p.Line("Elk parent: %s", elkRef)
@@ -233,7 +218,7 @@ func newTaskViewCmd(g *globals) *cobra.Command {
 func newTaskEditCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "edit <number|id>",
-		Short: "Edit a task's title, body, or status",
+		Short: "Edit a task's title, body, status, or Elk parent",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.open(cmd)
@@ -257,12 +242,9 @@ func newTaskEditCmd(g *globals) *cobra.Command {
 				v, _ := cmd.Flags().GetString("status")
 				edit.Status = &v
 			}
-			elkRef := ""
-			if cmd.Flags().Changed("elk") {
-				raw, _ := cmd.Flags().GetString("elk")
-				if elkRef, err = validElkRef(raw); err != nil {
-					return err
-				}
+			elkRef, err := elkFlagRef(cmd)
+			if err != nil {
+				return err
 			}
 			ctx := cmd.Context()
 			var t *store.Task
@@ -280,15 +262,23 @@ func newTaskEditCmd(g *globals) *cobra.Command {
 			// Re-parenting is a NEW marker; the old one stays as history, which
 			// is the append-only rule every comment already follows.
 			if elkRef != "" {
-				if _, err := a.Store.AddComment(ctx, "task", t.ID, elkParentMarker(elkRef), ""); err != nil {
-					return fmt.Errorf("task #%d (%s) was updated, but posting its elk-parent marker failed: %w", t.Number, t.ID, err)
+				if err := postElkParent(ctx, a, t, elkRef); err != nil {
+					return err
 				}
 			}
+			// elk_ref is the task's parent as it stands, not just what this
+			// call passed, so create, edit and view all mean the same thing by
+			// it: an edit that touches only the title still reports the parent
+			// the task already had.
+			parent, err := currentElkParent(ctx, a, t.ID)
+			if err != nil {
+				return err
+			}
 			p := g.printer(cmd)
-			return p.Result(taskCreated{Task: t, ElkRef: elkRef}, func() {
+			return p.Result(taskResult{Task: t, ElkRef: parent}, func() {
 				p.Line("Updated task #%d: %s [%s]", t.Number, t.Title, t.Status)
-				if elkRef != "" {
-					p.Line("Elk parent: %s", elkRef)
+				if parent != "" {
+					p.Line("Elk parent: %s", parent)
 				}
 			})
 		},

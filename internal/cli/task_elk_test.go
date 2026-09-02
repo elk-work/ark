@@ -139,6 +139,13 @@ func TestTaskEditElkPostsANewMarkerAndTheLatestWins(t *testing.T) {
 		t.Fatalf("title edit lost:\n%s", out)
 	}
 
+	// elk_ref is the task's CURRENT parent, not just what this call passed:
+	// an edit that changes only the title still reports it.
+	arkJSON(t, dir, &edited, "task", "edit", created.ID, "-t", "Renamed again")
+	if edited.ElkRef != "37" {
+		t.Fatalf("elk_ref after a title-only edit = %q, want the current parent 37", edited.ElkRef)
+	}
+
 	// Nothing at all is still nothing to change.
 	if _, err := arkErr(t, dir, "task", "edit", created.ID); err == nil || records.ExitCode(err) != 2 {
 		t.Errorf("empty edit: err = %v, want exit 2", err)

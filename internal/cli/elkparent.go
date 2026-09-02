@@ -4,6 +4,9 @@ import (
 	"context"
 	"strings"
 
+	"github.com/spf13/cobra"
+
+	"github.com/elk-work/ark/internal/app"
 	"github.com/elk-work/ark/internal/records"
 	"github.com/elk-work/ark/internal/store"
 )
@@ -102,4 +105,70 @@ func filterByElkParent(ctx context.Context, s *store.Store, tasks []*store.Task,
 		}
 	}
 	return out, nil
+}
+
+// elkFlagRef reads and validates `--elk` off a command. Empty when the flag
+// was not given.
+func elkFlagRef(cmd *cobra.Command) (string, error) {
+	if !cmd.Flags().Changed("elk") {
+		return "", nil
+	}
+	raw, _ := cmd.Flags().GetString("elk")
+	return validElkRef(raw)
+}
+
+// requireElkParent is this repository's own rule (ark config set
+// require-elk-parent true). It is checked before anything is written, so a
+// refused create leaves no record behind.
+func requireElkParent(a *app.Context, elkRef string) error {
+	if elkRef != "" || !a.Config.RequireElkParent {
+		return nil
+	}
+	return records.Validationf("this repository requires an Elk parent for every task: " +
+		"pass --elk <ref> (#35, 35, elk:35, or the Elk action id), " +
+		"or have Elk create the task with push_to_work_record")
+}
+
+// postElkParent posts the marker that re-parents a task. The task is already
+// written by the time this runs, so a failure here is a partial write (exit 7)
+// naming the command that repairs it.
+func postElkParent(ctx context.Context, a *app.Context, t *store.Task, elkRef string) error {
+	if _, err := a.Store.AddComment(ctx, "task", t.ID, elkParentMarker(elkRef), ""); err != nil {
+		return records.Partialf(
+			"task #%d (%s) exists, but posting its elk-parent marker failed: %v; "+
+				"run `ark task edit %d --elk %s` to repair",
+			t.Number, t.ID, err, t.Number, elkRef)
+	}
+	return nil
+}
+
+// createTaskWithElk is what `ark task create` and `ark gh issue create` both
+// do: refuse when the repository requires a parent and none was named, write
+// the task, then post its marker. One implementation so the two commands
+// cannot drift apart.
+func createTaskWithElk(ctx context.Context, a *app.Context, title, body, elkRef string) (*store.Task, error) {
+	if err := requireElkParent(a, elkRef); err != nil {
+		return nil, err
+	}
+	t, err := a.Store.CreateTask(ctx, title, body)
+	if err != nil {
+		return nil, err
+	}
+	if elkRef != "" {
+		if err := postElkParent(ctx, a, t, elkRef); err != nil {
+			return nil, err
+		}
+	}
+	return t, nil
+}
+
+// currentElkParent is the task's parent as it stands now: the latest marker on
+// the task, read back after any write. `create`, `edit` and `view` all report
+// the same thing by reading it the same way.
+func currentElkParent(ctx context.Context, a *app.Context, taskID string) (string, error) {
+	comments, err := a.Store.ListComments(ctx, "task", taskID)
+	if err != nil {
+		return "", err
+	}
+	return latestElkParent(comments), nil
 }

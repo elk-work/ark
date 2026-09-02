@@ -1,8 +1,11 @@
 package cli
 
 import (
+	"context"
+	"strings"
 	"testing"
 
+	"github.com/elk-work/ark/internal/app"
 	"github.com/elk-work/ark/internal/records"
 	"github.com/elk-work/ark/internal/store"
 )
@@ -69,5 +72,38 @@ func TestValidElkRefIsOneNonEmptyLine(t *testing.T) {
 func TestElkParentMarkerShape(t *testing.T) {
 	if got := elkParentMarker("#35"); got != "elk-parent: #35" {
 		t.Errorf("elkParentMarker = %q", got)
+	}
+}
+
+// The task is written before its marker is, so a marker that cannot be posted
+// leaves a real task with no parent: exit 7, and a message naming the command
+// that repairs it. The failure is forced by closing the database under the
+// call, which is the only way this half-write happens in practice (the store
+// is unreachable by the time the second write runs).
+func TestPostElkParentFailureIsAPartialWriteWithARepairCommand(t *testing.T) {
+	dir := gitRepo(t)
+	ctx := context.Background()
+	if _, err := app.Init(ctx, dir, ""); err != nil {
+		t.Fatalf("ark init: %v", err)
+	}
+	a, err := app.Open(ctx, dir, app.Options{})
+	if err != nil {
+		t.Fatalf("open ark: %v", err)
+	}
+	defer a.Close()
+	task, err := a.Store.CreateTask(ctx, "Half written", "")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	a.DB.Close()
+
+	err = postElkParent(ctx, a, task, "#35")
+	if err == nil || records.ExitCode(err) != 7 {
+		t.Fatalf("postElkParent after the store died: err = %v (exit %d), want exit 7", err, records.ExitCode(err))
+	}
+	for _, want := range []string{"ark task edit", "--elk #35", "elk-parent"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("partial-write message %q should name %q", err.Error(), want)
+		}
 	}
 }
