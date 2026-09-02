@@ -18,6 +18,11 @@ type Config struct {
 	Remote           string `toml:"remote,omitempty"`
 	DefaultActorID   string `toml:"default_actor_id"`
 	DefaultActorType string `toml:"default_actor_type"`
+	// RequireElkParent makes `ark task create` refuse a task with no `--elk`
+	// parent. A client-side rule for a repository bound to an Elk workspace,
+	// switched on only after that workspace's backfill has given every open
+	// task a parent; the sync service never enforces it.
+	RequireElkParent bool `toml:"require_elk_parent,omitempty"`
 }
 
 func Load(arkDir string) (*Config, error) {
