@@ -110,3 +110,37 @@ func TestTaskViewShowsTheLatestParent(t *testing.T) {
 		t.Fatalf("an unparented task should print no elk line:\n%s", out)
 	}
 }
+
+func TestTaskEditElkPostsANewMarkerAndTheLatestWins(t *testing.T) {
+	dir := gitRepo(t)
+	ark(t, dir, "init")
+	var created elkTaskJSON
+	arkJSON(t, dir, &created, "task", "create", "-t", "Step", "--elk", "#35")
+
+	var edited elkTaskJSON
+	arkJSON(t, dir, &edited, "task", "edit", created.ID, "--elk", "#36")
+	if edited.ElkRef != "#36" {
+		t.Fatalf("edit elk_ref = %q, want #36", edited.ElkRef)
+	}
+	var view elkViewJSON
+	arkJSON(t, dir, &view, "task", "view", created.ID)
+	if view.ElkRef != "#36" || len(view.Comments) != 2 {
+		t.Fatalf("after edit: elk_ref=%q comments=%d, want #36 and 2 (the old marker is kept, not edited)", view.ElkRef, len(view.Comments))
+	}
+
+	// --elk together with an ordinary edit applies both.
+	arkJSON(t, dir, &edited, "task", "edit", created.ID, "-t", "Renamed", "--elk", "37")
+	arkJSON(t, dir, &view, "task", "view", created.ID)
+	if view.ElkRef != "37" {
+		t.Fatalf("elk_ref after combined edit = %q", view.ElkRef)
+	}
+	out := ark(t, dir, "task", "view", created.ID)
+	if !strings.Contains(out, "Renamed") {
+		t.Fatalf("title edit lost:\n%s", out)
+	}
+
+	// Nothing at all is still nothing to change.
+	if _, err := arkErr(t, dir, "task", "edit", created.ID); err == nil || records.ExitCode(err) != 2 {
+		t.Errorf("empty edit: err = %v, want exit 2", err)
+	}
+}

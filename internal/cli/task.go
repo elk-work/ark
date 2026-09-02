@@ -245,19 +245,46 @@ func newTaskEditCmd(g *globals) *cobra.Command {
 				v, _ := cmd.Flags().GetString("status")
 				edit.Status = &v
 			}
-			t, err := a.Store.UpdateTask(cmd.Context(), args[0], edit)
-			if err != nil {
-				return err
+			elkRef := ""
+			if cmd.Flags().Changed("elk") {
+				raw, _ := cmd.Flags().GetString("elk")
+				if elkRef, err = validElkRef(raw); err != nil {
+					return err
+				}
+			}
+			ctx := cmd.Context()
+			var t *store.Task
+			if edit.Title != nil || edit.Body != nil || edit.Status != nil {
+				if t, err = a.Store.UpdateTask(ctx, args[0], edit); err != nil {
+					return err
+				}
+			} else if elkRef != "" {
+				if t, err = a.Store.ResolveTask(ctx, args[0]); err != nil {
+					return err
+				}
+			} else {
+				return records.Validationf("nothing to change (pass --title, --body, --status, or --elk)")
+			}
+			// Re-parenting is a NEW marker; the old one stays as history, which
+			// is the append-only rule every comment already follows.
+			if elkRef != "" {
+				if _, err := a.Store.AddComment(ctx, "task", t.ID, elkParentMarker(elkRef), ""); err != nil {
+					return fmt.Errorf("task #%d (%s) was updated, but posting its elk-parent marker failed: %w", t.Number, t.ID, err)
+				}
 			}
 			p := g.printer(cmd)
-			return p.Result(t, func() {
+			return p.Result(taskCreated{Task: t, ElkRef: elkRef}, func() {
 				p.Line("Updated task #%d: %s [%s]", t.Number, t.Title, t.Status)
+				if elkRef != "" {
+					p.Line("Elk parent: %s", elkRef)
+				}
 			})
 		},
 	}
 	cmd.Flags().StringP("title", "t", "", "new title")
 	addBodyFlags(cmd)
 	cmd.Flags().StringP("status", "s", "", "new status (open, in_progress, blocked, done, closed)")
+	cmd.Flags().String("elk", "", "move this task under another Elk task (#35, 35, elk:35, or the action id)")
 	return cmd
 }
 
