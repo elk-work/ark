@@ -69,7 +69,7 @@ func newTaskCreateCmd(g *globals) *cobra.Command {
 			}
 			if elkRef != "" {
 				if _, err := a.Store.AddComment(cmd.Context(), "task", t.ID, elkParentMarker(elkRef), ""); err != nil {
-					return err
+					return fmt.Errorf("task #%d (%s) was created, but posting its elk-parent marker failed: %w", t.Number, t.ID, err)
 				}
 			}
 			p := g.printer(cmd)
