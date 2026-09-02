@@ -131,6 +131,9 @@ func newTaskListCmd(g *globals) *cobra.Command {
 // taskDetail is the composite returned by `ark task view`.
 type taskDetail struct {
 	*store.Task
+	// ElkRef is the Elk parent named by the latest `elk-parent:` marker
+	// comment, verbatim. Empty when the task has none.
+	ElkRef   string           `json:"elk_ref,omitempty"`
 	Comments []*store.Comment `json:"comments"`
 	Threads  []*store.Thread  `json:"threads"`
 	Runs     []*store.Run     `json:"runs"`
@@ -156,6 +159,7 @@ func newTaskViewCmd(g *globals) *cobra.Command {
 			if d.Comments, err = a.Store.ListComments(ctx, "task", t.ID); err != nil {
 				return err
 			}
+			d.ElkRef = latestElkParent(d.Comments)
 			if d.Threads, err = a.Store.ListThreads(ctx, t.ID); err != nil {
 				return err
 			}
@@ -180,6 +184,9 @@ func newTaskViewCmd(g *globals) *cobra.Command {
 				p.Line("task #%d  %s", t.Number, t.Title)
 				p.Line("status    %s", t.Status)
 				p.Line("id        %s", t.ID)
+				if d.ElkRef != "" {
+					p.Line("elk       %s", d.ElkRef)
+				}
 				p.Line("created   %s by %s (%s)", records.FormatTime(t.CreatedAt),
 					actorName(names, t.CreatedBy), t.CreatedByType)
 				if t.Body != "" {

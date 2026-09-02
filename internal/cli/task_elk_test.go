@@ -78,3 +78,35 @@ func TestTaskCreateWithoutElkIsFineUntilTheRepositoryRequiresIt(t *testing.T) {
 		t.Errorf("blank --elk: err = %v, want exit 2", err)
 	}
 }
+
+func TestTaskViewShowsTheLatestParent(t *testing.T) {
+	dir := gitRepo(t)
+	ark(t, dir, "init")
+	var created elkTaskJSON
+	arkJSON(t, dir, &created, "task", "create", "-t", "Step", "--elk", "#35")
+
+	var view elkViewJSON
+	arkJSON(t, dir, &view, "task", "view", created.ID)
+	if view.ElkRef != "#35" {
+		t.Fatalf("view elk_ref = %q, want #35", view.ElkRef)
+	}
+	out := ark(t, dir, "task", "view", created.ID)
+	if !strings.Contains(out, "elk       #35") {
+		t.Fatalf("human view should print the parent line:\n%s", out)
+	}
+
+	// A later marker supersedes; a plain comment does not.
+	ark(t, dir, "task", "comment", created.ID, "-b", "elk-parent: #36")
+	ark(t, dir, "task", "comment", created.ID, "-b", "unrelated note")
+	arkJSON(t, dir, &view, "task", "view", created.ID)
+	if view.ElkRef != "#36" {
+		t.Fatalf("view elk_ref after a second marker = %q, want #36", view.ElkRef)
+	}
+
+	// No marker, no line, no field.
+	arkJSON(t, dir, &created, "task", "create", "-t", "Orphan")
+	out = ark(t, dir, "task", "view", created.ID)
+	if strings.Contains(out, "elk       ") {
+		t.Fatalf("an unparented task should print no elk line:\n%s", out)
+	}
+}
