@@ -1097,3 +1097,73 @@ func TestRejectionMarksTheRecordDivergedAndCountsAsUnresolved(t *testing.T) {
 		t.Errorf("unresolved rejections = %d (%v) after the server accepted the record, want 0", n, err)
 	}
 }
+
+// elkParentOf reads a task's Elk parent the way the CLI does: the last
+// comment whose first line is `elk-parent: <ref>` wins, in the creation order
+// ListComments returns (spec §6.3). Duplicated here rather than imported
+// because internal/cli depends on this package.
+func elkParentOf(t *testing.T, a *app.Context, taskID string) string {
+	t.Helper()
+	comments, err := a.Store.ListComments(context.Background(), "task", taskID)
+	if err != nil {
+		t.Fatalf("list comments: %v", err)
+	}
+	ref := ""
+	for _, c := range comments {
+		first := c.Body
+		if i := strings.IndexByte(first, '\n'); i >= 0 {
+			first = first[:i]
+		}
+		if r, ok := strings.CutPrefix(strings.TrimSpace(first), "elk-parent:"); ok {
+			if r = strings.TrimSpace(r); r != "" {
+				ref = r
+			}
+		}
+	}
+	return ref
+}
+
+// TestElkParentMarkerCrossesMachinesAndTheLatestWins: the Elk parent is a
+// comment, so it rides the ordinary comment route with no sync work of its
+// own. A parents a task and syncs; B pulls and reads the same parent; B
+// re-parents and syncs; A pulls and reads the new one, with the superseded
+// marker still there as history (spec §6.3).
+func TestElkParentMarkerCrossesMachinesAndTheLatestWins(t *testing.T) {
+	_, url := startServer(t)
+	a := newClient(t, url, "")
+	ctx := context.Background()
+
+	task, err := a.Store.CreateTask(ctx, "Step", "one of several")
+	if err != nil {
+		t.Fatalf("create task: %v", err)
+	}
+	if _, err := a.Store.AddComment(ctx, "task", task.ID, "elk-parent: #35", ""); err != nil {
+		t.Fatalf("marker: %v", err)
+	}
+	mustRun(t, a)
+
+	b := newClient(t, url, a.Config.RepositoryID)
+	mustRun(t, b)
+	if got := elkParentOf(t, b, task.ID); got != "#35" {
+		t.Fatalf("B reads the parent as %q, want #35", got)
+	}
+
+	// B moves the task under another Elk task. Re-parenting is a new marker,
+	// never an edit of the old one.
+	if _, err := b.Store.AddComment(ctx, "task", task.ID, "elk-parent: #36", ""); err != nil {
+		t.Fatalf("re-parent: %v", err)
+	}
+	mustRun(t, b)
+	mustRun(t, a)
+
+	if got := elkParentOf(t, a, task.ID); got != "#36" {
+		t.Fatalf("A reads the parent as %q after B re-parented, want #36", got)
+	}
+	comments, err := a.Store.ListComments(ctx, "task", task.ID)
+	if err != nil || len(comments) != 2 {
+		t.Fatalf("A comments: %d (%v), want both markers kept", len(comments), err)
+	}
+	if comments[0].Body != "elk-parent: #35" || comments[1].Body != "elk-parent: #36" {
+		t.Fatalf("markers out of creation order on A: %q then %q", comments[0].Body, comments[1].Body)
+	}
+}

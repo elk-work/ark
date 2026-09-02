@@ -10,6 +10,7 @@ import (
 type elkTaskJSON struct {
 	ID     string `json:"id"`
 	Number int64  `json:"number"`
+	Title  string `json:"title"`
 	ElkRef string `json:"elk_ref"`
 }
 
@@ -69,6 +70,14 @@ func TestTaskCreateWithoutElkIsFineUntilTheRepositoryRequiresIt(t *testing.T) {
 			t.Errorf("refusal %q should name %s", msg, want)
 		}
 	}
+	// Refused before the write, so there is no task behind the error.
+	var listed []elkTaskJSON
+	arkJSON(t, dir, &listed, "task", "list", "--status", "all")
+	for _, x := range listed {
+		if x.Title == "Refused" {
+			t.Fatalf("a refused create left task #%d behind", x.Number)
+		}
+	}
 	arkJSON(t, dir, &created, "task", "create", "-t", "Allowed", "--elk", "35")
 	if created.ElkRef != "35" {
 		t.Fatalf("create with --elk under the rule: elk_ref = %q", created.ElkRef)
@@ -103,11 +112,17 @@ func TestTaskViewShowsTheLatestParent(t *testing.T) {
 		t.Fatalf("view elk_ref after a second marker = %q, want #36", view.ElkRef)
 	}
 
-	// No marker, no line, no field.
+	// No marker, no line, no field: elk_ref is omitted from the JSON rather
+	// than reported as empty.
 	arkJSON(t, dir, &created, "task", "create", "-t", "Orphan")
 	out = ark(t, dir, "task", "view", created.ID)
 	if strings.Contains(out, "elk       ") {
 		t.Fatalf("an unparented task should print no elk line:\n%s", out)
+	}
+	var raw map[string]any
+	arkJSON(t, dir, &raw, "task", "view", created.ID)
+	if v, ok := raw["elk_ref"]; ok {
+		t.Fatalf("an unparented task should carry no elk_ref key, got %v", v)
 	}
 }
 
