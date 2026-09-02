@@ -25,6 +25,13 @@ func newTaskCmd(g *globals) *cobra.Command {
 	return cmd
 }
 
+// taskCreated is `ark task create`'s result: the task, plus the Elk parent
+// the call posted as a marker comment. Additive over store.Task's JSON.
+type taskCreated struct {
+	*store.Task
+	ElkRef string `json:"elk_ref,omitempty"`
+}
+
 func newTaskCreateCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -41,18 +48,42 @@ func newTaskCreateCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			elkRef := ""
+			if cmd.Flags().Changed("elk") {
+				raw, _ := cmd.Flags().GetString("elk")
+				if elkRef, err = validElkRef(raw); err != nil {
+					return err
+				}
+			}
+			// The refusal is this repository's own rule (ark config set
+			// require-elk-parent true), checked before anything is written so a
+			// refused create leaves no record behind.
+			if elkRef == "" && a.Config.RequireElkParent {
+				return records.Validationf("this repository requires an Elk parent for every task: " +
+					"pass --elk <ref> (#35, 35, elk:35, or the Elk action id), " +
+					"or have Elk create the task with push_to_work_record")
+			}
 			t, err := a.Store.CreateTask(cmd.Context(), title, b)
 			if err != nil {
 				return err
 			}
+			if elkRef != "" {
+				if _, err := a.Store.AddComment(cmd.Context(), "task", t.ID, elkParentMarker(elkRef), ""); err != nil {
+					return err
+				}
+			}
 			p := g.printer(cmd)
-			return p.Result(t, func() {
+			return p.Result(taskCreated{Task: t, ElkRef: elkRef}, func() {
 				p.Line("Created task #%d: %s (%s)", t.Number, t.Title, t.ID)
+				if elkRef != "" {
+					p.Line("Elk parent: %s", elkRef)
+				}
 			})
 		},
 	}
 	cmd.Flags().StringP("title", "t", "", "task title (required)")
 	addBodyFlags(cmd)
+	cmd.Flags().String("elk", "", "the Elk task this is a step of (#35, 35, elk:35, or the action id); posted as an elk-parent comment")
 	cmd.MarkFlagRequired("title")
 	return cmd
 }
