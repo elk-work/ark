@@ -74,17 +74,7 @@ func (s *Store) ListComments(ctx context.Context, parentType, parentID string) (
 	if err != nil {
 		return nil, records.DBErr("list comments", err)
 	}
-	defer rows.Close()
-	var out []*Comment
-	for rows.Next() {
-		var c Comment
-		if err := rows.Scan(&c.ID, &c.RepositoryID, &c.ParentType, &c.ParentID, &c.Body,
-			&c.CreatedAt, &c.CreatedBy, &c.CreatedByType, &c.SupersedesID); err != nil {
-			return nil, records.DBErr("scan comment", err)
-		}
-		out = append(out, &c)
-	}
-	return out, rows.Err()
+	return scanComments(rows)
 }
 
 // ListCommentsOfType returns every live comment on every parent of one type
@@ -101,6 +91,12 @@ func (s *Store) ListCommentsOfType(ctx context.Context, parentType string) ([]*C
 	if err != nil {
 		return nil, records.DBErr("list comments", err)
 	}
+	return scanComments(rows)
+}
+
+// scanComments reads a comment result set. Both listings select the same
+// columns in the same order, so they share the scan.
+func scanComments(rows *sql.Rows) ([]*Comment, error) {
 	defer rows.Close()
 	var out []*Comment
 	for rows.Next() {

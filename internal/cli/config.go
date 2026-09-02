@@ -62,13 +62,13 @@ Keys:
 					return err
 				}
 				defer a.Close()
-				if err := writeConfigKey(a.Config, args[0], args[1]); err != nil {
+				v, err := writeConfigKey(a.Config, args[0], args[1])
+				if err != nil {
 					return err
 				}
 				if err := config.Save(a.ArkDir, a.Config); err != nil {
 					return err
 				}
-				v, _ := readConfigKey(a.Config, args[0])
 				p := g.printer(cmd)
 				return p.Result(v, func() { p.Line("%s = %s", v.Key, v.Value) })
 			},
@@ -85,15 +85,17 @@ func readConfigKey(c *config.Config, key string) (configValue, error) {
 	return configValue{}, records.Validationf("unknown setting %q (known: %v)", key, configKeys)
 }
 
-func writeConfigKey(c *config.Config, key, raw string) error {
+// writeConfigKey applies one setting and returns what it wrote, so `set` can
+// print the new value without a second lookup whose error it would discard.
+func writeConfigKey(c *config.Config, key, raw string) (configValue, error) {
 	switch key {
 	case keyRequireElkParent:
 		b, err := strconv.ParseBool(raw)
 		if err != nil {
-			return records.Validationf("%s takes true or false, not %q", key, raw)
+			return configValue{}, records.Validationf("%s takes true or false, not %q", key, raw)
 		}
 		c.RequireElkParent = b
-		return nil
+		return configValue{Key: key, Value: strconv.FormatBool(b)}, nil
 	}
-	return records.Validationf("unknown setting %q (known: %v)", key, configKeys)
+	return configValue{}, records.Validationf("unknown setting %q (known: %v)", key, configKeys)
 }
