@@ -61,7 +61,7 @@ func TestValidElkRefIsOneNonEmptyLine(t *testing.T) {
 	if got, err := validElkRef("  #35 "); err != nil || got != "#35" {
 		t.Fatalf("validElkRef = (%q, %v)", got, err)
 	}
-	for _, bad := range []string{"", "   ", "#35\n#36"} {
+	for _, bad := range []string{"", "   ", "#35\n#36", "the widget thing", "#35 #36", "35\t36"} {
 		_, err := validElkRef(bad)
 		if err == nil || records.ExitCode(err) != 2 {
 			t.Errorf("validElkRef(%q) err = %v, want exit 2", bad, err)

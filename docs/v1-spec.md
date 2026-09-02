@@ -127,8 +127,8 @@ default_actor_type = "human"
 require_elk_parent = false
 ```
 
-`require_elk_parent` makes `ark task create` refuse a task that names no Elk
-parent (`--elk`). It is a client-side rule for a repository bound to an Elk
+`require_elk_parent` makes `ark task create` and `ark gh issue create` refuse a
+task that names no Elk parent (`--elk`). It is a client-side rule for a repository bound to an Elk
 workspace, switched on only after every open task there has a parent; the
 sync service never enforces it. `ark config set require-elk-parent true`.
 
@@ -395,12 +395,17 @@ elk-parent: <ref>
 where `<ref>` is what the person typed: `#35`, `35`, `elk:#35`, `elk:35`, or
 the Elk action id. Anything after the first line is ignored. The latest such
 comment wins; an earlier one is superseded by posting a new one, never edited.
+Latest means comment ULID order, which is creation order: ULIDs are monotonic
+within a process and timestamp-ordered across machines, so a consumer that
+sorts the same comments by `created_at` sees the same winner.
 Ark stores the reference as given and resolves nothing; Elk's connector reads
 the marker off the comment stream and resolves it in the bound workspace.
 
-`ark task create --elk <ref>` and `ark task edit --elk <ref>` post the marker;
-`ark task view` reports it as `elk_ref`; `ark task list --elk <ref>` filters on
-it client-side. This is a contract with Elk (scout `gh-connector/ark_pull.ts`),
+`ark task create --elk <ref>`, `ark gh issue create --elk <ref>` and
+`ark task edit --elk <ref>` post the marker; `ark task view` reports it as
+`elk_ref`; `ark task list --elk <ref>` filters on it client-side. The task is
+written before its marker, so a marker that fails to post is a partial write
+(exit 7) naming the `ark task edit` that repairs it. This is a contract with Elk (scout `gh-connector/ark_pull.ts`),
 and a change to the shape is a change on both sides.
 
 ---

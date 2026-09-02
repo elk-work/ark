@@ -80,12 +80,18 @@ func validElkRef(ref string) (string, error) {
 	if strings.ContainsAny(r, "\r\n") {
 		return "", records.Validationf("--elk takes a single line")
 	}
+	// A reference is one token: #35, 35, elk:35, or the Elk action id. Spaces
+	// inside it mean a sentence was passed where a reference belongs.
+	if strings.ContainsAny(r, " \t") {
+		return "", records.Validationf("--elk takes one reference without spaces: #35, 35, elk:35, or the Elk action id")
+	}
 	return r, nil
 }
 
-// filterByElkParent keeps the tasks whose current parent is `want`. Markers
-// are read for every task in one query and folded newest-last, so the filter
-// costs one round trip however many tasks the repository holds.
+// filterByElkParent keeps the tasks whose current parent is `want`. Every task
+// comment in the repository is read in one query and folded newest-last: one
+// round trip whatever the number of tasks, though the query carries every
+// comment body, so it grows with the repository.
 func filterByElkParent(ctx context.Context, s *store.Store, tasks []*store.Task, want string) ([]*store.Task, error) {
 	comments, err := s.ListCommentsOfType(ctx, "task")
 	if err != nil {

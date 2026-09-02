@@ -139,7 +139,8 @@ go build ./...
 cd your-git-repo
 ark init                      # creates .ark/, adds it to .gitignore
 
-ark task create -t "Ship the widget" -b "Details here" --elk 35   # --elk: the Elk task this is a step of
+ark task create -t "Ship the widget" -b "Details here"
+ark task create -t "Wire the widget" --elk 35   # --elk: the Elk task this is a step of
 ark task list
 ark task comment 1 -b "Started on this"
 

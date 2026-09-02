@@ -28,9 +28,10 @@ func newConfigCmd(g *globals) *cobra.Command {
 		Long: `Repository-level settings, kept in .ark/config.toml.
 
 Keys:
-  require-elk-parent   true|false. When true, ` + "`ark task create`" + ` refuses a task
-                       that names no Elk parent (--elk). Off by default; switch
-                       it on once every open task in this repository has one.`,
+  require-elk-parent   true|false. When true, ` + "`ark task create`" + ` and
+                       ` + "`ark gh issue create`" + ` refuse a task that names no Elk
+                       parent (--elk). Off by default; switch it on once every
+                       open task in this repository has one.`,
 	}
 	cmd.AddCommand(
 		&cobra.Command{
