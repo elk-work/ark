@@ -86,3 +86,30 @@ func (s *Store) ListComments(ctx context.Context, parentType, parentID string) (
 	}
 	return out, rows.Err()
 }
+
+// ListCommentsOfType returns every live comment on every parent of one type
+// in this repository, in creation order. One query rather than one per
+// parent: `ark task list --elk` reads the latest marker of every task.
+func (s *Store) ListCommentsOfType(ctx context.Context, parentType string) ([]*Comment, error) {
+	if err := records.OneOf("parent type", parentType, records.CommentParents); err != nil {
+		return nil, err
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT id, repository_id, parent_type, parent_id, body,
+		created_at, created_by, created_by_type, COALESCE(supersedes_id, '')
+		FROM comments WHERE repository_id = ? AND parent_type = ? AND deleted_at IS NULL
+		ORDER BY id`, s.RepoID, parentType)
+	if err != nil {
+		return nil, records.DBErr("list comments", err)
+	}
+	defer rows.Close()
+	var out []*Comment
+	for rows.Next() {
+		var c Comment
+		if err := rows.Scan(&c.ID, &c.RepositoryID, &c.ParentType, &c.ParentID, &c.Body,
+			&c.CreatedAt, &c.CreatedBy, &c.CreatedByType, &c.SupersedesID); err != nil {
+			return nil, records.DBErr("scan comment", err)
+		}
+		out = append(out, &c)
+	}
+	return out, rows.Err()
+}

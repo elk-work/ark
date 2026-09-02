@@ -104,6 +104,17 @@ func newTaskListCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if cmd.Flags().Changed("elk") {
+				raw, _ := cmd.Flags().GetString("elk")
+				want, err := validElkRef(raw)
+				if err != nil {
+					return err
+				}
+				tasks, err = filterByElkParent(cmd.Context(), a.Store, tasks, want)
+				if err != nil {
+					return err
+				}
+			}
 			p := g.printer(cmd)
 			if p.JSON {
 				if tasks == nil {
@@ -125,6 +136,7 @@ func newTaskListCmd(g *globals) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringP("status", "s", "", "filter by status (open, in_progress, blocked, done, closed, all)")
+	cmd.Flags().String("elk", "", "only tasks whose latest elk-parent marker names this Elk task (#35, 35, elk:35, or the action id)")
 	return cmd
 }
 

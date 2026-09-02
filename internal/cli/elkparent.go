@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"strings"
 
 	"github.com/elk-work/ark/internal/records"
@@ -77,4 +78,28 @@ func validElkRef(ref string) (string, error) {
 		return "", records.Validationf("--elk takes a single line")
 	}
 	return r, nil
+}
+
+// filterByElkParent keeps the tasks whose current parent is `want`. Markers
+// are read for every task in one query and folded newest-last, so the filter
+// costs one round trip however many tasks the repository holds.
+func filterByElkParent(ctx context.Context, s *store.Store, tasks []*store.Task, want string) ([]*store.Task, error) {
+	comments, err := s.ListCommentsOfType(ctx, "task")
+	if err != nil {
+		return nil, err
+	}
+	parent := map[string]string{}
+	for _, c := range comments {
+		if ref, ok := parseElkParent(c.Body); ok {
+			parent[c.ParentID] = ref
+		}
+	}
+	key := elkRefKey(want)
+	var out []*store.Task
+	for _, t := range tasks {
+		if ref, ok := parent[t.ID]; ok && elkRefKey(ref) == key {
+			out = append(out, t)
+		}
+	}
+	return out, nil
 }

@@ -144,3 +144,37 @@ func TestTaskEditElkPostsANewMarkerAndTheLatestWins(t *testing.T) {
 		t.Errorf("empty edit: err = %v, want exit 2", err)
 	}
 }
+
+func TestTaskListFiltersByElkParent(t *testing.T) {
+	dir := gitRepo(t)
+	ark(t, dir, "init")
+	var a, b, c elkTaskJSON
+	arkJSON(t, dir, &a, "task", "create", "-t", "A", "--elk", "#35")
+	arkJSON(t, dir, &b, "task", "create", "-t", "B", "--elk", "elk:35")
+	arkJSON(t, dir, &c, "task", "create", "-t", "C", "--elk", "#36")
+	arkJSON(t, dir, &c, "task", "create", "-t", "D")
+	// B moved on; the latest marker is what the filter reads.
+	ark(t, dir, "task", "edit", b.ID, "--elk", "#99")
+
+	var listed []elkTaskJSON
+	arkJSON(t, dir, &listed, "task", "list", "--elk", "35")
+	if len(listed) != 1 || listed[0].ID != a.ID {
+		t.Fatalf("list --elk 35 = %+v, want only A", listed)
+	}
+	arkJSON(t, dir, &listed, "task", "list", "--elk", "#99")
+	if len(listed) != 1 || listed[0].ID != b.ID {
+		t.Fatalf("list --elk #99 = %+v, want only B", listed)
+	}
+	arkJSON(t, dir, &listed, "task", "list", "--elk", "elk:36")
+	if len(listed) != 1 || listed[0].Number != 3 {
+		t.Fatalf("list --elk elk:36 = %+v, want only C", listed)
+	}
+	arkJSON(t, dir, &listed, "task", "list", "--elk", "#1000")
+	if len(listed) != 0 {
+		t.Fatalf("list --elk #1000 = %+v, want none", listed)
+	}
+	out := ark(t, dir, "task", "list", "--elk", "#1000")
+	if !strings.Contains(out, "no tasks") {
+		t.Fatalf("empty filter should say so: %s", out)
+	}
+}
