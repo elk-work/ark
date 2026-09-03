@@ -43,12 +43,18 @@ func newGHIssueCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			t, err := a.Store.CreateTask(cmd.Context(), title, b)
+			// An issue created here is an Ark task like any other, so the
+			// repository's Elk-parent rule applies to it too.
+			elkRef, err := elkFlagRef(cmd)
+			if err != nil {
+				return err
+			}
+			t, err := createTaskWithElk(cmd.Context(), a, title, b, elkRef)
 			if err != nil {
 				return err
 			}
 			p := g.printer(cmd)
-			return p.Result(t, func() {
+			return p.Result(taskResult{Task: t, ElkRef: elkRef}, func() {
 				// gh prints the issue URL; Ark prints the task reference.
 				p.Line("#%d", t.Number)
 			})
@@ -56,6 +62,7 @@ func newGHIssueCmd(g *globals) *cobra.Command {
 	}
 	create.Flags().StringP("title", "t", "", "issue title")
 	addBodyFlags(create)
+	create.Flags().String("elk", "", "the Elk task this is a step of (#35, 35, elk:35, or the action id); posted as an elk-parent comment")
 	create.MarkFlagRequired("title")
 
 	list := &cobra.Command{

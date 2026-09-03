@@ -25,6 +25,14 @@ func newTaskCmd(g *globals) *cobra.Command {
 	return cmd
 }
 
+// taskResult is what `ark task create` and `ark task edit` both print: the
+// task, plus its Elk parent as it stands after the call. Additive over
+// store.Task's JSON.
+type taskResult struct {
+	*store.Task
+	ElkRef string `json:"elk_ref,omitempty"`
+}
+
 func newTaskCreateCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -41,18 +49,26 @@ func newTaskCreateCmd(g *globals) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			t, err := a.Store.CreateTask(cmd.Context(), title, b)
+			elkRef, err := elkFlagRef(cmd)
+			if err != nil {
+				return err
+			}
+			t, err := createTaskWithElk(cmd.Context(), a, title, b, elkRef)
 			if err != nil {
 				return err
 			}
 			p := g.printer(cmd)
-			return p.Result(t, func() {
+			return p.Result(taskResult{Task: t, ElkRef: elkRef}, func() {
 				p.Line("Created task #%d: %s (%s)", t.Number, t.Title, t.ID)
+				if elkRef != "" {
+					p.Line("Elk parent: %s", elkRef)
+				}
 			})
 		},
 	}
 	cmd.Flags().StringP("title", "t", "", "task title (required)")
 	addBodyFlags(cmd)
+	cmd.Flags().String("elk", "", "the Elk task this is a step of (#35, 35, elk:35, or the action id); posted as an elk-parent comment")
 	cmd.MarkFlagRequired("title")
 	return cmd
 }
@@ -72,6 +88,17 @@ func newTaskListCmd(g *globals) *cobra.Command {
 			tasks, err := a.Store.ListTasks(cmd.Context(), status)
 			if err != nil {
 				return err
+			}
+			if cmd.Flags().Changed("elk") {
+				raw, _ := cmd.Flags().GetString("elk")
+				want, err := validElkRef(raw)
+				if err != nil {
+					return err
+				}
+				tasks, err = filterByElkParent(cmd.Context(), a.Store, tasks, want)
+				if err != nil {
+					return err
+				}
 			}
 			p := g.printer(cmd)
 			if p.JSON {
@@ -94,12 +121,16 @@ func newTaskListCmd(g *globals) *cobra.Command {
 		},
 	}
 	cmd.Flags().StringP("status", "s", "", "filter by status (open, in_progress, blocked, done, closed, all)")
+	cmd.Flags().String("elk", "", "only tasks whose latest elk-parent marker names this Elk task (#35, 35, elk:35, or the action id)")
 	return cmd
 }
 
 // taskDetail is the composite returned by `ark task view`.
 type taskDetail struct {
 	*store.Task
+	// ElkRef is the Elk parent named by the latest `elk-parent:` marker
+	// comment, verbatim. Empty when the task has none.
+	ElkRef   string           `json:"elk_ref,omitempty"`
 	Comments []*store.Comment `json:"comments"`
 	Threads  []*store.Thread  `json:"threads"`
 	Runs     []*store.Run     `json:"runs"`
@@ -125,6 +156,7 @@ func newTaskViewCmd(g *globals) *cobra.Command {
 			if d.Comments, err = a.Store.ListComments(ctx, "task", t.ID); err != nil {
 				return err
 			}
+			d.ElkRef = latestElkParent(d.Comments)
 			if d.Threads, err = a.Store.ListThreads(ctx, t.ID); err != nil {
 				return err
 			}
@@ -149,6 +181,9 @@ func newTaskViewCmd(g *globals) *cobra.Command {
 				p.Line("task #%d  %s", t.Number, t.Title)
 				p.Line("status    %s", t.Status)
 				p.Line("id        %s", t.ID)
+				if d.ElkRef != "" {
+					p.Line("elk       %s", d.ElkRef)
+				}
 				p.Line("created   %s by %s (%s)", records.FormatTime(t.CreatedAt),
 					actorName(names, t.CreatedBy), t.CreatedByType)
 				if t.Body != "" {
@@ -183,7 +218,7 @@ func newTaskViewCmd(g *globals) *cobra.Command {
 func newTaskEditCmd(g *globals) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "edit <number|id>",
-		Short: "Edit a task's title, body, or status",
+		Short: "Edit a task's title, body, status, or Elk parent",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a, err := g.open(cmd)
@@ -207,19 +242,51 @@ func newTaskEditCmd(g *globals) *cobra.Command {
 				v, _ := cmd.Flags().GetString("status")
 				edit.Status = &v
 			}
-			t, err := a.Store.UpdateTask(cmd.Context(), args[0], edit)
+			elkRef, err := elkFlagRef(cmd)
+			if err != nil {
+				return err
+			}
+			ctx := cmd.Context()
+			var t *store.Task
+			if edit.Title != nil || edit.Body != nil || edit.Status != nil {
+				if t, err = a.Store.UpdateTask(ctx, args[0], edit); err != nil {
+					return err
+				}
+			} else if elkRef != "" {
+				if t, err = a.Store.ResolveTask(ctx, args[0]); err != nil {
+					return err
+				}
+			} else {
+				return records.Validationf("nothing to change (pass --title, --body, --status, or --elk)")
+			}
+			// Re-parenting is a NEW marker; the old one stays as history, which
+			// is the append-only rule every comment already follows.
+			if elkRef != "" {
+				if err := postElkParent(ctx, a, t, elkRef); err != nil {
+					return err
+				}
+			}
+			// elk_ref is the task's parent as it stands, not just what this
+			// call passed, so create, edit and view all mean the same thing by
+			// it: an edit that touches only the title still reports the parent
+			// the task already had.
+			parent, err := currentElkParent(ctx, a, t.ID)
 			if err != nil {
 				return err
 			}
 			p := g.printer(cmd)
-			return p.Result(t, func() {
+			return p.Result(taskResult{Task: t, ElkRef: parent}, func() {
 				p.Line("Updated task #%d: %s [%s]", t.Number, t.Title, t.Status)
+				if parent != "" {
+					p.Line("Elk parent: %s", parent)
+				}
 			})
 		},
 	}
 	cmd.Flags().StringP("title", "t", "", "new title")
 	addBodyFlags(cmd)
 	cmd.Flags().StringP("status", "s", "", "new status (open, in_progress, blocked, done, closed)")
+	cmd.Flags().String("elk", "", "move this task under another Elk task (#35, 35, elk:35, or the action id)")
 	return cmd
 }
 
