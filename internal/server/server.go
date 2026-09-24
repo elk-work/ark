@@ -30,6 +30,8 @@ type Server struct {
 	// with (elk-work/ark#54); see legacy.go, which owns every decision it
 	// makes.
 	LegacyMode string
+	// UIMode is ARK_UI: empty/on enables the read-only board; off hides it.
+	UIMode string
 	// SigningKey signs local-mode blob URLs. Empty falls back to Token,
 	// which is what every deployment configured before ARK_SIGNING_KEY
 	// existed relies on. See signingKey.
@@ -87,6 +89,7 @@ func (s *Server) signingKey() string {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleRoot)
+	s.registerUI(mux)
 	// Not /healthz: Google Frontend intercepts that path on run.app
 	// hostnames and serves its own 404 before the request reaches the
 	// container (verified empirically 2026-07-13).
@@ -147,6 +150,15 @@ func (s *Server) Handler() http.Handler {
 		local.Secret = s.signingKey()
 		mux.Handle("GET /blobs/", local.Handler())
 		mux.Handle("PUT /blobs/", local.Handler())
+	}
+	if s.UIMode == "off" {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/ui" || strings.HasPrefix(r.URL.Path, "/ui/") {
+				writeErr(w, http.StatusNotFound, "not_found", "unknown route")
+				return
+			}
+			mux.ServeHTTP(w, r)
+		})
 	}
 	return mux
 }

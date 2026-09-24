@@ -14,6 +14,16 @@ repo/
 
 Ark is part of the Elk project family.
 
+## Breakdown board
+
+The sync service includes a read-only board at `/ui/`: sign in over HTTPS with
+an existing `arkc_` principal credential, choose a repository you have a grant
+on, and browse tasks by status, creating actor or Elk parent. Task details
+include comments, runs, linked Ark pull requests and artifact metadata. The
+browser uses a secure 12-hour session; changes stay with the CLI and agents.
+Set `ARK_UI=off` to hide the board and its task-read routes. See
+[the deployment notes](docs/deploy.md) and [RFC-0005](docs/rfc-0005-breakdown-board.md).
+
 ## Status
 
 V1: **complete**. The local tool works entirely offline; when a sync service
