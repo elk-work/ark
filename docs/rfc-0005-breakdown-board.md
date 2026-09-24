@@ -44,11 +44,14 @@ absolute, not sliding. Expired session rows are pruned on session creation.
 Cookie authentication is accepted only on the board and its two JSON GET
 routes; existing APIs keep requiring Bearer auth. Explicit Authorization takes
 precedence over cookies and a bad bearer cannot fall back to a good cookie.
+Chrome makes a form POST Origin null under `Referrer-Policy: no-referrer`,
+so `same-origin` is intentional: sign-in retains Origin while external links
+receive no referrer.
 POST session/logout require an Origin matching the request host and HTTPS
 scheme (or the TLS-terminating proxy's forwarded HTTPS scheme); missing or
 foreign Origin is refused. SameSite and Origin checks protect login/logout
 from cross-site requests. No CORS is added. All UI and task-read responses
-carry no-store, a self-only CSP, no-referrer and nosniff; templates escape
+carry no-store, a self-only CSP, same-origin referrers and nosniff; templates escape
 record text and JavaScript uses textContent, never record HTML.
 
 `/v1/device/*` remains the CLI's flow. Once Elk ships its approval page

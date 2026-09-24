@@ -40,3 +40,14 @@ func TestRunRefusesAnUnknownLegacyMode(t *testing.T) {
 		}
 	}
 }
+
+func TestRunRefusesUnknownUIMode(t *testing.T) {
+	t.Setenv("ARK_API_TOKEN", "test-token")
+	t.Setenv("ARK_IDP_APPROVAL_URL", "")
+	t.Setenv("ARK_DEFAULT_GRANT", "")
+	t.Setenv("ARK_LEGACY_TOKEN", "")
+	t.Setenv("ARK_UI", "disabled")
+	if err := run(); err == nil || !strings.Contains(err.Error(), "ARK_UI") {
+		t.Fatalf("invalid ARK_UI should fail startup: %v", err)
+	}
+}

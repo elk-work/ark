@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{if .Repo.ID}}{{.Repo.Name}} · {{end}}Ark breakdown board</title>
+<link rel="stylesheet" href="/ui/assets/board.css">
+<script src="/ui/assets/board.js" defer>
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header>
+<a class="brand" href="/ui/">Ark <span> / breakdowns</span>
+</a>{{if not .SignIn}}<form method="post" action="/ui/logout">
+<button class="quiet">Sign out</button>
+</form>{{end}}</header>
+<main id="main">
+{{if .SignIn}}
+<section class="signin">
+<p class="eyebrow">THE WORK UNDER THE WORK</p>
+<h1>Your repository’s breakdown.</h1>
+<p>Sign in with your Ark credential to see the tasks your repositories share.</p>
+<form method="post" action="/ui/session">
+<label for="credential">Ark credential</label>
+<input id="credential" name="credential" type="password" placeholder="arkc_…" autocomplete="off" required>
+<button>Sign in</button>
+</form>
+<p class="muted">Use an existing principal credential. Your session lasts 12 hours.</p>
+</section>
+{{else}}
+<nav aria-label="Repositories">
+<a href="/ui/">Repositories</a>{{range .Repos}}<a href="/ui/{{.ID}}" {{if eq $.Repo.ID .ID}}aria-current="page"{{end}}>{{.Name}}</a>{{end}}</nav>
+{{if not .Repo.ID}}
+<p class="eyebrow">YOUR REPOSITORIES</p>
+<h1>Choose a breakdown.</h1>
+<p class="muted">One repository at a time. Read the steps, follow the evidence.</p>
+<div class="repos">{{range .Repos}}<a class="repo" href="/ui/{{.ID}}">
+<h2>{{.Name}}</h2>
+<code>{{.ID}}</code>
+<p>Open board →</p>
+</a>{{else}}<p class="empty">No repositories have been shared with you. Ask a repository admin for a read grant.</p>{{end}}</div>
+{{else}}
+<div class="heading">
+<div>
+<p class="eyebrow">REPOSITORY BREAKDOWN</p>
+<h1>{{.Repo.Name}}</h1>
+</div>
+<p class="muted">Read-only · changes arrive through sync</p>
+</div>
+<form id="filters" class="filters" method="get" data-repo="{{.Repo.ID}}">
+<label>Status<select name="status">
+<option value="all" {{if eq .Status "all"}}selected{{end}}>All statuses</option>{{range .Columns}}<option value="{{.Status}}" {{if eq $.Status .Status}}selected{{end}}>{{label .Status}}</option>{{end}}</select>
+</label>
+<label>Created by<select name="actor">
+<option value="">All actors</option>{{range .Actors}}<option value="{{.ID}}" {{if eq $.Actor .ID}}selected{{end}}>{{.Name}}</option>{{end}}</select>
+</label>
+<label>Elk parent<input name="elk" value="{{.Elk}}" placeholder="#35 or action id">
+</label>
+<button>Apply filters</button>
+<a href="/ui/{{.Repo.ID}}">Reset</a>
+</form>
+<p id="notice" role="status" aria-live="polite">
+</p>
+<div class="board" aria-label="Task board">{{range .Columns}}<section class="column" data-status="{{.Status}}">
+<h2>{{label .Status}} <span class="count">{{len .Tasks}}</span>
+</h2>
+<div class="cards">{{range .Tasks}}<a class="card" data-task="{{.ID}}" href="/ui/{{$.Repo.ID}}?task={{.ID}}" title="{{.ID}}">
+<span class="number">#{{.Number}}</span>
+<h3>{{.Title}}</h3>
+<p class="muted">{{.Actor.Name}} · <time datetime="{{.CreatedAt}}" title="{{.CreatedAt}}">{{age .CreatedAt}}</time>
+</p>{{if .ElkRef}}<p class="parent">Elk {{.ElkRef}}</p>{{end}}</a>{{else}}<p class="empty">No tasks</p>{{end}}</div>
+</section>{{end}}</div>
+{{if .Detail}}<section class="detail" id="task-detail">
+<a href="/ui/{{.Repo.ID}}">← Back to board</a>{{with .Detail}}<p class="eyebrow">TASK #{{.Task.Number}} · {{label .Task.Status}}</p>
+<h2>{{.Task.Title}}</h2>
+<code>{{.Task.ID}}</code>
+<p>{{.Task.Actor.Name}} · Created {{.Task.CreatedAt}} · Updated {{.Task.UpdatedAt}}</p>{{if .Task.ElkRef}}<p>Elk parent: {{if .Task.ElkURL}}<a href="{{.Task.ElkURL}}">{{.Task.ElkRef}}</a>{{else}}{{.Task.ElkRef}}{{end}}</p>{{end}}<h3>Body</h3>
+<pre>{{if .Task.Body}}{{.Task.Body}}{{else}}No description.{{end}}</pre>
+<h3>Comments</h3>{{range .Comments}}<article>
+<p class="muted">{{.CreatedBy}} · {{.CreatedAt}}</p>
+<pre>{{.Body}}</pre>{{if .SupersedesID}}<p>Corrects {{.SupersedesID}}</p>{{end}}</article>{{else}}<p class="empty">No comments</p>{{end}}<h3>Runs</h3>{{range .Runs}}<article>
+<h4>{{.AgentName}} · {{.Status}}</h4>
+<code>{{.ID}}</code>
+<pre>{{.InputSummary}}</pre>
+<pre>{{.ResultSummary}}</pre>
+<p>{{.StartedAt}} — {{.FinishedAt}}</p>
+</article>{{else}}<p class="empty">No runs</p>{{end}}<h3>Pull requests</h3>{{range .PRs}}<article>
+<h4>#{{.Number}} {{.Title}} · {{.Status}}</h4>
+<code>{{.ID}}</code>
+<pre>{{.Body}}</pre>
+</article>{{else}}<p class="empty">No pull requests</p>{{end}}<h3>Artifacts</h3>{{range .Artifacts}}<article>
+<h4>{{.Name}}</h4>
+<p>{{.MediaType}} · {{.SizeBytes}} bytes</p>
+<code>{{.SHA256}}</code>
+</article>{{else}}<p class="empty">No artifacts</p>{{end}}{{end}}</section>{{end}}
+<dialog id="detail-dialog" aria-labelledby="dialog-title">
+<form method="dialog">
+<button class="quiet">Close</button>
+</form>
+<div id="dialog-content">
+</div>
+</dialog>
+{{end}}{{end}}
+</main>
+<footer>Ark keeps the breakdown. Elk keeps the parent.</footer>
+</body>
+</html>

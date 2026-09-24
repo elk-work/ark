@@ -80,9 +80,12 @@ Green CI, not a draft, no `hold` label ⇒ it lands — the fleet-wide standard 
 
 ## What is deliberately absent (V1)
 
-Workspaces, projects, milestones, a web UI, hosted Git, a custom merge
+Workspaces, projects, milestones, hosted Git, a custom merge
 engine, full `gh` parity. Do not add primitives without a demonstrated
 need (principle 005).
+
+The read-only breakdown board is served at `/ui/` (RFC-0005). Browser
+sessions may authorize only board GET routes; existing writes remain Bearer-only.
 
 **Multi-user authorization is arriving in slices, and most of it has
 landed.** `docs/rfc-0003-elk-issued-credentials.md` (accepted 2026-07-28)

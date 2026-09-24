@@ -40,6 +40,7 @@ import (
 
 	"github.com/elk-work/ark/internal/records"
 	"github.com/elk-work/ark/internal/server/repodb"
+	"github.com/elk-work/ark/migrations"
 	"github.com/elk-work/ark/pkg/api"
 )
 
@@ -163,6 +164,7 @@ type authCredential struct {
 
 // authSnapshot is one read of auth.db, held in memory for up to authTTL.
 type authSnapshot struct {
+	sessions    map[string]uiSession
 	generation  int64
 	principals  map[string]authPrincipal
 	credentials map[string]authCredential // keyed by token_sha256
@@ -180,6 +182,7 @@ type authSnapshot struct {
 // emptySnapshot is what a deployment that has never bootstrapped looks like.
 func emptySnapshot() *authSnapshot {
 	return &authSnapshot{
+		sessions:    map[string]uiSession{},
 		principals:  map[string]authPrincipal{},
 		credentials: map[string]authCredential{},
 		grants:      map[string]authGrant{},
@@ -251,7 +254,7 @@ func openAuthDB(path string) (*sql.DB, error) {
 	// deviceSchema is applied beside authSchema rather than folded into it:
 	// pending device codes are one table added by one slice (device.go), and
 	// keeping the statements apart is what lets the slices land in any order.
-	if _, err := db.Exec(authSchema + deviceSchema); err != nil {
+	if _, err := db.Exec(authSchema + deviceSchema + migrations.UISessions); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply auth schema: %w", err)
 	}
@@ -411,6 +414,9 @@ func (a *authStore) load(ctx context.Context) (*authSnapshot, error) {
 	}
 	rows.Close()
 
+	if err := loadUISessions(ctx, db, snap); err != nil {
+		return nil, err
+	}
 	if err := loadGrants(ctx, db, snap); err != nil {
 		return nil, err
 	}
@@ -501,6 +507,11 @@ func (a *authStore) verify(ctx context.Context, presented string) (*authenticate
 	if !ok {
 		return nil, errNoCredential
 	}
+	return a.verifyCredential(snap, cred)
+}
+
+// verifyCredential is shared by Bearer and browser session authentication.
+func (a *authStore) verifyCredential(snap *authSnapshot, cred authCredential) (*authenticated, error) {
 	if cred.RevokedAt != "" {
 		return nil, errCredentialRevoked
 	}

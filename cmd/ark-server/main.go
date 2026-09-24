@@ -10,6 +10,7 @@
 //	                 behaviour before this setting existed). readonly lets it
 //	                 pull and read and refuses every write; off stops
 //	                 accepting it as a bearer at all. RFC-0003 Stage 3
+//	ARK_UI          on | off (default on); hides the board and task GET routes
 //	ARK_SIGNING_KEY  HMAC key signing local-mode /blobs/ URLs (default:
 //	                 ARK_API_TOKEN)
 //	ARK_BOOTSTRAP_TOKEN
@@ -98,6 +99,10 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	uiMode, err := server.ParseUIMode(os.Getenv("ARK_UI"))
+	if err != nil {
+		return err
+	}
 	cacheDir := os.Getenv("CACHE_DIR")
 	if cacheDir == "" {
 		cacheDir = filepath.Join(os.TempDir(), "ark-repos")
@@ -134,6 +139,7 @@ func run() error {
 		// `full` unless an operator narrowed it, which is what every
 		// deployment configured before ARK_LEGACY_TOKEN existed is running.
 		LegacyMode: legacyMode,
+		UIMode:     uiMode,
 		// Unset is the supported configuration, not an oversight: the signing
 		// key falls back to the service token, which is what it has always
 		// been. Setting it is how a deployment stops depending on that.
