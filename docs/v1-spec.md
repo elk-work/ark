@@ -2124,10 +2124,15 @@ operation above `read` â€” pushes, record writes, grants, repository creation â€
 is refused `403 permission` with a message naming the cutover, and logged as
 `principal=legacy mode=readonly` with the route that was refused. Under `off`
 the comparison is not made at all, so the service token is an unrecognised
-bearer and takes the same path as any other. The token remains required in
-every mode; retiring it as configuration is a separate step, because it is
-also the default `ARK_SIGNING_KEY`. This is RFC-0003's staged migration
-(Stages 3 and 4).
+bearer and takes the same path as any other. This is RFC-0003's staged
+migration (Stages 3 and 4).
+
+**`ARK_API_TOKEN` is optional (Stage 4).** With it unset the first branch does
+not exist: the mode is `off`, no bearer is compared against an empty string,
+and `ARK_LEGACY_TOKEN=full` or `readonly` fails startup because there is no
+token for either to describe. The token's other job passes to
+`ARK_SIGNING_KEY`, which a local-mode service requires once the token is
+gone.
 
 Credentials live in one SQLite database, `auth.db`, held in the same backend as
 the repository databases and written with the same object-generation

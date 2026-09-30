@@ -41,10 +41,10 @@ The server takes **no command-line flags**. Everything is environment:
 
 | Variable | Required | Default | Meaning |
 |---|---|---|---|
-| `ARK_API_TOKEN` | always | — | Bearer token clients must present. Startup fails without it. |
-| `ARK_LEGACY_TOKEN` | no | `full` | What `ARK_API_TOKEN` may still do as a bearer: `full`, `readonly`, or `off`. `full` is what it has always done — authenticate and carry implicit `admin` on every repository. `readonly` lets it pull and read and refuses every write with `permission`, naming the cutover. `off` stops accepting it as a bearer at all, so it is answered like any unrecognised token; it is still required, and still the default signing key. A value that is none of the three fails startup. See [Retiring the shared token](#retiring-the-shared-token). |
-| `ARK_SIGNING_KEY` | no | `ARK_API_TOKEN` | HMAC key for local-mode `/blobs/` URLs. Unset it is the service token, which is what it has always been; set it, the two are independent. Ignored in object-storage mode, where GCS signs. |
-| `ARK_BOOTSTRAP_TOKEN` | no | — | Accepted on `POST /v1/principals` and no other route, to mint the first per-principal credential. Unset, that route refuses everything and the service token is the only way in. See [Per-principal credentials](#per-principal-credentials). |
+| `ARK_API_TOKEN` | no | — | The legacy shared bearer token — one string for every client, with implicit `admin` on every repository. Optional since RFC-0003 Stage 4: unset, it is not compared at all, and every client authenticates with a credential of its own. A deployment that started before per-principal credentials still has one until it retires it; see [Retiring the shared token](#retiring-the-shared-token). A new deployment does not need it. |
+| `ARK_LEGACY_TOKEN` | no | `full` | What `ARK_API_TOKEN` may still do as a bearer: `full`, `readonly`, or `off`. `full` is what it has always done — authenticate and carry implicit `admin` on every repository. `readonly` lets it pull and read and refuses every write with `permission`, naming the cutover. `off` stops accepting it as a bearer at all, so it is answered like any unrecognised token. A value that is none of the three fails startup, and so does `full` or `readonly` with `ARK_API_TOKEN` unset — there is no token for them to describe. See [Retiring the shared token](#retiring-the-shared-token). |
+| `ARK_SIGNING_KEY` | local mode without `ARK_API_TOKEN` | `ARK_API_TOKEN` | HMAC key for local-mode `/blobs/` URLs. Unset it is the service token, which is what it has always been; set it, the two are independent. With neither, local-mode startup fails rather than serving artifact URLs nothing can sign. Ignored in object-storage mode, where GCS signs. |
+| `ARK_BOOTSTRAP_TOKEN` | no | — | Accepted on `POST /v1/principals` and no other route, to mint the first per-principal credential. Unset, that route refuses everything except an operator's own credential, so on a fresh deployment with no service token and no identity provider nobody can get in — the service logs a warning at startup when it is configured that way. See [Per-principal credentials](#per-principal-credentials). |
 | `ARK_IDP_APPROVAL_URL` | no | — | Where `ark login` sends a person to approve a device code. Unset, this service offers no device login and `GET /` says so; `ark login --token` is unaffected. See [Logging in without a token](#logging-in-without-a-token). |
 | `ARK_IDP_KEY` | with the above | — | Shared secret the identity provider presents on `POST /v1/device/approve`. Startup fails if `ARK_IDP_APPROVAL_URL` is set and this is not: a service that cannot verify an approval would fail at the last step of a login instead. |
 | `ARK_DEFAULT_GRANT` | no | `seeded` | What a principal holds on a repository nobody granted it: `none`, `read`, or `seeded`. Seeding is what an approval asserts, so with no identity provider `seeded` grants nothing — a self-hosted service is deny-by-default without setting this. `read` makes every principal a reader of everything and never confers `write`. A value that is none of the three fails startup. |
@@ -88,15 +88,20 @@ if you want deployed revisions to be identifiable.
 The zero-dependency path. Everything lives on one disk: repository
 databases, artifact blobs, and the scratch cache. Nothing else is
 required — no cloud account, no object store, no credentials beyond the
-token you choose.
+two random strings you choose: one to mint the first credential with, and
+one to sign blob URLs with.
 
 ```sh
-ARK_API_TOKEN=$(head -c 32 /dev/urandom | base64) \
+ARK_BOOTSTRAP_TOKEN=$(head -c 32 /dev/urandom | base64) \
+ARK_SIGNING_KEY=$(head -c 32 /dev/urandom | base64) \
 DATA_DIR=/var/lib/ark \
 BASE_URL=http://localhost:8080 \
 PORT=8080 \
 ./ark-server
 ```
+
+Then mint yourself a credential with the bootstrap token — see
+[Per-principal credentials](#per-principal-credentials).
 
 After a first sync the directory looks like:
 
@@ -130,18 +135,16 @@ Three things to understand before exposing this mode:
   cannot use the bearer middleware: a client treats them as pre-signed
   URLs and sends no `Authorization` header. So each URL is signed with
   HMAC-SHA256 over the method, the key, and an expiry, keyed by
-  `ARK_SIGNING_KEY` — which defaults to `ARK_API_TOKEN`, so there is still
-  nothing extra to configure and a service with no key at all cannot mint
-  blob URLs. Signatures last one hour and are method-bound, so a download
-  URL cannot be replayed as an upload.
+  `ARK_SIGNING_KEY`. Signatures last one hour and are method-bound, so a
+  download URL cannot be replayed as an upload.
 
-  Set `ARK_SIGNING_KEY` when you want the two to be independent — for
-  instance before rotating `ARK_API_TOKEN`, since changing the signing key
-  invalidates every outstanding blob URL. It matters more than that shortly:
-  per-principal credentials
-  ([RFC-0003](rfc-0003-elk-issued-credentials.md)) end with `ARK_API_TOKEN`
-  no longer being a bearer, and a signing key with no home of its own would
-  go with it.
+  On a deployment that still has the legacy `ARK_API_TOKEN`, the signing
+  key defaults to it — which is what it always was, so there is nothing
+  extra to configure. Without that token `ARK_SIGNING_KEY` is required and
+  startup fails if it is missing: a service with no key cannot mint blob
+  URLs, and records would sync while every artifact failed. Set it
+  explicitly before you retire the token, since changing the signing key
+  invalidates every outstanding blob URL.
 - **Uploads are verified against their hash.** `POST /v1/artifacts/confirm`
   streams the stored object, recomputes SHA-256, and refuses — deleting the
   object — if it does not match the key it was stored under. This is what
@@ -165,7 +168,7 @@ objects in that bucket, using the object generation as the
 compare-and-swap primitive.
 
 ```sh
-ARK_API_TOKEN=... GCS_BUCKET=my-ark-bucket ./ark-server
+ARK_BOOTSTRAP_TOKEN=... GCS_BUCKET=my-ark-bucket ./ark-server
 ```
 
 `BASE_URL` and `DATA_DIR` are ignored in this mode. Blob URLs are V4
@@ -228,28 +231,27 @@ the account as both the resource and the member.
 
 ## Authentication
 
-**`ARK_API_TOKEN` is still one token for everything, and it still has no
-users, no per-repository permissions, and no scopes.** Anyone holding it
-can read and write every repository the service knows about. That is what
-it has always been and it has not changed.
+**Every client authenticates as somebody.** A person or an agent holds a
+credential of its own, issued by this service, and it reaches only the
+repositories it has been granted — `read`, `write`, or `admin` on each,
+enforced on every route (spec §19.2) — and can be revoked without
+disturbing anybody else. That is
+[RFC-0003](rfc-0003-elk-issued-credentials.md), and its bootstrap path
+needs no identity provider at all: see
+[Per-principal credentials](#per-principal-credentials) below, and
+[Logging in without a token](#logging-in-without-a-token) for issuing
+credentials through a browser rather than by hand.
 
-What has changed is that it is no longer the only thing the service
-accepts. [rfc-0003-elk-issued-credentials.md](rfc-0003-elk-issued-credentials.md)
-replaces one shared token with per-principal credentials, per-repository
-grants and individual revocation, and its bootstrap path needs no identity
-provider at all. **Both halves work today**: per-principal credentials —
-see [Per-principal credentials](#per-principal-credentials) below, and
-[Logging in without a token](#logging-in-without-a-token) for issuing them
-through a browser rather than by hand — and per-repository grants, which
-are `read`, `write`, or `admin` on one repository and are enforced on every
-route (spec §19.2). So the choice is now a real one:
-
-- **The service token** is the pre-authorization world, unchanged. Use it
-  to bootstrap, and to issue the first grants on repositories that
-  predate them — it carries implicit `admin` everywhere.
-- **A credential** reaches only the repositories it has been granted, at
-  the level it was granted, and can be revoked on its own without
-  disturbing anybody else.
+**The shared token V1 began with is optional, and retired by leaving it
+unset.** `ARK_API_TOKEN` was one string for every client, with no users,
+no per-repository permissions and no scopes: anyone holding it could read
+and write every repository the service knew about. A service configured
+without it never compares a bearer against it, so there is nothing to
+leak and nothing to rotate. A deployment that predates per-principal
+credentials still has one, and there it carries implicit `admin`
+everywhere — which is what it has always done, and why
+[Retiring the shared token](#retiring-the-shared-token) is a migration
+with a dial rather than a deletion.
 
 `ARK_DEFAULT_GRANT` decides what a principal holds on a repository nobody
 granted it: `none`, `read`, or `seeded` (the default). Seeding is what an
@@ -258,14 +260,14 @@ may read, and the service writes them as ordinary `read` rows (§20.1) — so
 a deployment with no identity provider seeds nothing and gets
 deny-by-default for free. Set it to `read` if you would rather every
 principal who can sign in be able to read everything, which is closer to
-what the service token already does.
+what the shared token did.
 
-**Server side.** `ARK_API_TOKEN` is read once at startup; empty or
-missing is a startup failure. Every `/v1` route strips a leading
-`Bearer ` from the `Authorization` header and compares the remainder
-against the token in constant time — and, failing that, against the
-credential store, if the bearer looks like a credential this service
-issued. A mismatch either way is `401` with a `permission` error code.
+**Server side.** Every `/v1` route strips a leading `Bearer ` from the
+`Authorization` header and looks the remainder up in the credential store,
+if it looks like a credential this service issued (`arkc_…`). On a
+deployment that still has `ARK_API_TOKEN`, the bearer is first compared
+against that token in constant time; without one, no such comparison
+exists. A mismatch is `401` with a `permission` error code.
 The only routes without a bearer check are
 `GET /` (a service banner), `GET /health`, `POST /v1/principals`,
 which has its own token, and `POST /v1/device/code` and
@@ -274,8 +276,9 @@ with yet — see [Logging in without a token](#logging-in-without-a-token).
 (`POST /v1/device/approve` has its own token too, `ARK_IDP_KEY`.)
 In local mode `/blobs/`
 also skips the bearer check, but is not unauthenticated: it requires an
-HMAC signature derived from `ARK_SIGNING_KEY` — which defaults to that
-same token — bound to the method and carrying a one-hour expiry.
+HMAC signature derived from `ARK_SIGNING_KEY` — which defaults to the
+legacy token where there still is one — bound to the method and carrying
+a one-hour expiry.
 
 **Client side.** The token resolves in this order:
 
@@ -309,14 +312,13 @@ still resolves.
 
 ### Per-principal credentials
 
-The service can issue a credential per person or per agent instead of
-handing everybody a copy of `ARK_API_TOKEN`. It needs no identity
-provider, no account anywhere, and nothing outside this binary.
+The service issues a credential per person or per agent. It needs no
+identity provider, no account anywhere, and nothing outside this binary.
 
-Set one more random string on the server:
+Set one random string on the server:
 
 ```sh
-ARK_API_TOKEN=... ARK_BOOTSTRAP_TOKEN=$(head -c 32 /dev/urandom | base64) ./ark-server
+ARK_BOOTSTRAP_TOKEN=$(head -c 32 /dev/urandom | base64) GCS_BUCKET=my-ark-bucket ./ark-server
 ```
 
 Then, from any machine that can reach the service:
@@ -341,7 +343,7 @@ expiry is logging in again.
 What you get for it, today:
 
 - **Individual revocation.** Retiring one person's credential does not
-  disturb anybody else, where rotating `ARK_API_TOKEN` is an outage for
+  disturb anybody else, where rotating a shared token is an outage for
   every client of every repository.
 - **Attribution that is checked rather than asserted.** The service logs
   a principal id on every request and records `last_used_on` per
@@ -365,7 +367,10 @@ ark repo grant alice@example.com --revoke
 Whoever first registers a repository gets `admin` on it. For repositories
 that already existed before grants did, nobody does — issue the first one
 with `ARK_TOKEN` set to `ARK_API_TOKEN`, which carries implicit `admin`
-everywhere.
+everywhere, **and do it before you retire that token.** Afterwards a
+repository nobody administers has no one who can grant on it, and the way
+back is an edit to `auth.db`. Operators hold no implicit level on any
+repository, deliberately.
 
 A grant to an address nobody holds yet is stored and shown as pending; it
 becomes real the first time that person logs in, whichever way they do it
@@ -382,9 +387,9 @@ repos/ark.auth.db     principals, credentials, grants
 
 It is a file, like everything else here: back it up with the rest, and
 recover it the same way (see [Backup and recovery](#backup-and-recovery)).
-If it is lost, the service token still works and
-`ARK_BOOTSTRAP_TOKEN` still mints — neither depends on it being readable,
-which is the point of both.
+If it is lost, `ARK_BOOTSTRAP_TOKEN` still mints — it does not depend on
+`auth.db` being readable, which is the point of it — and so does the
+legacy service token, on a deployment that still has one.
 
 Revocation is cached for up to **60 seconds** across instances, so a
 revoked credential — or a revoked grant — can keep working for that long.
@@ -454,10 +459,26 @@ that already exists), which is the handshake a pull begins with, and the
 actor introduction that rides along with it. Creating a repository *is*
 refused.
 
-`ARK_API_TOKEN` is still required in every mode — it is also the default
-`ARK_SIGNING_KEY`, and `off` retires it only as a bearer. Set
-`ARK_SIGNING_KEY` explicitly before you stop thinking of the service token
-as configuration.
+**Then unset it.** `off` retires the token as a bearer; removing
+`ARK_API_TOKEN` retires it as configuration, and is the end of the
+migration (RFC-0003 Stage 4). In order:
+
+1. Every administered repository has an `admin` grant held by a principal
+   — see above; after this step the token cannot issue one.
+2. In local mode, set `ARK_SIGNING_KEY`. The service token was its default,
+   so without it startup fails. Object-storage mode does not use it.
+3. Unset `ARK_API_TOKEN`, and set `ARK_LEGACY_TOKEN=off` or unset it.
+   `full` or `readonly` with no token fails startup rather than being read
+   as `off`: the likeliest way to get there is a redeploy that dropped the
+   secret by accident, and a service that will not start leaves the
+   previous one serving.
+4. Destroy every copy of the old value you know of. It no longer opens
+   anything, but a secret store holding a retired credential is one more
+   thing to explain.
+
+The startup log line `legacy service token` reads `"mode":"off"` and
+`"configured":false` once it is done, and the old string is then answered exactly like
+a string nobody ever configured.
 
 ### Logging in without a token
 
@@ -509,10 +530,9 @@ removes a grant. Losing access at the identity provider therefore does
 not revoke anything here — revocation stays an explicit act, on this
 side, where you can see it.
 
-Grants are still not *enforced* — that is the sentence at the top of this
-section, and it has not changed. Seeding writes the rows; a credential
-today reaches everything the service token reaches, so what you are
-setting up is the record, not yet the confinement.
+Seeded grants are ordinary grants, enforced like any other: a person
+approved with `repository_ids` can read those repositories and nothing
+else until somebody grants them more.
 
 Codes live 15 minutes; the client polls every 5 seconds and gives up at
 the expiry telling you to run `ark login` again. A code is redeemable
@@ -589,7 +609,7 @@ names its writer once:
 
 ```sh
 curl -sS "$ARK_URL/v1/repositories/$REPO/tasks" \
-  -H "Authorization: Bearer $ARK_API_TOKEN" \
+  -H "Authorization: Bearer $ARK_TOKEN" \
   -H 'Content-Type: application/json' \
   -H "Idempotency-Key: $(uuidgen)" \
   -d '{"writer":{"agent_name":"ci","delegated_by":"<human actor ULID>"},
@@ -644,7 +664,7 @@ GET /v1/repositories/{repo}/dangling[?all=true][&limit=N]
 
 ```sh
 curl -sS "$ARK_URL/v1/repositories/$REPO/dangling" \
-  -H "Authorization: Bearer $ARK_API_TOKEN"
+  -H "Authorization: Bearer $ARK_TOKEN"
 ```
 
 ```json
@@ -672,8 +692,8 @@ skew and one outstanding for a week is a record that is never coming.
 
 Reading this needs **`read`** on the repository — the level that already
 pulls its records — so a per-principal credential with `read` is enough
-and the service token, which carries implicit `admin` everywhere, works
-unchanged. `ark repo dangling` is the same call from a checkout:
+and so does the legacy service token, on a deployment that still has
+one. `ark repo dangling` is the same call from a checkout:
 
 ```sh
 ark repo dangling          # what is outstanding here
@@ -1017,7 +1037,7 @@ gcloud storage cp ./candidate.db gs://<bucket>/repos/<id>.db
 object, not about somebody's replica, so ask the service directly:
 
 ```sh
-curl -sS -X POST "$BASE_URL/v1/sync/pull" -H "Authorization: Bearer $ARK_API_TOKEN" \
+curl -sS -X POST "$BASE_URL/v1/sync/pull" -H "Authorization: Bearer $ARK_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"repository_id":"<id>","after_revision":0}' | jq '.server_revision, (.records | length)'
 ```

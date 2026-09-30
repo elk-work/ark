@@ -44,10 +44,10 @@ type authenticated struct {
 	// over the service.
 	Operator bool
 	// Legacy marks the shared service token. It carries implicit write on
-	// every repository, which is exactly what the token does today; when
-	// grants are enforced (elk-work/ark#52) this is the flag that says "skip
-	// the grant lookup", and when the token retires (#54) the branch that
-	// sets it is simply not registered.
+	// every repository, which is exactly what the token has always done;
+	// grants.go reads it as "skip the grant lookup". When the token retires
+	// (#54 — ARK_LEGACY_TOKEN=off, or ARK_API_TOKEN unset) the branch that
+	// sets it is simply not registered, so nothing is ever marked Legacy.
 	Legacy bool
 }
 
@@ -95,11 +95,14 @@ func (s *Server) authenticate(r *http.Request) (*authenticated, error) {
 	// single point of contention (RFC-0003 "Costs accepted") — it must not
 	// become one for the path that already worked.
 	//
-	// Unless the branch is not registered at all: ARK_LEGACY_TOKEN=off is
-	// RFC-0003 Stage 4's "the legacy branch is simply not registered", and it
-	// is a comparison that does not happen rather than a caller who is
-	// refused — so the service token falls through to the prefix check below
-	// and is answered as the unknown credential it now is (legacy.go).
+	// Unless the branch is not registered at all: ARK_LEGACY_TOKEN=off, and
+	// ARK_API_TOKEN unset, are RFC-0003 Stage 4's "the legacy branch is
+	// simply not registered", and it is a comparison that does not happen
+	// rather than a caller who is refused — so the service token falls
+	// through to the prefix check below and is answered as the unknown
+	// credential it now is (legacy.go). The Token check is legacyAccepted's
+	// own condition restated where it matters most: an empty token must never
+	// be a string an empty bearer can match.
 	if s.legacyAccepted() && s.Token != "" && subtle.ConstantTimeCompare([]byte(tok), []byte(s.Token)) == 1 {
 		return &authenticated{ID: legacyPrincipalID, Kind: legacyPrincipalKind, Legacy: true}, nil
 	}

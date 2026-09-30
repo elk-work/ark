@@ -63,7 +63,7 @@ from losing all of it. If you see it, say so and fix it:
 
 ```sh
 ark remote set <sync-service-url>     # the team's ark-server
-ark login                             # paste the service token
+ark login                             # device login, or paste your own credential
 ark sync                              # pushes everything recorded so far
 ```
 

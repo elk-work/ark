@@ -26,10 +26,15 @@ package server
 // was set to `read-only` and the service kept accepting writes" is the exact
 // silent failure the staging was designed to avoid.
 //
-// **ARK_API_TOKEN stays required, including under `off`.** Making it optional
-// is Stage 4, and it has a second job here — it is still the default HMAC
-// signing key for local-mode blob URLs (see Server.signingKey). `off` retires
-// the token as a *bearer*, which is the half this file owns.
+// **Stage 4 is ARK_API_TOKEN unset**, and it is the one configuration in
+// which the dial has only one position. With no service token there is no
+// legacy bearer to narrow, so the mode is `off` whatever the struct says
+// (Server.legacyMode), and an explicit `full` or `readonly` fails startup
+// (ResolveLegacyMode) rather than being quietly read as `off`. The token's
+// other job — the default HMAC signing key for local-mode blob URLs — passes
+// to ARK_SIGNING_KEY, which cmd/ark-server requires in local mode once the
+// token is gone (see Server.signingKey). Bootstrap was never the token's job:
+// ARK_BOOTSTRAP_TOKEN has minted principals since Stage 1.
 
 import (
 	"fmt"
@@ -67,11 +72,49 @@ func ParseLegacyMode(v string) (string, error) {
 		v, strings.Join(LegacyModeValues, ", "), LegacyModeFull)
 }
 
+// ResolveLegacyMode is ParseLegacyMode for a service that knows whether it has
+// a service token at all — which is the question RFC-0003 Stage 4 adds.
+//
+// With ARK_API_TOKEN set it is exactly ParseLegacyMode. With it unset the only
+// honest position is `off`: unset or `off` resolve to it, and `full` or
+// `readonly` fail startup. That is stricter than reading them as `off`, on
+// purpose. The dial's whole value is that its position is knowable, and the
+// likeliest way to arrive here with `readonly` still set is not a finished
+// cutover but a redeploy that dropped the secret by accident —
+// `--set-secrets` replaces the whole set, and a deployment doc in this fleet
+// has already carried a recipe that would have done exactly that. A container
+// that will not start keeps the previous revision serving; a service that
+// started would have retired the token for everybody still reading with it,
+// on a day nobody chose.
+func ResolveLegacyMode(v string, tokenSet bool) (string, error) {
+	mode, err := ParseLegacyMode(v)
+	if err != nil {
+		return "", err
+	}
+	if tokenSet {
+		return mode, nil
+	}
+	if v == "" || mode == LegacyModeOff {
+		return LegacyModeOff, nil
+	}
+	return "", fmt.Errorf("ARK_LEGACY_TOKEN is %q but ARK_API_TOKEN is unset, so there is no legacy token for it to "+
+		"narrow: unset ARK_LEGACY_TOKEN or set it to %s to run without the shared token (RFC-0003 Stage 4), "+
+		"or restore ARK_API_TOKEN if it was dropped by accident", v, LegacyModeOff)
+}
+
 // legacyMode is the mode this service is running in, with empty read as
 // `full`. Every decision below goes through it, so a Server built as a struct
 // literal — which is how every test and cmd/ark-server builds one — behaves
 // exactly as it did before this field existed.
+//
+// A service with no Token is `off` whatever LegacyMode says: there is no
+// legacy bearer to accept, and saying so here rather than only at the
+// comparison keeps every caller's answer the same as the one authenticate
+// acts on.
 func (s *Server) legacyMode() string {
+	if s.Token == "" {
+		return LegacyModeOff
+	}
 	if s.LegacyMode == "" {
 		return LegacyModeFull
 	}
@@ -79,7 +122,8 @@ func (s *Server) legacyMode() string {
 }
 
 // legacyAccepted reports whether the service token is a bearer at all. False
-// only under `off`, where the legacy comparison is simply not made.
+// under `off`, and so on a service with no token, where the legacy comparison
+// is simply not made.
 func (s *Server) legacyAccepted() bool {
 	return s.legacyMode() != LegacyModeOff
 }
