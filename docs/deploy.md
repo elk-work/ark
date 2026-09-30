@@ -2,8 +2,10 @@
 
 `cmd/ark-server` is the shared authority behind `ark sync`: one SQLite
 database per repository (`repos/<repository-id>.db`) plus content-addressed
-artifact blobs, no always-on database, one bearer token for all clients in
-V1 (spec §20, RFC-0001 superseding spec §19).
+artifact blobs, no always-on database (RFC-0001 superseding spec §19), and a
+credential per person or agent with per-repository grants (spec §20,
+RFC-0003). The single shared bearer token V1 began with is optional, and a
+new deployment does not set it.
 
 Two ways to run it, chosen by whether `GCS_BUCKET` is set:
 

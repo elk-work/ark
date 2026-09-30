@@ -87,15 +87,16 @@ need (principle 005).
 The read-only breakdown board is served at `/ui/` (RFC-0005). Browser
 sessions may authorize only board GET routes; existing writes remain Bearer-only.
 
-**Multi-user authorization is arriving in slices, and most of it has
-landed.** `docs/rfc-0003-elk-issued-credentials.md` (accepted 2026-07-28)
-replaces the single bearer token with per-principal credentials and
-per-repository `read`/`write`/`admin` grants. Scoped as elk-work/ark#43, #52,
-#53 and #54.
+**Multi-user authorization has landed.** `docs/rfc-0003-elk-issued-credentials.md`
+(accepted 2026-07-28) replaced the single bearer token with per-principal
+credentials and per-repository `read`/`write`/`admin` grants, in the slices
+elk-work/ark#43, #52, #53 and #54. The one shared `ARK_API_TOKEN` V1 began
+with is optional, and a deployment that has cut over runs without it.
 
 - **Landed (#43).** `auth.db` holds `principals`, `credentials` and `grants`;
-  `s.auth` is dual-path (`internal/server/auth.go`), so the legacy
-  `ARK_API_TOKEN` and an `arkc_…` credential both authenticate; `POST
+  `s.auth` is dual-path (`internal/server/auth.go`), so where the legacy
+  `ARK_API_TOKEN` is still configured it and an `arkc_…` credential both
+  authenticate; `POST
   /v1/principals` plus `ark principal create` mint credentials from
   `ARK_BOOTSTRAP_TOKEN`, with no identity provider.
 - **Landed (#52).** Grants are enforced on every route
@@ -104,9 +105,11 @@ per-repository `read`/`write`/`admin` grants. Scoped as elk-work/ark#43, #52,
   is refused, while carrying that actor's record stays the no-op every sync
   depends on. `ark repo grant <email> --read|--write|--admin` issues one, and
   the first principal to register a repository administers it. Spec §19.2 is
-  the contract. **The legacy service token still carries implicit `admin`
-  everywhere and is checked against no grant** — that is what keeps the fleet
-  working, and #54 has to replace that break-glass rather than only remove it.
+  the contract. **The legacy service token, where one is configured, carries
+  implicit `admin` everywhere and is checked against no grant** — that is
+  what kept a fleet working through the migration. #54 replaced that
+  break-glass (D124: every repository gets a real `admin` grant before the
+  token retires) rather than only removing it.
 - **Landed (#53).** The device flow: `POST /v1/device/{code,token,approve}`
   (`internal/server/device.go`, spec §20.1) and `ark login` with no arguments,
   which prints a code, polls, and stores the credential the service issues.
@@ -135,8 +138,14 @@ per-repository `read`/`write`/`admin` grants. Scoped as elk-work/ark#43, #52,
   `handleRegisterRepo` refuses repository *creation* by hand, because
   registration asks for `read` — the re-registration every pull begins with
   must keep working.
-- **Not yet.** The rest of #54: `ARK_API_TOKEN` becoming optional (Stage 4)
-  and the four-store rotation. The operator above is the
-  replacement break-glass it was waiting for. Nothing yet writes
-  `principals.disabled_at`, and an operator cannot be demoted — both are edits
-  to `auth.db`.
+- **Landed (#54, Stage 4).** `ARK_API_TOKEN` is optional. Unset, the legacy
+  branch is not registered — `Server.legacyMode` is `off` whatever the struct
+  says, and `authenticate` never compares a bearer against an empty token —
+  so the old string is answered like any unknown bearer. Its two remaining
+  jobs moved: `ARK_SIGNING_KEY` signs local-mode blob URLs and is required in
+  local mode without the token, and `ARK_BOOTSTRAP_TOKEN` (plus an operator's
+  own credential) mints principals. `ResolveLegacyMode` refuses startup on
+  `ARK_LEGACY_TOKEN=full|readonly` with no token, because that combination is
+  most likely a redeploy that dropped the secret.
+- **Not yet.** Nothing writes `principals.disabled_at`, and an operator
+  cannot be demoted — both are edits to `auth.db`.

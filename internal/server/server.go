@@ -22,7 +22,11 @@ import (
 // Server is the Ark sync service.
 type Server struct {
 	Repos *repodb.Manager
-	Token string // single service token (spec §20: V1 begins with one)
+	// Token is ARK_API_TOKEN, the one shared service token V1 began with
+	// (spec §20). Optional since RFC-0003 Stage 4 (elk-work/ark#54): empty
+	// means the legacy branch in s.auth is not registered, so no bearer is
+	// compared against it and every caller is a principal. See legacy.go.
+	Token string
 	// LegacyMode is ARK_LEGACY_TOKEN: what the service token above may still
 	// do. Empty means `full` — the behaviour every deployment configured
 	// before this field existed is running — and the other two positions are
@@ -34,7 +38,9 @@ type Server struct {
 	UIMode string
 	// SigningKey signs local-mode blob URLs. Empty falls back to Token,
 	// which is what every deployment configured before ARK_SIGNING_KEY
-	// existed relies on. See signingKey.
+	// existed relies on. With both empty the local blob store refuses to
+	// mint or serve anything, and cmd/ark-server refuses to start that way.
+	// See signingKey.
 	SigningKey string
 	// BootstrapToken mints the first principal on POST /v1/principals and is
 	// accepted on no other route (RFC-0003 Decision 6). Empty disables that
@@ -77,7 +83,9 @@ type Server struct {
 // service token as a bearer (elk-work/ark#54): the day ARK_API_TOKEN goes
 // away, a signing key with no home takes local-mode artifact URLs with it, and
 // a signature that no longer verifies looks like a bad URL rather than like a
-// missing setting.
+// missing setting. Since Stage 4 that day can come: a service with no Token
+// signs with SigningKey alone, and with neither it signs nothing — the store
+// treats an empty secret as "refuse", never as "open".
 func (s *Server) signingKey() string {
 	if s.SigningKey != "" {
 		return s.SigningKey
@@ -144,9 +152,10 @@ func (s *Server) Handler() http.Handler {
 		// These routes carry their own signature rather than the bearer
 		// token, because clients treat them as pre-signed URLs and send no
 		// Authorization header. The key is ARK_SIGNING_KEY, defaulting to the
-		// service token — so there is still nothing to configure and still no
-		// way to leave the routes open, but the key now has a name that
-		// outlives the service token being a bearer.
+		// service token while there is one, so a deployment that has not
+		// retired the token still has nothing to configure. There is no way
+		// to leave the routes open: with no key at all they refuse every
+		// request, and cmd/ark-server will not start in that configuration.
 		local.Secret = s.signingKey()
 		mux.Handle("GET /blobs/", local.Handler())
 		mux.Handle("PUT /blobs/", local.Handler())

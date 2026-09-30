@@ -4,15 +4,19 @@
 //
 // Configuration (environment):
 //
-//	ARK_API_TOKEN    bearer token clients must present (required)
+//	ARK_API_TOKEN    the legacy shared bearer token (optional). Unset, the
+//	                 legacy branch is not registered and every client
+//	                 authenticates with a per-principal credential.
+//	                 RFC-0003 Stage 4
 //	ARK_LEGACY_TOKEN what ARK_API_TOKEN may still do as a bearer:
 //	                 full | readonly | off (default full, which is the
 //	                 behaviour before this setting existed). readonly lets it
 //	                 pull and read and refuses every write; off stops
-//	                 accepting it as a bearer at all. RFC-0003 Stage 3
+//	                 accepting it as a bearer at all. RFC-0003 Stage 3. With
+//	                 ARK_API_TOKEN unset only off (or unset) is accepted
 //	ARK_UI          on | off (default on); hides the board and task GET routes
 //	ARK_SIGNING_KEY  HMAC key signing local-mode /blobs/ URLs (default:
-//	                 ARK_API_TOKEN)
+//	                 ARK_API_TOKEN; required in local mode without it)
 //	ARK_BOOTSTRAP_TOKEN
 //	                 accepted on POST /v1/principals only, to mint the first
 //	                 per-principal credential; unset disables that route
@@ -68,10 +72,12 @@ func run() error {
 	ver := buildinfo.Resolve(version)
 	log := slog.New(slog.NewJSONHandler(os.Stderr, nil)).With("version", ver)
 
+	// Optional since RFC-0003 Stage 4 (elk-work/ark#54). Unset is the
+	// retired configuration, not a missing one: the legacy branch in s.auth is
+	// not registered, so the shared string is answered like any unknown
+	// bearer, and principals and their credentials are the only way in.
 	token := os.Getenv("ARK_API_TOKEN")
-	if token == "" {
-		return fmt.Errorf("ARK_API_TOKEN is required")
-	}
+	signingKey := os.Getenv("ARK_SIGNING_KEY")
 	// The device flow needs both halves or neither: an approval URL with no
 	// key is a service that sends people to a page whose approvals it cannot
 	// verify, and it would fail at the last step of a login rather than at
@@ -94,8 +100,10 @@ func run() error {
 	// token the whole fleet holds may do, so a value that is none of the three
 	// must not be read as "carry on as before" — a service that answered
 	// ARK_LEGACY_TOKEN=read-only by accepting every write would report the
-	// riskiest step of the cutover as done while changing nothing.
-	legacyMode, err := server.ParseLegacyMode(os.Getenv("ARK_LEGACY_TOKEN"))
+	// riskiest step of the cutover as done while changing nothing. With no
+	// ARK_API_TOKEN the only position left is off, and an explicit full or
+	// readonly is refused rather than reinterpreted (see ResolveLegacyMode).
+	legacyMode, err := server.ResolveLegacyMode(os.Getenv("ARK_LEGACY_TOKEN"), token != "")
 	if err != nil {
 		return err
 	}
@@ -125,6 +133,16 @@ func run() error {
 		if base == "" {
 			return fmt.Errorf("BASE_URL is required when GCS_BUCKET is unset")
 		}
+		// Local mode signs /blobs/ URLs itself, and the key has always
+		// defaulted to the service token. Without either the store would
+		// refuse every URL it was asked to mint — artifacts broken while
+		// records sync, which reads as a bad URL rather than as a missing
+		// setting. Refuse at startup instead. Object-storage mode is
+		// unaffected: GCS signs its own URLs.
+		if token == "" && signingKey == "" {
+			return fmt.Errorf("ARK_SIGNING_KEY is required when GCS_BUCKET and ARK_API_TOKEN are both unset: " +
+				"it signs local-mode /blobs/ URLs, and the service token it used to default to is not configured")
+		}
 		dir := os.Getenv("DATA_DIR")
 		if dir == "" {
 			dir = "data"
@@ -140,10 +158,12 @@ func run() error {
 		// deployment configured before ARK_LEGACY_TOKEN existed is running.
 		LegacyMode: legacyMode,
 		UIMode:     uiMode,
-		// Unset is the supported configuration, not an oversight: the signing
-		// key falls back to the service token, which is what it has always
-		// been. Setting it is how a deployment stops depending on that.
-		SigningKey: os.Getenv("ARK_SIGNING_KEY"),
+		// Unset is the supported configuration while ARK_API_TOKEN is set,
+		// not an oversight: the signing key falls back to the service token,
+		// which is what it has always been. Setting it is how a deployment
+		// stops depending on that, and local mode requires it once the token
+		// is gone (checked above).
+		SigningKey: signingKey,
 		// Unset is also the supported configuration here, and the safer one:
 		// no bootstrap token means no route that mints principals at all.
 		BootstrapToken: os.Getenv("ARK_BOOTSTRAP_TOKEN"),
@@ -171,7 +191,18 @@ func run() error {
 	// position the dial is in is the first question anybody debugging a
 	// refused push will ask, and the second is whether the revision that was
 	// rolled to change it actually came up with the new value.
-	log.Info("legacy service token", "mode", legacyMode)
+	// The "configured" half answers the Stage 4 question the same way: a
+	// revision rolled to retire the token logs mode=off configured=false,
+	// and nothing else does.
+	log.Info("legacy service token", "mode", legacyMode, "configured", token != "")
+	if token == "" && s.BootstrapToken == "" && approvalURL == "" {
+		// Not an error — a deployment that has minted its principals and then
+		// dropped the bootstrap token is the tightest configuration there is.
+		// But on a fresh data directory it is one nobody can get into, and
+		// that should be the first thing the log says rather than something
+		// deduced from a wall of 401s.
+		log.Warn("no ARK_API_TOKEN, ARK_BOOTSTRAP_TOKEN or identity provider: only credentials already issued can reach this service")
+	}
 	log.Info("listening", "port", port)
 	return httpServer.ListenAndServe()
 }
