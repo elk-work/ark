@@ -80,8 +80,15 @@ Green CI, not a draft, no `hold` label ⇒ it lands — the fleet-wide standard 
 
 ## What is deliberately absent (V1)
 
-Workspaces, projects, milestones, hosted Git, a custom merge
-engine, full `gh` parity. Do not add primitives without a demonstrated
+Workspaces, projects, milestones, a custom merge
+engine, full `gh` parity.
+
+**Git hosting** (elk-work/ark#125) was on this list until 2026-10-24. The
+service now serves bare repositories over smart HTTP
+(`internal/server/smarthttp.go`), and principle 001 is why that is not a
+rebuild of Git: `git upload-pack` and `git receive-pack` speak the whole
+protocol, and Ark adds nothing to Git's model — no refs, hooks or objects of
+its own. docs/self-hosting.md § Git hosting is the operator's view. Do not add primitives without a demonstrated
 need (principle 005).
 
 The read-only breakdown board is served at `/ui/` (RFC-0005). Browser

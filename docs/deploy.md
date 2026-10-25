@@ -61,3 +61,21 @@ there is deliberately no insecure-cookie switch. The UI is embedded Go HTML,
 CSS and vanilla JavaScript: `make build-server` includes it without a Node or
 npm step. The board shows the service's last synced records, not unsynced
 changes on somebody's machine.
+
+## Git hosting
+
+`GIT_DATA_DIR` (default `<DATA_DIR>/git`) holds one bare repository per Ark
+repository, served at `/git/<repository id>` over smart HTTP with the same
+credentials and grants as the API (elk-work/ark#125). The runtime image
+carries the `git` binary for it; the root `Dockerfile` installs it. On Cloud
+Run:
+
+- **Deploy with `--use-http2`.** Cloud Run caps an HTTP/1 request at 32 MiB
+  and a first push is usually larger. The service accepts h2c, which has no
+  such cap.
+- **Size memory for the repositories.** Cloud Run's writable filesystem is
+  memory, counted against the instance limit, so the bare repositories under
+  `GIT_DATA_DIR` and the Git processes serving them share the container's
+  memory. `256Mi` is not enough for a repository of any size.
+
+[self-hosting § Git hosting](self-hosting.md#git-hosting) is the reference.

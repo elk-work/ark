@@ -52,7 +52,8 @@ The server takes **no command-line flags**. Everything is environment:
 | `BASE_URL` | local mode | — | Externally reachable base URL of this service. Required when `GCS_BUCKET` is unset; used to build blob URLs. Startup fails without it. |
 | `DATA_DIR` | no | `data` | Local mode only. Repository databases go in `<DATA_DIR>/repos`, blobs in `<DATA_DIR>/blobs`. Relative paths resolve against the working directory. |
 | `CACHE_DIR` | no | `<os temp dir>/ark-repos` | Scratch space for working copies of repository databases and of `auth.db`. Created at startup. Safe to lose — it is a cache, refetched on demand. |
-| `PORT` | no | `8080` | Listen port. |
+| `GIT_DATA_DIR` | no | `<DATA_DIR>/git` | Where the bare Git repositories served at `/git/<repository id>` live, one directory per repository (`<id>.git`). Created at startup. Needs the `git` binary on `PATH` (the root `Dockerfile` installs it). In object-storage mode this is scratch space — see [Git hosting](#git-hosting). |
+| `PORT` | no | `8080` | Listen port. The service speaks HTTP/1.1 and HTTP/2 without TLS (h2c) on it. |
 
 The mode is chosen solely by whether `GCS_BUCKET` is non-empty. There is
 no flag, no config file, and no way to mix the two.
@@ -583,6 +584,50 @@ them.
   reason.
 
 ---
+
+## Git hosting
+
+The service hosts one bare Git repository per Ark repository and serves it
+over Git's smart HTTP protocol (elk-work/ark#125), so a team can use Ark
+instead of GitHub for source control. It adds nothing to Git's model
+([principle 001](principles.md)): every byte of the protocol is spoken by
+`git upload-pack` and `git receive-pack` themselves, run against the bare
+repository with `--stateless-rpc`.
+
+```sh
+git remote add ark "$(ark repo git-url)"     # <service>/git/<repository id>
+git push ark main
+git clone https://<service>/git/<repository id>
+```
+
+**Authentication is the credential you already hold.** Git presents it as
+HTTP Basic: any username, the `arkc_` credential as the password — which is
+what git's credential helper stores after the first prompt. A Bearer header
+works too (`git -c http.extraHeader="Authorization: Bearer $ARK_TOKEN" …`).
+The grants are the repository's own: `read` fetches and clones, `write`
+pushes, and a principal with neither is refused with `403`. A missing or
+refused credential is a `401` with `WWW-Authenticate: Basic`, which is what
+makes git ask. A repository the service has not registered is a `404` — a
+push never creates a registration, only `ark sync` does.
+
+**Storage.** The bare repository is `GIT_DATA_DIR/<id>.git`, created with
+`git init --bare` the first time anything touches it, with `HEAD` on the
+repository's default branch and `core.logAllRefUpdates=always`, so a force
+push leaves Git's own reflog of what it replaced. In local mode that
+directory is as durable as the disk under `DATA_DIR`, and backing it up is
+copying it.
+
+**Routes.** `GET /git/{repo}/info/refs?service=git-upload-pack|git-receive-pack`,
+`POST /git/{repo}/git-upload-pack`, `POST /git/{repo}/git-receive-pack`.
+`{repo}` is the repository ULID; a trailing `.git` is accepted. Dumb HTTP is
+not served. Gzipped request bodies, which Git sends for large negotiations
+and pushes, are inflated before Git sees them.
+
+**Behind a proxy.** Pushes are large requests. Cloud Run caps an HTTP/1
+request body at 32 MiB, which the first push of most real repositories
+exceeds; deploy with `--use-http2` so Cloud Run speaks h2c to the container,
+which the service accepts and which has no such cap. A reverse proxy needs
+its body-size limit raised and request buffering off for `/git/`.
 
 ## Work-record write routes
 
