@@ -37,6 +37,17 @@
 //	GIT_DATA_DIR     where the bare Git repositories served at /git/<id> live
 //	                 (default <DATA_DIR>/git). Needs the git binary on PATH.
 //	                 elk-work/ark#125, internal/server/smarthttp.go
+//	ARK_MIRROR_INTERVAL
+//	                 how often repositories whose refs moved are pushed to
+//	                 their mirror, as a Go duration (default 10m)
+//	ARK_MIRROR_CREDENTIAL
+//	                 token, or user:token, the mirror is pushed with; offered
+//	                 only to the mirror's own host, never logged
+//	ARK_PUSH_WEBHOOK_URL
+//	                 where a push event is POSTed, one per updated ref
+//	                 (unset: no webhook)
+//	ARK_PUSH_WEBHOOK_TOKEN
+//	                 bearer the push webhook carries
 //	PORT             listen port (default 8080)
 package main
 
@@ -45,6 +56,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -139,6 +151,24 @@ func run() error {
 	if err := os.MkdirAll(gitDataDir, 0o755); err != nil {
 		return fmt.Errorf("GIT_DATA_DIR %s: %w", gitDataDir, err)
 	}
+	// Validated at startup like every other setting here: a typo in an
+	// interval or a webhook URL would otherwise surface as a backup that
+	// never runs, or checks that never start, noticed days later.
+	mirrorInterval := server.DefaultMirrorInterval
+	if v := os.Getenv("ARK_MIRROR_INTERVAL"); v != "" {
+		d, err := time.ParseDuration(v)
+		if err != nil || d < time.Minute {
+			return fmt.Errorf("ARK_MIRROR_INTERVAL is %q; it takes a Go duration of at least 1m, such as 10m", v)
+		}
+		mirrorInterval = d
+	}
+	webhookURL := os.Getenv("ARK_PUSH_WEBHOOK_URL")
+	if webhookURL != "" {
+		u, err := url.Parse(webhookURL)
+		if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+			return fmt.Errorf("ARK_PUSH_WEBHOOK_URL is not an http(s) URL")
+		}
+	}
 
 	var backend repodb.Backend
 	var blobs server.BlobStore
@@ -195,6 +225,12 @@ func run() error {
 		Log:          log,
 		Version:      ver,
 		GitDataDir:   gitDataDir,
+		// The mirror and the push webhook (elk-work/ark#125). Both secrets
+		// stay in these fields: never logged, never on a command line.
+		MirrorInterval:   mirrorInterval,
+		MirrorCredential: os.Getenv("ARK_MIRROR_CREDENTIAL"),
+		PushWebhookURL:   webhookURL,
+		PushWebhookToken: os.Getenv("ARK_PUSH_WEBHOOK_TOKEN"),
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -235,7 +271,11 @@ func run() error {
 		// in a 500 per clone.
 		log.Warn("git is not on PATH: the /git/ routes will fail", "error", err)
 	}
-	log.Info("git hosting", "git_data_dir", gitDataDir)
+	// Which of the Git settings are on, never their values.
+	log.Info("git hosting", "git_data_dir", gitDataDir, "mirror_interval", mirrorInterval.String(),
+		"mirror_credential", s.MirrorCredential != "", "push_webhook", webhookURL != "",
+		"push_webhook_token", s.PushWebhookToken != "")
+	go s.RunMirrorLoop(ctx)
 	log.Info("listening", "port", port)
 	return httpServer.ListenAndServe()
 }

@@ -575,13 +575,3 @@ func gitError(what string, err error) error {
 	}
 	return fmt.Errorf("git %s: %w", what, err)
 }
-
-// afterPush is what follows a push that changed something. It is the hook
-// point the mirror and the push webhook hang from; the work runs after the
-// response, on the service's own clock rather than the client's.
-func (s *Server) afterPush(repoID, dir string, who *authenticated, updates []refUpdate) {
-	_ = repoID
-	_ = dir
-	_ = who
-	_ = updates
-}

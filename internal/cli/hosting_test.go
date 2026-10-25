@@ -1,13 +1,18 @@
 package cli
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/elk-work/ark/internal/records"
 	"github.com/elk-work/ark/internal/servertest"
+	"github.com/elk-work/ark/pkg/api"
 )
 
 // isolatedGit runs git with no system or global configuration and a HOME of
@@ -58,11 +63,72 @@ func TestRepoGitURLIsWhereGitPushesAndClones(t *testing.T) {
 		t.Errorf("clone HEAD = %s, want %s", got, want)
 	}
 
-	// No remote, no URL: it says what to do rather than printing half of one.
+	// No remote, no URL: it says what to do rather than printing half of
+	// one.
 	bare := gitRepo(t)
 	ark(t, bare, "init")
 	if _, err := arkErr(t, bare, "repo", "git-url"); err == nil ||
 		!strings.Contains(err.Error(), "ark remote set") {
 		t.Errorf("git-url with no remote: %v", err)
+	}
+}
+
+// `ark repo mirror set|show|clear` against a real service: refused for a
+// caller who is not an operator (here, the shared service token), and the
+// whole round trip for one who is.
+func TestRepoMirrorSetShowClear(t *testing.T) {
+	s := servertest.NewServer(t)
+	s.BootstrapToken = "boot"
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+	t.Setenv("ARK_TOKEN", servertest.Token)
+
+	dir := gitRepo(t)
+	ark(t, dir, "init")
+	ark(t, dir, "remote", "set", ts.URL)
+	ark(t, dir, "sync")
+
+	const mirror = "https://github.com/elk-work/example.git"
+	_, err := arkErr(t, dir, "repo", "mirror", "set", mirror)
+	if code := records.ExitCode(err); code != 5 || !strings.Contains(err.Error(), "operator") {
+		t.Fatalf("mirror set by a non-operator: exit %d, %v", code, err)
+	}
+	if _, err := arkErr(t, dir, "repo", "mirror", "set", "git@github.com:elk-work/example.git"); records.ExitCode(err) != 2 {
+		t.Errorf("an ssh mirror URL: %v, want a validation error", err)
+	}
+
+	// The first principal minted on a service with no operator is one.
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/principals",
+		strings.NewReader(`{"email":"op@example.com","display_name":"Op"}`))
+	req.Header.Set("Authorization", "Bearer boot")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var minted api.CreatePrincipalResponse
+	if err := json.NewDecoder(resp.Body).Decode(&minted); err != nil || resp.StatusCode != 200 {
+		t.Fatalf("mint operator: %d %v", resp.StatusCode, err)
+	}
+	resp.Body.Close()
+	ark(t, dir, "repo", "grant", "op@example.com", "--admin")
+	t.Setenv("ARK_TOKEN", minted.Token)
+
+	var set api.RepositoryResponse
+	arkJSON(t, dir, &set, "repo", "mirror", "set", mirror)
+	if !set.Changed || set.Repository.Mirror.URL != mirror {
+		t.Fatalf("mirror set: %+v", set)
+	}
+	var shown api.MirrorStatus
+	arkJSON(t, dir, &shown, "repo", "mirror", "show")
+	if shown.URL != mirror {
+		t.Errorf("mirror show: %+v", shown)
+	}
+	if out := ark(t, dir, "repo", "show"); !strings.Contains(out, mirror) {
+		t.Errorf("repo show does not mention the mirror:\n%s", out)
+	}
+	ark(t, dir, "repo", "mirror", "clear")
+	arkJSON(t, dir, &shown, "repo", "mirror", "show")
+	if shown.URL != "" {
+		t.Errorf("after clear: %+v", shown)
 	}
 }
