@@ -29,8 +29,10 @@ Set `ARK_UI=off` to hide the board and its task-read routes. See
 The sync service can also host each repository's Git: plain bare repositories
 served over smart HTTP at `<service>/git/<repository id>` (`ark repo git-url`
 prints it), cloned and pushed with ordinary Git and your Ark credential, with
-`read` grants fetching and `write` grants pushing. Ark adds nothing to Git's
-model; see [self-hosting § Git hosting](docs/self-hosting.md#git-hosting).
+`read` grants fetching and `write` grants pushing. The service can mirror each
+repository to GitHub as a backup (`ark repo mirror set`) and announce every
+push to a webhook, while adding nothing to Git's model; see
+[self-hosting § Git hosting](docs/self-hosting.md#git-hosting).
 
 ## Status
 

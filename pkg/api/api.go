@@ -65,6 +65,48 @@ type RepositoryMetadata struct {
 	// change advances like any other write.
 	Revision  int64  `json:"revision"`
 	CreatedAt string `json:"created_at,omitempty"`
+	// Mirror is where the service mirrors this repository's Git, and how
+	// the last attempt went (elk-work/ark#125). Absent when no mirror is
+	// set. The mirror is a backup: the service's copy is the record.
+	Mirror MirrorStatus `json:"mirror,omitzero"`
+}
+
+// MirrorStatus is a repository's Git mirror: the URL the service runs `git
+// push --mirror` to after every push and on a ticker, and the outcome of the
+// last attempt. Only URL is stored with the repository; the rest is the
+// service's own observation and is empty until it has tried.
+type MirrorStatus struct {
+	URL           string `json:"url"`
+	LastAttemptAt string `json:"last_attempt_at,omitempty"`
+	LastOKAt      string `json:"last_ok_at,omitempty"`
+	LastError     string `json:"last_error,omitempty"`
+}
+
+// PushEvent is the body of the push webhook (ARK_PUSH_WEBHOOK_URL): one POST
+// per ref a push to the service's Git updated (elk-work/ark#125). Ark knows
+// nothing about what the receiver does with it — Elk turns it into check
+// runs.
+type PushEvent struct {
+	RepositoryID string     `json:"repository_id"`
+	Ref          string     `json:"ref"`
+	Before       string     `json:"before"` // all zeros for a created ref
+	After        string     `json:"after"`  // all zeros for a deleted ref
+	Pusher       PushPusher `json:"pusher"`
+	// ChangedPaths is `git diff --name-only before after`; for a created ref,
+	// the paths the tip commit changed (every path, for a root commit); for a
+	// deleted ref, empty.
+	ChangedPaths []string `json:"changed_paths"`
+	// ChangedPathsTruncated is set when ChangedPaths was cut short.
+	ChangedPathsTruncated bool `json:"changed_paths_truncated,omitempty"`
+	// Manifests carries known files at After by path ("ci/suites.yml"),
+	// present only when the file exists there.
+	Manifests map[string]string `json:"manifests"`
+}
+
+// PushPusher names the principal whose credential made the push.
+type PushPusher struct {
+	PrincipalID string `json:"principal_id"`
+	Email       string `json:"email"`
 }
 
 // SetRepositoryMetadataRequest is the body of
@@ -83,6 +125,12 @@ type SetRepositoryMetadataRequest struct {
 	// repository can genuinely have no remote, and refusing would leave a
 	// wrong non-empty value uncorrectable.
 	GitRemoteURL *string `json:"git_remote_url,omitempty"`
+	// MirrorURL sets where the service mirrors this repository's Git; an
+	// explicit empty string clears it. An https URL with no credential in
+	// it — the credential is the service's own (ARK_MIRROR_CREDENTIAL) —
+	// and setting it is an operator act on top of `admin`, because it
+	// points that credential somewhere.
+	MirrorURL *string `json:"mirror_url,omitempty"`
 }
 
 // RepositoryResponse carries the repository metadata as it now stands and

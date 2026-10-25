@@ -53,6 +53,10 @@ The server takes **no command-line flags**. Everything is environment:
 | `DATA_DIR` | no | `data` | Local mode only. Repository databases go in `<DATA_DIR>/repos`, blobs in `<DATA_DIR>/blobs`. Relative paths resolve against the working directory. |
 | `CACHE_DIR` | no | `<os temp dir>/ark-repos` | Scratch space for working copies of repository databases and of `auth.db`. Created at startup. Safe to lose — it is a cache, refetched on demand. |
 | `GIT_DATA_DIR` | no | `<DATA_DIR>/git` | Where the bare Git repositories served at `/git/<repository id>` live, one directory per repository (`<id>.git`). Created at startup. Needs the `git` binary on `PATH` (the root `Dockerfile` installs it). In object-storage mode this is scratch space — see [Git hosting](#git-hosting). |
+| `ARK_MIRROR_INTERVAL` | no | `10m` | How often the service pushes each repository whose refs moved since its last successful mirror to that mirror, as a Go duration of at least `1m`. Pushes also mirror immediately. A bad value fails startup. See [The mirror](#the-mirror). |
+| `ARK_MIRROR_CREDENTIAL` | with a private mirror | — | The token (`ghp_…`, a fine-grained token, an app token), or `user:token`, the mirror is pushed with. Offered only to the mirror URL's own host, through a credential helper; never in a URL, an argument or a log line. Store it as a secret. |
+| `ARK_PUSH_WEBHOOK_URL` | no | — | Where a push event is POSTed after a push lands, one per updated ref. Unset, no webhook. Must be an http(s) URL or startup fails. See [The push webhook](#the-push-webhook). |
+| `ARK_PUSH_WEBHOOK_TOKEN` | with the above | — | The bearer the push webhook carries, so the receiver can tell the service from anybody else. Store it as a secret. |
 | `PORT` | no | `8080` | Listen port. The service speaks HTTP/1.1 and HTTP/2 without TLS (h2c) on it. |
 
 The mode is chosen solely by whether `GCS_BUCKET` is non-empty. There is
@@ -622,6 +626,82 @@ copying it.
 `{repo}` is the repository ULID; a trailing `.git` is accepted. Dumb HTTP is
 not served. Gzipped request bodies, which Git sends for large negotiations
 and pushes, are inflated before Git sees them.
+
+### The mirror
+
+A repository can be mirrored to a second Git host — GitHub, in practice — as
+a backup. The service's copy is the record; the mirror is a copy of it.
+
+```sh
+ark repo mirror set https://github.com/<owner>/<repo>.git   # an operator, with admin on the repository
+ark repo mirror show                                         # URL, last success, last error
+ark repo mirror clear
+```
+
+After every push that changes something, and every `ARK_MIRROR_INTERVAL`
+while a repository's refs differ from what its last successful mirror
+pushed, the service runs `git push --mirror` to the URL. The mirror ends up
+with exactly the service's refs — branches deleted on the service are
+deleted there — so point it at a repository that holds nothing else. A
+failure is logged and reported on `GET /v1/repositories/{repo}` as
+`mirror.last_error` (with `mirror.last_attempt_at` and `mirror.last_ok_at`
+beside it); it never fails the push that triggered it, and the next push or
+tick tries again.
+
+Three rules keep a service-wide credential from becoming anybody's:
+
+- **Setting the mirror is an operator act, on top of `admin`.** Any
+  principal administers a repository it registers, and `--mirror`
+  force-updates and deletes refs at the far end; pointing the service's
+  credential at a host, or at another team's GitHub repository, is a
+  decision about that credential.
+- **The URL is `https` and carries no credential.** `ARK_MIRROR_CREDENTIAL`
+  is the only one. It reaches Git through a credential helper configured for
+  the mirror's own scheme and host, from the Git process's environment, with
+  HTTP redirects off — so it is offered to no other host, and appears in no
+  argument list, stored URL or log line. Scope the token to the mirror
+  repositories (a fine-grained GitHub token with contents: write on them).
+- **An empty repository is never mirrored**, because mirroring it would
+  delete the backup.
+
+The status is the service's own observation, kept in `ark-mirror.json`
+inside the bare repository (Git ignores it) rather than in the repository
+database, which every write rewrites in the bucket.
+
+### The push webhook
+
+With `ARK_PUSH_WEBHOOK_URL` set, every push that lands is followed by one
+`POST` per updated ref, carrying `Authorization: Bearer
+$ARK_PUSH_WEBHOOK_TOKEN`, `X-Ark-Event: push`, an `X-Ark-Delivery` id that
+is the same on every retry of one event, and:
+
+```json
+{
+  "repository_id": "01K…",
+  "ref": "refs/heads/main",
+  "before": "<sha, all zeros for a created ref>",
+  "after": "<sha, all zeros for a deleted ref>",
+  "pusher": {"principal_id": "01K…", "email": "someone@example.com"},
+  "changed_paths": ["README.md", "ci/suites.yml"],
+  "manifests": {"ci/suites.yml": "<the file at after, present only when it exists>"}
+}
+```
+
+`changed_paths` is `git diff --name-only before after`; for a created ref it
+is the paths the tip commit changed (every path, for a root commit), and for
+a deleted ref it is empty. It is capped at 10,000 entries, with
+`changed_paths_truncated: true` when cut. A manifest over 1 MiB is left out.
+A receiver that does not answer 2xx is retried three times with backoff
+(1 s, 4 s, 16 s); after that the service logs the failure and moves on. The
+push never waits for it. Ark knows nothing about what the receiver does —
+Elk's connector turns these events into check runs.
+
+### Background work
+
+The mirror, the webhook and the ticker run after the push has been
+answered. On a platform that only allocates CPU while a request is in
+flight — Cloud Run's default — they stall until the next request, so deploy
+with CPU always allocated (`--no-cpu-throttling`).
 
 **Behind a proxy.** Pushes are large requests. Cloud Run caps an HTTP/1
 request body at 32 MiB, which the first push of most real repositories

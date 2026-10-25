@@ -61,6 +61,7 @@ func startupEnv(t *testing.T, env map[string]string) {
 		"ARK_API_TOKEN", "ARK_LEGACY_TOKEN", "ARK_UI", "ARK_SIGNING_KEY", "ARK_BOOTSTRAP_TOKEN",
 		"ARK_IDP_APPROVAL_URL", "ARK_IDP_KEY", "ARK_DEFAULT_GRANT",
 		"GCS_BUCKET", "BASE_URL", "DATA_DIR", "CACHE_DIR", "PORT", "GIT_DATA_DIR",
+		"ARK_MIRROR_INTERVAL", "ARK_MIRROR_CREDENTIAL", "ARK_PUSH_WEBHOOK_URL", "ARK_PUSH_WEBHOOK_TOKEN",
 	} {
 		t.Setenv(name, env[name])
 	}
@@ -146,5 +147,31 @@ func TestRunRefusesWhatStage4CannotHonour(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The Git hosting settings are validated before the service listens, so a
+// typo is a container that will not start rather than a backup that never
+// runs (elk-work/ark#125).
+func TestRunRefusesBadGitHostingSettings(t *testing.T) {
+	for _, c := range []struct {
+		name, variable, value string
+	}{
+		{"interval that is not a duration", "ARK_MIRROR_INTERVAL", "ten minutes"},
+		{"interval under a minute", "ARK_MIRROR_INTERVAL", "5s"},
+		{"webhook that is not a URL", "ARK_PUSH_WEBHOOK_URL", "elk.work/hooks"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			startupEnv(t, localMode(t, map[string]string{"ARK_SIGNING_KEY": "k", c.variable: c.value}))
+			err := run()
+			if err == nil || !strings.Contains(err.Error(), c.variable) {
+				t.Fatalf("%s=%q: %v", c.variable, c.value, err)
+			}
+		})
+	}
+	startupEnv(t, localMode(t, map[string]string{"ARK_SIGNING_KEY": "k",
+		"ARK_MIRROR_INTERVAL": "15m", "ARK_PUSH_WEBHOOK_URL": "https://elk.example/hooks/ark"}))
+	if err := run(); err == nil || !strings.Contains(err.Error(), "listen") {
+		t.Fatalf("good settings were refused before listen: %v", err)
 	}
 }

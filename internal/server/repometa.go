@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode"
 
+	"github.com/elk-work/ark/internal/records"
 	"github.com/elk-work/ark/pkg/api"
 )
 
@@ -62,17 +63,24 @@ func (s *Server) handleGetRepository(w http.ResponseWriter, r *http.Request) {
 		s.respond(w, "load repository", err)
 		return
 	}
+	if meta.Mirror.URL != "" {
+		s.fillMirrorStatus(repoID, &meta.Mirror)
+	}
 	writeJSON(w, meta)
 }
 
-const metadataQuery = `SELECT repository_id, name, default_branch, git_remote_url, revision, created_at
+// metadataQuery reads the meta row and the mirror URL beside it. The mirror
+// lives in its own single-row table (schema.sql says why), so a repository
+// that never set one reads as "".
+const metadataQuery = `SELECT repository_id, name, default_branch, git_remote_url, revision, created_at,
+	COALESCE((SELECT url FROM git_mirror WHERE id = 1), '')
 	FROM meta WHERE id = 1`
 
 type scanner interface{ Scan(dest ...any) error }
 
 func loadMetadata(row scanner, meta *api.RepositoryMetadata) error {
 	return row.Scan(&meta.ID, &meta.Name, &meta.DefaultBranch,
-		&meta.GitRemoteURL, &meta.Revision, &meta.CreatedAt)
+		&meta.GitRemoteURL, &meta.Revision, &meta.CreatedAt, &meta.Mirror.URL)
 }
 
 // handleSetRepositoryMetadata corrects one or more metadata fields.
@@ -98,9 +106,24 @@ func (s *Server) handleSetRepositoryMetadata(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusBadRequest, "validation", "Idempotency-Key is too long")
 		return
 	}
-	if fault := validateMetadata(req); fault != nil {
+	if fault := s.validateMetadata(req); fault != nil {
 		writeErr(w, fault.status, fault.code, fault.msg)
 		return
+	}
+	// The mirror is the one field `admin` is not enough for. Pointing it
+	// somewhere spends the service's own credential (ARK_MIRROR_CREDENTIAL)
+	// there, and `git push --mirror` force-updates and deletes every ref at
+	// the far end — while `admin` is something any principal holds on a
+	// repository it registered. So it is an operator act as well, the way
+	// the other things that act on the whole service are (operators.go).
+	if req.MirrorURL != nil {
+		if who := principalOf(r); who == nil || !who.Operator {
+			writeErr(w, http.StatusForbidden, "permission",
+				"setting a repository's mirror is an operator act: the mirror is pushed with the service's own "+
+					"credential, so pointing it somewhere is a decision about that credential. Ask an operator "+
+					"of this service to run `ark repo mirror set`")
+			return
+		}
 	}
 
 	ctx := r.Context()
@@ -133,6 +156,9 @@ func (s *Server) handleSetRepositoryMetadata(w http.ResponseWriter, r *http.Requ
 		if req.GitRemoteURL != nil {
 			next.GitRemoteURL = strings.TrimSpace(*req.GitRemoteURL)
 		}
+		if req.MirrorURL != nil {
+			next.Mirror.URL = strings.TrimSpace(*req.MirrorURL)
+		}
 		if next == meta {
 			// Setting a field to what it already holds is a correct answer,
 			// not a write. Minting a revision for it would make every client
@@ -160,6 +186,15 @@ func (s *Server) handleSetRepositoryMetadata(w http.ResponseWriter, r *http.Requ
 			next.Name, next.DefaultBranch, next.GitRemoteURL); err != nil {
 			return err
 		}
+		if next.Mirror.URL != meta.Mirror.URL {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO git_mirror (id, url, set_by, set_at)
+				VALUES (1, ?, ?, ?)
+				ON CONFLICT (id) DO UPDATE SET url = excluded.url, set_by = excluded.set_by,
+					set_at = excluded.set_at`,
+				next.Mirror.URL, principalOf(r).ID, records.Now()); err != nil {
+				return err
+			}
+		}
 		next.Revision = rev
 		resp = api.RepositoryResponse{Repository: next, Changed: true, ServerRevision: rev}
 		return rememberResponse(ctx, tx, key, resp, rev)
@@ -171,9 +206,14 @@ func (s *Server) handleSetRepositoryMetadata(w http.ResponseWriter, r *http.Requ
 // would leave the repository harder to identify than the wrong one it
 // replaces. Checks run before storage is touched so a bad request costs no
 // fetch of the repository database.
-func validateMetadata(req api.SetRepositoryMetadataRequest) *writeFault {
-	if req.Name == nil && req.DefaultBranch == nil && req.GitRemoteURL == nil {
-		return faultValidation("at least one of name, default_branch, git_remote_url is required")
+func (s *Server) validateMetadata(req api.SetRepositoryMetadataRequest) *writeFault {
+	if req.Name == nil && req.DefaultBranch == nil && req.GitRemoteURL == nil && req.MirrorURL == nil {
+		return faultValidation("at least one of name, default_branch, git_remote_url, mirror_url is required")
+	}
+	if req.MirrorURL != nil {
+		if fault := s.validMirrorURL(strings.TrimSpace(*req.MirrorURL)); fault != nil {
+			return fault
+		}
 	}
 	if req.Name != nil {
 		name := strings.TrimSpace(*req.Name)

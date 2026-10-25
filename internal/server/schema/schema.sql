@@ -13,6 +13,19 @@ CREATE TABLE IF NOT EXISTS meta (
     created_at     TEXT NOT NULL
 );
 
+-- Where the service mirrors this repository's Git (elk-work/ark#125): the
+-- URL `git push --mirror` goes to, and who set it. A table rather than a
+-- column on meta for the reason actor_principals gives below — the schema is
+-- applied with CREATE TABLE IF NOT EXISTS and cannot add a column to a live
+-- database. Single-row like meta. The credential is never here: it is the
+-- service's ARK_MIRROR_CREDENTIAL, and the URL is refused if it carries one.
+CREATE TABLE IF NOT EXISTS git_mirror (
+    id     INTEGER PRIMARY KEY CHECK (id = 1),
+    url    TEXT NOT NULL DEFAULT '',
+    set_by TEXT NOT NULL DEFAULT '',
+    set_at TEXT NOT NULL DEFAULT ''
+);
+
 -- One row per record (tasks, comments, threads, messages, runs, PRs,
 -- reviews, artifacts, actors). data holds the client-side JSON encoding.
 CREATE TABLE IF NOT EXISTS records (

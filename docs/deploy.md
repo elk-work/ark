@@ -77,5 +77,13 @@ Run:
   memory, counted against the instance limit, so the bare repositories under
   `GIT_DATA_DIR` and the Git processes serving them share the container's
   memory. `256Mi` is not enough for a repository of any size.
+- **Allocate CPU outside requests (`--no-cpu-throttling`).** The mirror, the
+  push webhook and the mirror ticker run after a push has been answered.
+
+The mirror and the webhook are configured by four more variables:
+`ARK_MIRROR_INTERVAL` (default `10m`), `ARK_MIRROR_CREDENTIAL` (secret: a
+token or `user:token` for the mirror host), `ARK_PUSH_WEBHOOK_URL` and
+`ARK_PUSH_WEBHOOK_TOKEN` (secret). A mirror is set per repository by an
+operator with `ark repo mirror set <https url>`.
 
 [self-hosting § Git hosting](self-hosting.md#git-hosting) is the reference.

@@ -62,7 +62,7 @@ func newRepoCmd(g *globals) *cobra.Command {
 		Short: "Inspect this repository on the sync service, correct its record, and grant access to it",
 	}
 	cmd.AddCommand(newRepoShowCmd(g), newRepoSetCmd(g), newRepoGrantCmd(g), newRepoGrantsCmd(g),
-		newRepoDanglingCmd(g), newRepoGitURLCmd(g))
+		newRepoDanglingCmd(g), newRepoGitURLCmd(g), newRepoMirrorCmd(g))
 	return cmd
 }
 
@@ -353,6 +353,9 @@ func printRepoMetadata(g *globals, cmd *cobra.Command, meta api.RepositoryMetada
 		p.Line("git remote  (none)")
 	} else {
 		p.Line("git remote  %s", meta.GitRemoteURL)
+	}
+	if meta.Mirror.URL != "" {
+		printMirror(p, meta.Mirror)
 	}
 	p.Line("revision    %d", meta.Revision)
 }

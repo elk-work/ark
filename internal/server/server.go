@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/elk-work/ark/internal/records"
 	"github.com/elk-work/ark/internal/server/repodb"
@@ -68,6 +69,30 @@ type Server struct {
 	// the service hosts no Git and the /git/ routes answer 404. See
 	// smarthttp.go (elk-work/ark#125).
 	GitDataDir string
+	// MirrorInterval is ARK_MIRROR_INTERVAL: how often RunMirrorLoop
+	// mirrors the repositories whose refs moved since their last successful
+	// mirror. Zero means DefaultMirrorInterval. See mirror.go.
+	MirrorInterval time.Duration
+	// MirrorCredential is ARK_MIRROR_CREDENTIAL, a token or user:token the
+	// mirror is pushed with. It reaches Git through a credential helper
+	// scoped to the mirror's host and is never logged or stored.
+	MirrorCredential string
+	// PushWebhookURL and PushWebhookToken are ARK_PUSH_WEBHOOK_URL and
+	// ARK_PUSH_WEBHOOK_TOKEN: where a push event is POSTed, one per updated
+	// ref, and the bearer it carries. Empty URL means no webhook. See
+	// pushhook.go.
+	PushWebhookURL   string
+	PushWebhookToken string
+
+	// Test seams: mirror URLs other than https, the webhook's retry waits,
+	// and its client.
+	allowInsecureMirrors bool
+	webhookBackoff       []time.Duration
+	webhookClient        *http.Client
+
+	mirrorMu sync.Mutex
+	mirrors  map[string]*mirrorState
+	bgWG     sync.WaitGroup
 
 	gitMu      sync.Mutex
 	gitRepos   map[string]*gitRepoState
