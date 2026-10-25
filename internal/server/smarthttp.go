@@ -73,6 +73,15 @@ const receivePackTimeout = time.Hour
 // exactly which updates that push applied.
 type gitRepoState struct {
 	push sync.Mutex
+
+	// The snapshot bookkeeping, in object-storage mode (snapshot.go):
+	// the generation this instance restored or last wrote, and the debounce
+	// for the next write.
+	snapMu      sync.Mutex
+	snapGen     int64
+	snapSeq     uint64
+	snapPending bool
+	snapTimer   *time.Timer
 }
 
 // registerGit adds the smart HTTP routes. Called from Handler, and inert
@@ -486,6 +495,22 @@ func (s *Server) ensureBareRepo(ctx context.Context, repoID, defaultBranch strin
 		return "", err
 	}
 	defer os.RemoveAll(tmp)
+	// In object-storage mode the repository may already exist in the
+	// bucket: restore it rather than starting an empty one. A snapshot that
+	// cannot be read is an error, never a reason to initialize — see
+	// snapshot.go.
+	if s.GitSnapshots != nil {
+		restored, err := s.restoreBareRepo(ctx, repoID, tmp)
+		if err != nil {
+			return "", err
+		}
+		if restored {
+			if err := os.Rename(tmp, dir); err != nil {
+				return "", err
+			}
+			return dir, nil
+		}
+	}
 	if out, err := s.gitCommand(ctx, tmp, "init", "--bare", "--quiet", ".").CombinedOutput(); err != nil {
 		return "", fmt.Errorf("git init --bare: %w: %s", err, strings.TrimSpace(string(out)))
 	}
@@ -500,8 +525,14 @@ func (s *Server) ensureBareRepo(ctx context.Context, repoID, defaultBranch strin
 	// The reflog is Git's own record of every ref change, off by default in
 	// a bare repository. The service is the record of this code; a force push
 	// should leave a trace of what it replaced.
-	if out, err := s.gitCommand(ctx, tmp, "config", "core.logAllRefUpdates", "always").CombinedOutput(); err != nil {
-		return "", fmt.Errorf("git config: %w: %s", err, strings.TrimSpace(string(out)))
+	//
+	// And an automatic gc runs in the foreground, inside the receive-pack
+	// that triggered it and so under the push lock, rather than detached
+	// and rewriting packs while a snapshot reads them.
+	for _, kv := range [][2]string{{"core.logAllRefUpdates", "always"}, {"gc.autoDetach", "false"}} {
+		if out, err := s.gitCommand(ctx, tmp, "config", kv[0], kv[1]).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("git config %s: %w: %s", kv[0], err, strings.TrimSpace(string(out)))
+		}
 	}
 	if err := os.Rename(tmp, dir); err != nil {
 		return "", err

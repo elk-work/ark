@@ -83,6 +83,13 @@ type Server struct {
 	// pushhook.go.
 	PushWebhookURL   string
 	PushWebhookToken string
+	// GitSnapshots keeps a snapshot of each bare repository in object
+	// storage, for a GIT_DATA_DIR that does not outlive the instance (GCS
+	// mode). Nil in local mode, where the directory is the durable copy.
+	// SnapshotDelay is how long pushes must be quiet before one is written;
+	// zero means DefaultSnapshotDelay. See snapshot.go.
+	GitSnapshots  GitSnapshotStore
+	SnapshotDelay time.Duration
 
 	// Test seams: mirror URLs other than https, the webhook's retry waits,
 	// and its client.

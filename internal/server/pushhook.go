@@ -44,12 +44,14 @@ const (
 var defaultWebhookBackoff = []time.Duration{time.Second, 4 * time.Second, 16 * time.Second}
 
 // afterPush is what follows a push that changed something: the webhook and
-// the mirror, each on its own, after the client has its answer.
+// the mirror, each on its own, after the client has its answer, and in
+// object-storage mode a snapshot once pushes go quiet.
 func (s *Server) afterPush(repoID, dir string, who *authenticated, updates []refUpdate) {
 	if s.PushWebhookURL != "" {
 		s.background(func(ctx context.Context) { s.deliverPushEvents(ctx, repoID, dir, who, updates) })
 	}
 	s.background(func(ctx context.Context) { s.mirrorRepo(ctx, repoID) })
+	s.scheduleSnapshot(repoID)
 }
 
 // deliverPushEvents sends one event per updated ref, in ref order.

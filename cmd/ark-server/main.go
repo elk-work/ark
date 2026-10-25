@@ -59,9 +59,11 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"cloud.google.com/go/storage"
@@ -172,6 +174,7 @@ func run() error {
 
 	var backend repodb.Backend
 	var blobs server.BlobStore
+	var gitSnapshots server.GitSnapshotStore
 	if bucket := os.Getenv("GCS_BUCKET"); bucket != "" {
 		client, err := storage.NewClient(ctx)
 		if err != nil {
@@ -179,6 +182,10 @@ func run() error {
 		}
 		backend = &repodb.GCSBackend{Client: client, Bucket: bucket}
 		blobs = &server.GCSBlobStore{Client: client, Bucket: bucket}
+		// GIT_DATA_DIR is scratch in this mode, so each bare repository is
+		// restored from git/<id>.tar.gz on first touch and snapshotted back
+		// after pushes (internal/server/snapshot.go).
+		gitSnapshots = &server.GCSSnapshotStore{Client: client, Bucket: bucket}
 	} else {
 		base := os.Getenv("BASE_URL")
 		if base == "" {
@@ -231,6 +238,7 @@ func run() error {
 		MirrorCredential: os.Getenv("ARK_MIRROR_CREDENTIAL"),
 		PushWebhookURL:   webhookURL,
 		PushWebhookToken: os.Getenv("ARK_PUSH_WEBHOOK_TOKEN"),
+		GitSnapshots:     gitSnapshots,
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -277,5 +285,25 @@ func run() error {
 		"push_webhook_token", s.PushWebhookToken != "")
 	go s.RunMirrorLoop(ctx)
 	log.Info("listening", "port", port)
-	return httpServer.ListenAndServe()
+	// A stop signal drains requests and then writes every Git snapshot
+	// still waiting out its delay, inside the ten seconds Cloud Run allows
+	// between SIGTERM and SIGKILL. Without it, a push in the last half
+	// minute of an instance's life would leave with the instance.
+	stopCtx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, os.Interrupt)
+	defer stop()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- httpServer.ListenAndServe() }()
+	select {
+	case err := <-serveErr:
+		return err
+	case <-stopCtx.Done():
+	}
+	log.Info("stopping")
+	drain, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	_ = httpServer.Shutdown(drain)
+	flush, cancelFlush := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelFlush()
+	s.FlushSnapshots(flush)
+	return nil
 }

@@ -52,7 +52,7 @@ The server takes **no command-line flags**. Everything is environment:
 | `BASE_URL` | local mode | — | Externally reachable base URL of this service. Required when `GCS_BUCKET` is unset; used to build blob URLs. Startup fails without it. |
 | `DATA_DIR` | no | `data` | Local mode only. Repository databases go in `<DATA_DIR>/repos`, blobs in `<DATA_DIR>/blobs`. Relative paths resolve against the working directory. |
 | `CACHE_DIR` | no | `<os temp dir>/ark-repos` | Scratch space for working copies of repository databases and of `auth.db`. Created at startup. Safe to lose — it is a cache, refetched on demand. |
-| `GIT_DATA_DIR` | no | `<DATA_DIR>/git` | Where the bare Git repositories served at `/git/<repository id>` live, one directory per repository (`<id>.git`). Created at startup. Needs the `git` binary on `PATH` (the root `Dockerfile` installs it). In object-storage mode this is scratch space — see [Git hosting](#git-hosting). |
+| `GIT_DATA_DIR` | no | `<DATA_DIR>/git` | Where the bare Git repositories served at `/git/<repository id>` live, one directory per repository (`<id>.git`). Created at startup. Needs the `git` binary on `PATH` (the root `Dockerfile` installs it). In object-storage mode this is a working copy restored from, and snapshotted to, the bucket — see [Git hosting](#git-hosting). |
 | `ARK_MIRROR_INTERVAL` | no | `10m` | How often the service pushes each repository whose refs moved since its last successful mirror to that mirror, as a Go duration of at least `1m`. Pushes also mirror immediately. A bad value fails startup. See [The mirror](#the-mirror). |
 | `ARK_MIRROR_CREDENTIAL` | with a private mirror | — | The token (`ghp_…`, a fine-grained token, an app token), or `user:token`, the mirror is pushed with. Offered only to the mirror URL's own host, through a credential helper; never in a URL, an argument or a log line. Store it as a secret. |
 | `ARK_PUSH_WEBHOOK_URL` | no | — | Where a push event is POSTed after a push lands, one per updated ref. Unset, no webhook. Must be an http(s) URL or startup fails. See [The push webhook](#the-push-webhook). |
@@ -617,9 +617,42 @@ push never creates a registration, only `ark sync` does.
 **Storage.** The bare repository is `GIT_DATA_DIR/<id>.git`, created with
 `git init --bare` the first time anything touches it, with `HEAD` on the
 repository's default branch and `core.logAllRefUpdates=always`, so a force
-push leaves Git's own reflog of what it replaced. In local mode that
-directory is as durable as the disk under `DATA_DIR`, and backing it up is
-copying it.
+push leaves Git's own reflog of what it replaced, and with
+`gc.autoDetach=false`, so an automatic gc runs inside the push that
+triggered it rather than beside a snapshot. In local mode that directory is
+as durable as the disk under `DATA_DIR`, and backing it up is copying it.
+
+**In object-storage mode the bucket holds the durable copy.** A bare
+repository needs a filesystem, and on Cloud Run the filesystem is memory
+that leaves with the instance. So the bucket keeps a snapshot of each one,
+`git/<repository id>.tar.gz`, beside `repos/<repository id>.db`:
+
+- On first touch — the first clone, fetch or push an instance serves for a
+  repository — the instance restores it from the snapshot. A snapshot that
+  cannot be read answers `503`; the service never initializes an empty
+  repository over a read it could not make, because that empty history's
+  first snapshot would bury the real one. No snapshot at all means the
+  repository has never been pushed, and it starts empty.
+- After a push lands, a fresh snapshot is written once that repository's
+  pushes have been quiet for 30 seconds, and on `SIGTERM` for every one
+  still waiting, inside the ten seconds Cloud Run allows before it kills the
+  instance.
+- The write is conditional on the object generation the instance restored
+  or last wrote — the same compare-and-swap the repository databases use. An
+  instance that is not the last to have written a snapshot cannot overwrite
+  it: it logs `the stored git snapshot of <id> changed since this instance
+  read it … NOT stored` and leaves the bucket alone.
+
+**This is the single-instance design** the reference deployment already
+runs ([Concurrency and scaling out](#concurrency-and-scaling-out)). The push
+lock for a repository is a mutex in the one process that holds its working
+copy, and the generation check is the safety net for an overlapping
+restart, not a protocol for two writers: two instances serving pushes to one
+repository would each hold their own copy, and the second to snapshot would
+be refused. If you see that log line, restore the snapshot into a scratch
+directory, fetch the instance's refs into it, and put the result back. A
+deployment that needs more than one instance needs a shared filesystem for
+`GIT_DATA_DIR`, not this.
 
 **Routes.** `GET /git/{repo}/info/refs?service=git-upload-pack|git-receive-pack`,
 `POST /git/{repo}/git-upload-pack`, `POST /git/{repo}/git-receive-pack`.
@@ -637,6 +670,19 @@ ark repo mirror set https://github.com/<owner>/<repo>.git   # an operator, with 
 ark repo mirror show                                         # URL, last success, last error
 ark repo mirror clear
 ```
+
+**Mirror to a repository that exists only to be the backup**: new, empty,
+with no branch protection or rulesets (they refuse the force updates and
+deletions `--mirror` makes, so every mirror would fail) and with Actions
+disabled (a push made with a token runs the push workflows, so every
+mirrored ref would run CI). Not the GitHub repository a team is moving
+*from*: anything still pushed there directly is deleted at the next mirror.
+
+**Moving a repository from GitHub to the service**, push its branches and
+tags, not a `--mirror` clone: `git push ark --all && git push ark --tags`.
+A mirror clone of a GitHub repository carries `refs/pull/*`, which GitHub
+refuses to accept on any repository, so a service holding them could never
+mirror again.
 
 After every push that changes something, and every `ARK_MIRROR_INTERVAL`
 while a repository's refs differ from what its last successful mirror
@@ -977,8 +1023,15 @@ There are two recoveries, and they answer different questions:
 | **Restore from a stored copy** | The repository's `repos/<id>.db` is gone, corrupted, or rolled back, and you still have the storage. Put the object back; the service is whole again. Seconds, and no client involved. **Reach for this first.** |
 | **Replay from a client** | You have no usable copy of the object at all — the bucket is gone, or every copy predates something that matters. Rebuild the service from a client's replica and mutation log, with `ark repair push`. Minutes, and it renumbers. |
 
-**What to back up.** The bucket, or the `DATA_DIR`. That is all the
-server-side state there is. `CACHE_DIR` is disposable.
+**What to back up.** The bucket, or the `DATA_DIR` (which holds
+`GIT_DATA_DIR` by default). That is all the server-side state there is.
+`CACHE_DIR` is disposable.
+
+**Hosted Git is ordinary Git.** In local mode `GIT_DATA_DIR/<id>.git` is a
+bare repository: `git clone` it. In object-storage mode
+`git/<id>.tar.gz` is a tarball of one: extract it and clone that. A
+repository with a mirror has a second, slightly older copy on the mirror
+host.
 
 **Repository databases are ordinary SQLite files.** Copy
 `repos/<repository-id>.db` out of the bucket or directory and open it
@@ -1442,3 +1495,10 @@ If you scale out anyway:
 Sustained multi-writer contention on a single repository is one of the
 documented triggers for revisiting the storage design (RFC-0001,
 "exit triggers"), not something to tune around.
+
+**Hosted Git does not scale out at all in object-storage mode.** Each
+instance restores its own working copy of a bare repository and holds that
+repository's push lock in memory, so two instances would accept pushes into
+two different copies. The snapshot's generation check refuses the second
+copy rather than losing the first, which makes the failure loud, not
+harmless. Keep `max-instances 1` while the service hosts Git.

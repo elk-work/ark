@@ -108,9 +108,16 @@ func (s *Server) mirrorRecordOf(repoID string, st *mirrorState) mirrorRecord {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if !st.loaded {
-		st.loaded = true
-		if b, err := os.ReadFile(filepath.Join(s.bareRepoDir(repoID), mirrorStatusFile)); err == nil {
+		dir := s.bareRepoDir(repoID)
+		if b, err := os.ReadFile(filepath.Join(dir, mirrorStatusFile)); err == nil {
 			_ = json.Unmarshal(b, &st.saved)
+			st.loaded = true
+		} else if _, err := os.Stat(filepath.Join(dir, "HEAD")); err == nil {
+			// The repository is here and has never been mirrored. Until it
+			// is here — in object-storage mode, before the first touch
+			// restores it with its ark-mirror.json — nothing is cached, so
+			// the restored record is the one read.
+			st.loaded = true
 		}
 	}
 	return st.saved
