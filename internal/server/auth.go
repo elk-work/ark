@@ -88,8 +88,15 @@ func (s *Server) authStore() *authStore {
 // authenticate resolves the bearer on a request, in the order that keeps the
 // fleet working: legacy token, then credential, then no.
 func (s *Server) authenticate(r *http.Request) (*authenticated, error) {
-	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	return s.authenticateToken(r.Context(), strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer "))
+}
 
+// authenticateToken is authenticate for a credential that has already been
+// taken out of the request. The Git routes need it: a Git client presents the
+// same `arkc_` credential as the password of HTTP Basic, not as a bearer
+// (smarthttp.go), and it must reach exactly the decision every other route
+// reaches rather than a copy of it.
+func (s *Server) authenticateToken(ctx context.Context, tok string) (*authenticated, error) {
 	// The legacy comparison first, and without reading auth.db. Every client
 	// in the fleet presents this string, and the credential store is a new
 	// single point of contention (RFC-0003 "Costs accepted") — it must not
@@ -112,7 +119,7 @@ func (s *Server) authenticate(r *http.Request) (*authenticated, error) {
 	if !strings.HasPrefix(tok, credentialPrefix) {
 		return nil, errNoCredential
 	}
-	return s.authStore().verify(r.Context(), tok)
+	return s.authStore().verify(ctx, tok)
 }
 
 // auth wraps a handler in authentication. The wire contract it enforces is

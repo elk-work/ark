@@ -34,6 +34,9 @@
 //	                 GCS_BUCKET; default ./data)
 //	BASE_URL         externally reachable base URL (required without GCS_BUCKET)
 //	CACHE_DIR        scratch space for working copies (default os temp dir)
+//	GIT_DATA_DIR     where the bare Git repositories served at /git/<id> live
+//	                 (default <DATA_DIR>/git). Needs the git binary on PATH.
+//	                 elk-work/ark#125, internal/server/smarthttp.go
 //	PORT             listen port (default 8080)
 package main
 
@@ -43,6 +46,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -119,6 +123,23 @@ func run() error {
 		return err
 	}
 
+	// Git hosting needs a filesystem whatever the storage mode: a bare
+	// repository is a directory Git itself reads and writes. In local mode
+	// it sits beside the repository databases under DATA_DIR; in
+	// object-storage mode the same default is scratch space, and
+	// docs/self-hosting.md says what that means for a restart.
+	dataDir := os.Getenv("DATA_DIR")
+	if dataDir == "" {
+		dataDir = "data"
+	}
+	gitDataDir := os.Getenv("GIT_DATA_DIR")
+	if gitDataDir == "" {
+		gitDataDir = filepath.Join(dataDir, "git")
+	}
+	if err := os.MkdirAll(gitDataDir, 0o755); err != nil {
+		return fmt.Errorf("GIT_DATA_DIR %s: %w", gitDataDir, err)
+	}
+
 	var backend repodb.Backend
 	var blobs server.BlobStore
 	if bucket := os.Getenv("GCS_BUCKET"); bucket != "" {
@@ -143,12 +164,8 @@ func run() error {
 			return fmt.Errorf("ARK_SIGNING_KEY is required when GCS_BUCKET and ARK_API_TOKEN are both unset: " +
 				"it signs local-mode /blobs/ URLs, and the service token it used to default to is not configured")
 		}
-		dir := os.Getenv("DATA_DIR")
-		if dir == "" {
-			dir = "data"
-		}
-		backend = &repodb.LocalBackend{Dir: filepath.Join(dir, "repos")}
-		blobs = &server.LocalBlobStore{Dir: filepath.Join(dir, "blobs"), BaseURL: base}
+		backend = &repodb.LocalBackend{Dir: filepath.Join(dataDir, "repos")}
+		blobs = &server.LocalBlobStore{Dir: filepath.Join(dataDir, "blobs"), BaseURL: base}
 	}
 
 	s := &server.Server{
@@ -177,6 +194,7 @@ func run() error {
 		Blobs:        blobs,
 		Log:          log,
 		Version:      ver,
+		GitDataDir:   gitDataDir,
 	}
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -187,6 +205,14 @@ func run() error {
 		Handler:           s.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	// HTTP/2 without TLS (h2c, prior knowledge) beside HTTP/1. Cloud Run caps
+	// an HTTP/1 request body at 32 MiB, which a first `git push` of a real
+	// repository exceeds; deployed with --use-http2 it speaks h2c to the
+	// container and the cap does not apply. Serving both costs nothing where
+	// nothing sends h2c.
+	httpServer.Protocols = new(http.Protocols)
+	httpServer.Protocols.SetHTTP1(true)
+	httpServer.Protocols.SetUnencryptedHTTP2(true)
 	// Once, at startup, and unconditionally — including for `full`. Which
 	// position the dial is in is the first question anybody debugging a
 	// refused push will ask, and the second is whether the revision that was
@@ -203,6 +229,13 @@ func run() error {
 		// deduced from a wall of 401s.
 		log.Warn("no ARK_API_TOKEN, ARK_BOOTSTRAP_TOKEN or identity provider: only credentials already issued can reach this service")
 	}
+	if _, err := exec.LookPath("git"); err != nil {
+		// Not fatal: every other route works without it. But a service whose
+		// /git/ routes all fail should say why once, at startup, rather than
+		// in a 500 per clone.
+		log.Warn("git is not on PATH: the /git/ routes will fail", "error", err)
+	}
+	log.Info("git hosting", "git_data_dir", gitDataDir)
 	log.Info("listening", "port", port)
 	return httpServer.ListenAndServe()
 }

@@ -20,5 +20,7 @@ func NewServer(t *testing.T) *server.Server {
 		Repos: repodb.NewManager(&repodb.LocalBackend{Dir: t.TempDir()}, t.TempDir()),
 		Token: Token,
 		Blobs: &server.LocalBlobStore{Dir: t.TempDir()},
+		// Hosting on, so a CLI test can push to /git/<id> (elk-work/ark#125).
+		GitDataDir: t.TempDir(),
 	}
 }

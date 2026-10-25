@@ -50,7 +50,9 @@ Ark V1 must support:
 Ark V1 does not need:
 
 - a web UI
-- hosted Git repositories
+- hosted Git repositories (V1 did not need them; the sync service has since
+  gained them as a transport over bare repositories — see the note at the
+  end of §11 and elk-work/ark#125)
 - a custom merge engine
 - workspaces
 - projects
@@ -1389,6 +1391,14 @@ Use flags such as:
 --format
 -z
 ```
+
+**Note (elk-work/ark#125).** The sync service can also host a repository's
+Git, serving bare repositories over smart HTTP at `/git/<repository id>`
+with `git upload-pack` / `git receive-pack`, under the same rules as this
+section: the Git CLI, `exec.CommandContext`, explicit working directories.
+Nothing in this section or §12 changes for a repository whose `origin` is
+the service — `ark pr merge` pushes with Git, to whatever `origin` is.
+docs/self-hosting.md § Git hosting is the reference.
 
 ---
 

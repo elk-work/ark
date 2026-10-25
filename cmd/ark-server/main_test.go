@@ -60,7 +60,7 @@ func startupEnv(t *testing.T, env map[string]string) {
 	for _, name := range []string{
 		"ARK_API_TOKEN", "ARK_LEGACY_TOKEN", "ARK_UI", "ARK_SIGNING_KEY", "ARK_BOOTSTRAP_TOKEN",
 		"ARK_IDP_APPROVAL_URL", "ARK_IDP_KEY", "ARK_DEFAULT_GRANT",
-		"GCS_BUCKET", "BASE_URL", "DATA_DIR", "CACHE_DIR", "PORT",
+		"GCS_BUCKET", "BASE_URL", "DATA_DIR", "CACHE_DIR", "PORT", "GIT_DATA_DIR",
 	} {
 		t.Setenv(name, env[name])
 	}

@@ -69,6 +69,9 @@ func newInitCmd(g *globals) *cobra.Command {
 				p.Line("")
 				p.Line("Not yet syncing. Until a remote is set this records to this machine only:")
 				p.Line("  ark remote set <sync-service-url> && ark login && ark sync")
+				// One line, and no action: a Git remote is the checkout's own
+				// configuration, and Ark does not write it (elk-work/ark#125).
+				p.Line("To host this repository's Git on the service too: git remote add ark \"$(ark repo git-url)\"")
 				// Same reasoning, same failure shape: untracked, the skill
 				// exists on this machine only and no other session gets it.
 				// Only worth saying when it did NOT land — a successful commit

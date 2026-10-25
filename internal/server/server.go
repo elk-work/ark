@@ -63,6 +63,18 @@ type Server struct {
 	Log          *slog.Logger
 	Version      string // build stamp, reported unauthenticated on GET /
 
+	// GitDataDir is GIT_DATA_DIR: where the bare Git repositories this
+	// service hosts live, one per Ark repository as <id>.git. Empty means
+	// the service hosts no Git and the /git/ routes answer 404. See
+	// smarthttp.go (elk-work/ark#125).
+	GitDataDir string
+
+	gitMu      sync.Mutex
+	gitRepos   map[string]*gitRepoState
+	gitInitMu  sync.Mutex
+	gitEnvOnce sync.Once
+	gitEnvBase []string
+
 	// auths is the credential store, opened on first use. See authStore.
 	authOnce sync.Once
 	auths    *authStore
@@ -98,6 +110,10 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /", s.handleRoot)
 	s.registerUI(mux)
+	// Git hosting over smart HTTP (elk-work/ark#125): clone, fetch and push
+	// against /git/<repository id>, authenticated with the same credential
+	// and grants as every route below. See smarthttp.go.
+	s.registerGit(mux)
 	// Not /healthz: Google Frontend intercepts that path on run.app
 	// hostnames and serves its own 404 before the request reaches the
 	// container (verified empirically 2026-07-13).

@@ -62,7 +62,7 @@ func newRepoCmd(g *globals) *cobra.Command {
 		Short: "Inspect this repository on the sync service, correct its record, and grant access to it",
 	}
 	cmd.AddCommand(newRepoShowCmd(g), newRepoSetCmd(g), newRepoGrantCmd(g), newRepoGrantsCmd(g),
-		newRepoDanglingCmd(g))
+		newRepoDanglingCmd(g), newRepoGitURLCmd(g))
 	return cmd
 }
 
