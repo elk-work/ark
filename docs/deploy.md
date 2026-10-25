@@ -78,7 +78,12 @@ Run:
   `GIT_DATA_DIR` and the Git processes serving them share the container's
   memory. `256Mi` is not enough for a repository of any size.
 - **Allocate CPU outside requests (`--no-cpu-throttling`).** The mirror, the
-  push webhook and the mirror ticker run after a push has been answered.
+  push webhook, the mirror ticker and the debounced snapshot run after a push
+  has been answered.
+- **Keep `--max-instances 1`.** In object-storage mode each bare repository
+  is restored from `git/<id>.tar.gz` in the bucket on first touch and
+  snapshotted back 30 seconds after the last push and at shutdown; one
+  instance holds each repository's working copy and push lock.
 
 The mirror and the webhook are configured by four more variables:
 `ARK_MIRROR_INTERVAL` (default `10m`), `ARK_MIRROR_CREDENTIAL` (secret: a
