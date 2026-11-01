@@ -349,7 +349,7 @@ func writeRecord(ctx context.Context, tx *sql.Tx, recordType, recordID string, d
 		return api.RecordResponse{}, err
 	}
 	return api.RecordResponse{
-		Record: api.Record{RecordType: recordType, RecordID: recordID,
+		Record: api.Record{RecordType: recordType, RecordID: recordID, ID: recordID,
 			Data: json.RawMessage(data), ServerRevision: rev},
 		ServerRevision: rev,
 	}, nil

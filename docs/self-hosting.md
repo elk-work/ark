@@ -810,11 +810,56 @@ service allocated it:
  "server_revision":412},"server_revision":412}
 ```
 
-Clients receive it on their next `ark sync`.
+Clients receive it on their next `ark sync`. The record also carries
+`id`, equal to `record_id`; read `record_id`.
 
 These routes sit behind the same bearer token as everything else, with
 the same consequence recorded above: anyone holding it can write to every
 repository the service knows about.
+
+### Runs and their artifacts
+
+A program that itself ran something — a deploy, a build check — records
+it with four more routes in the same shape (elk-work/ark#130):
+
+```text
+POST /v1/repositories/{repo}/runs                      open a run (born running)
+POST /v1/repositories/{repo}/runs/{id}/finish          finish it: succeeded, failed or cancelled
+POST /v1/repositories/{repo}/runs/{id}/artifacts       record a stored blob as an artifact of the run
+GET  /v1/repositories/{repo}/runs/{id}/artifacts       list the run's artifacts
+```
+
+```sh
+curl -sS "$ARK_URL/v1/repositories/$REPO/runs" \
+  -H "Authorization: Bearer $ARK_TOKEN" -H 'Content-Type: application/json' \
+  -H "Idempotency-Key: deploy-4821" \
+  -d '{"writer":{"agent_name":"deployer","delegated_by":"<human actor ULID>"},
+       "input_summary":"Deploy at abc123","base_commit_sha":"abc123",
+       "metadata":{"kind":"deploy"}}'
+```
+
+The open takes `agent_name` and `agent_version` (defaulting to the
+writer's), `task_id`, `input_summary`, `branch_name`, `base_commit_sha`,
+and `metadata`, a JSON object stored as the run's `metadata_json`. A
+run's kind is the caller's word, not Ark's, so it goes in `metadata`.
+`Idempotency-Key` is required. The finish takes `status`,
+`result_summary`, `exit_code` and `result_commit_sha`; a key is honoured
+but not required, asking for the status the run already finished in
+returns it unchanged, and a different terminal status is `409
+conflict`, because a run finishes once.
+
+The artifact route takes no bytes. Store them the way every artifact's
+are stored — `POST /v1/artifacts/upload-url`, `PUT` to the URL it
+returns, `POST /v1/artifacts/confirm`, which proves they hash to their
+sha256 — then record them on the run with
+`{"writer":…,"name":"worker.js","media_type":…,"sha256":…}`. A blob this
+repository has not confirmed is `409 conflict`, including one another
+repository stored. The list is a `read` act; fetch an artifact's bytes
+with `POST /v1/artifacts/download-url` and its `storage_key`.
+
+All four check the same grant and the same writer rules as the routes
+above: `write` on `{repo}` for the three writes, and an agent acting
+under a human this credential may act under.
 
 ---
 

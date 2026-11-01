@@ -192,6 +192,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/repositories/{repo}/tasks", s.auth(s.handleCreateTask))
 	mux.HandleFunc("POST /v1/repositories/{repo}/comments", s.auth(s.handleCreateComment))
 	mux.HandleFunc("POST /v1/repositories/{repo}/tasks/{id}/status", s.auth(s.handleTaskStatus))
+	// The run routes, in the same shape (elk-work/ark#130, RFC-0004 exit
+	// trigger 3): a server that ran something records it. See runs.go.
+	mux.HandleFunc("POST /v1/repositories/{repo}/runs", s.auth(s.handleCreateRun))
+	mux.HandleFunc("POST /v1/repositories/{repo}/runs/{id}/finish", s.auth(s.handleFinishRun))
+	mux.HandleFunc("POST /v1/repositories/{repo}/runs/{id}/artifacts", s.auth(s.handleCreateRunArtifact))
+	mux.HandleFunc("GET /v1/repositories/{repo}/runs/{id}/artifacts", s.auth(s.handleListRunArtifacts))
 	mux.HandleFunc("POST /v1/pull-requests/{id}/merge", s.auth(s.handleMerge))
 	mux.HandleFunc("POST /v1/artifacts/upload-url", s.auth(s.handleUploadURL))
 	mux.HandleFunc("POST /v1/artifacts/confirm", s.auth(s.handleConfirmUpload))

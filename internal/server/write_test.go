@@ -676,6 +676,9 @@ func TestWriteRoutesRequireAuth(t *testing.T) {
 		"/v1/repositories/" + repoID + "/tasks",
 		"/v1/repositories/" + repoID + "/comments",
 		"/v1/repositories/" + repoID + "/tasks/01X/status",
+		"/v1/repositories/" + repoID + "/runs",
+		"/v1/repositories/" + repoID + "/runs/01X/finish",
+		"/v1/repositories/" + repoID + "/runs/01X/artifacts",
 	} {
 		req := httptest.NewRequest("POST", path, strings.NewReader(`{}`))
 		rec := httptest.NewRecorder()
@@ -683,6 +686,13 @@ func TestWriteRoutesRequireAuth(t *testing.T) {
 		if rec.Code != 401 {
 			t.Errorf("%s without a token: %d, want 401", path, rec.Code)
 		}
+	}
+	// The one read among them: a run's artifacts.
+	req := httptest.NewRequest("GET", "/v1/repositories/"+repoID+"/runs/01X/artifacts", nil)
+	rec := httptest.NewRecorder()
+	s.Handler().ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Errorf("GET a run's artifacts without a token: %d, want 401", rec.Code)
 	}
 }
 
