@@ -178,8 +178,14 @@ type PullRequest struct {
 // the record's client-side struct (store.Task, store.Comment, ...). Actors
 // travel as records with RecordType "actor".
 type Record struct {
-	RecordType     string          `json:"record_type"`
-	RecordID       string          `json:"record_id"`
+	RecordType string `json:"record_type"`
+	RecordID   string `json:"record_id"`
+	// ID repeats RecordID on what the work-record write routes answer, and is
+	// absent everywhere else (a pull never sets it). It is there because the
+	// first server-side caller of the run routes reads `record.id`
+	// (elk-work/ark#130); RecordID is the field to read, and the two are
+	// always equal when both are present.
+	ID             string          `json:"id,omitempty"`
 	Data           json.RawMessage `json:"data"`
 	ServerRevision int64           `json:"server_revision"`
 }
@@ -301,4 +307,57 @@ type TaskStatusRequest struct {
 type RecordResponse struct {
 	Record         Record `json:"record"`
 	ServerRevision int64  `json:"server_revision"`
+}
+
+// CreateRunRequest is the body of POST /v1/repositories/{repo}/runs: record
+// that something started running. The run is born `running`, the way `ark run
+// start` records one, and is finished by the finish route.
+//
+// There is no `kind`. A run's kind is the caller's vocabulary rather than
+// Ark's (a deploy, a preview, a check), and it travels in Metadata.
+type CreateRunRequest struct {
+	Writer Writer `json:"writer"`
+	// AgentName is what ran; it defaults to Writer.AgentName, and
+	// AgentVersion to Writer.AgentVersion.
+	AgentName     string `json:"agent_name,omitempty"`
+	AgentVersion  string `json:"agent_version,omitempty"`
+	TaskID        string `json:"task_id,omitempty"` // a task ULID in this repository
+	InputSummary  string `json:"input_summary,omitempty"`
+	BranchName    string `json:"branch_name,omitempty"`
+	BaseCommitSHA string `json:"base_commit_sha,omitempty"`
+	// Metadata is a JSON object, stored as the run's metadata_json.
+	Metadata json.RawMessage `json:"metadata,omitempty"`
+}
+
+// FinishRunRequest is the body of
+// POST /v1/repositories/{repo}/runs/{id}/finish.
+type FinishRunRequest struct {
+	Writer          Writer `json:"writer"`
+	Status          string `json:"status"` // succeeded | failed | cancelled
+	ResultSummary   string `json:"result_summary,omitempty"`
+	ExitCode        *int64 `json:"exit_code,omitempty"`
+	ResultCommitSHA string `json:"result_commit_sha,omitempty"`
+}
+
+// CreateRunArtifactRequest is the body of
+// POST /v1/repositories/{repo}/runs/{id}/artifacts. It records a blob that is
+// already stored as an artifact of the run; the bytes travel the way every
+// artifact's do, through /v1/artifacts/upload-url, the signed PUT, and
+// /v1/artifacts/confirm, which is what verifies they hash to SHA256.
+type CreateRunArtifactRequest struct {
+	Writer    Writer `json:"writer"`
+	Name      string `json:"name"`
+	MediaType string `json:"media_type,omitempty"` // defaults to application/octet-stream
+	SHA256    string `json:"sha256"`
+	// SizeBytes is optional; the stored blob's size is authoritative, and a
+	// value that disagrees with it is refused.
+	SizeBytes *int64 `json:"size_bytes,omitempty"`
+}
+
+// RunArtifactsResponse is what GET /v1/repositories/{repo}/runs/{id}/artifacts
+// answers: the run's artifact records, oldest first. Fetch one's bytes with
+// /v1/artifacts/download-url and its storage_key.
+type RunArtifactsResponse struct {
+	Artifacts      []Record `json:"artifacts"`
+	ServerRevision int64    `json:"server_revision"`
 }

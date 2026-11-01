@@ -118,6 +118,9 @@ prompted them.
   runs, threads, reviews, PRs, artifacts, promotions. A run is produced by
   something that ran; a review of a PR the caller cannot read is not a review.
   Each can be added later without changing anything here.
+  **Runs and their artifacts were added on 2026-10-31 (elk-work/ark#130)**,
+  through exit trigger 3 below: the caller is a server that itself ran
+  something — a deploy — and has no copy of Ark to record it in.
 - **Display numbers are never accepted as input.** `{id}` and every
   `parent_id` is a ULID. The service renumbers colliding display numbers
   (§6.2), so a number-keyed write could silently land on a different record —
@@ -548,6 +551,37 @@ rolls it forward.
 3. **A caller needs to write a run, thread, review, or artifact** → add the
    route in the same shape. Artifacts additionally need the blob path
    (`/v1/artifacts/upload-url`), which already exists.
+
+   **Fired 2026-10-31 for runs and artifacts (elk-work/ark#130).** Elk
+   Cloud's deploy records every deploy as a run, and a build check records
+   the bundle it built so the deploy can fetch exactly those bytes. Four
+   routes, in this RFC's shape and under its rules unchanged — `write` on
+   `{repo}`, a writer resolved per (agent name, delegating human),
+   `Idempotency-Key` required on the creates and honoured on the finish:
+
+   ```text
+   POST /v1/repositories/{repo}/runs                  open a run, born running
+   POST /v1/repositories/{repo}/runs/{id}/finish      succeeded | failed | cancelled
+   POST /v1/repositories/{repo}/runs/{id}/artifacts   record a stored blob on the run
+   GET  /v1/repositories/{repo}/runs/{id}/artifacts   the run's artifacts (`read`)
+   ```
+
+   Four choices, each the narrower one. The finish is the status route's
+   shape: repeating how a run ended is an answer with no revision, and ending
+   it differently is `conflict`, because a run finishes once. The artifact
+   route records a blob and never carries one: the bytes take the existing
+   upload-url, PUT and confirm path, which is where the service proves they
+   hash to their key, and the blob must be confirmed in this repository. A
+   run has no `kind` field; a caller's kind (deploy, preview, check) goes in
+   `metadata`, stored as the run's `metadata_json`. And every write route's
+   `record` now also carries `id`, equal to `record_id`, because the first
+   caller reads that name; nothing on the pull path sets it.
+
+   The credential is whatever already holds `write` on the repository. A
+   credential minted per check and scoped to one repository, which the
+   caller's design names, is RFC-0003 Decision 5's `ark token create
+   --agent` and is still not built; when it is, these routes take it
+   unchanged.
 4. **Write volume stops being human-scale** → revisit the exclusive
    per-repository transaction, which serializes every writer of a repository
    by design (RFC-0001). Nothing in this RFC makes that worse; a higher-volume

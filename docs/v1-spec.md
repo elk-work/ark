@@ -1770,7 +1770,15 @@ record without being a copy of Ark — see
 POST /v1/repositories/{id}/tasks
 POST /v1/repositories/{id}/comments
 POST /v1/repositories/{id}/tasks/{id}/status
+POST /v1/repositories/{id}/runs
+POST /v1/repositories/{id}/runs/{id}/finish
+POST /v1/repositories/{id}/runs/{id}/artifacts
+GET  /v1/repositories/{id}/runs/{id}/artifacts
 ```
+
+The four run routes are RFC-0004's exit trigger 3, added for
+elk-work/ark#130: a server that ran something records the run, finishes
+it, and records the artifacts it stored through `/v1/artifacts/`.
 
 Cloud stack:
 
