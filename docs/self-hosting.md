@@ -813,9 +813,8 @@ service allocated it:
 Clients receive it on their next `ark sync`. The record also carries
 `id`, equal to `record_id`; read `record_id`.
 
-These routes sit behind the same bearer token as everything else, with
-the same consequence recorded above: anyone holding it can write to every
-repository the service knows about.
+These routes take the same credentials as everything else and check the
+same grants: `write` on `{repo}`.
 
 ### Runs and their artifacts
 

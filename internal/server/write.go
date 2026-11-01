@@ -594,7 +594,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 			// every client from pulling an empty change set — the same
 			// reasoning applyDelete uses for deleting what is already gone.
 			return unchanged{status: http.StatusOK, resp: api.RecordResponse{
-				Record: api.Record{RecordType: "task", RecordID: taskID,
+				Record: api.Record{RecordType: "task", RecordID: taskID, ID: taskID,
 					Data: json.RawMessage(data), ServerRevision: currentRev},
 				ServerRevision: currentRev,
 			}}
@@ -638,7 +638,7 @@ func (s *Server) handleTaskStatus(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		resp = api.RecordResponse{
-			Record: api.Record{RecordType: "task", RecordID: taskID,
+			Record: api.Record{RecordType: "task", RecordID: taskID, ID: taskID,
 				Data: json.RawMessage(updated), ServerRevision: rev},
 			ServerRevision: rev,
 		}
